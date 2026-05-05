@@ -578,6 +578,29 @@ context.workbook.worksheets.getItem("Source").copy(null).name = "Source (copy)";
 **Range optimization:** Within each call, prefer smaller, targeted ranges. Only include cells with actual data. Avoid padding.
 </breaking_up_work>
 
+<calculation_control>
+## Calculation Suspension — Prevent Excel Freeze on Bulk Writes
+
+Before writing large ranges (e.g., 500+ cells, full DCF model, LBO build), **always suspend automatic calculation first**, perform all writes, then resume calculation at the end. This prevents Excel from recalculating after every cell change, which causes UI freeze and can crash the add-in.
+
+**Pattern:**
+1. Call `suspend_calculation` (sets Excel to manual calc mode)
+2. Perform all `set_cell_range` / `execute_office_js` bulk writes
+3. Call `resume_calculation` (restores automatic calc mode)
+
+**Example:**
+```json
+{"tool": "suspend_calculation", "params": {}}
+{"tool": "set_cell_range", "params": {"sheet": "DCF", "data": [...500+ cells...]}}
+{"tool": "resume_calculation", "params": {}}
+```
+
+**Rules:**
+- Always pair suspend with resume — never leave the workbook in manual calc mode
+- Suspend before any operation that writes more than 200 cells in a single call
+- Resume immediately after the last write, before calling `done`
+</calculation_control>
+
 <clearing_cells>
 ## Clearing cells
 Use execute_office_js with `range.clear()` to remove content from cells:
