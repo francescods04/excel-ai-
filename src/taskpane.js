@@ -1142,9 +1142,15 @@
   }
 
   function showActionsPreview(actions) {
-    actionsList.innerHTML = actions.map(a =>
-      `<li><span class="code-block">${a.type}</span> → ${escapeHtml(formatActionTarget(a))}</li>`
-    ).join('');
+    actionsList.innerHTML = actions.map(a => {
+      let html = `<li><span class="code-block">${a.type}</span> → ${escapeHtml(formatActionTarget(a))}</li>`;
+      if (a._preflight && a._preflight.conflict) {
+        const range = a._preflight.range || 'range';
+        const sample = a._preflight.sample ? ` (contains: ${escapeHtml(JSON.stringify(a._preflight.sample).slice(0, 60))})` : '';
+        html += `<li class="preflight-warning">⚠️ Will overwrite ${escapeHtml(range)}${sample}</li>`;
+      }
+      return html;
+    }).join('');
     actionsPreview.classList.remove('hidden');
   }
 
