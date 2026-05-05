@@ -1361,6 +1361,26 @@ registerTool('web.fetch', async (params) => {
   costHint: 'medium'
 });
 
+/* ---------- Skills ---------- */
+const { readSkill } = require('../skills/loader');
+
+registerTool('skill.read', async (params) => {
+  const data = readSkill(params.name);
+  return { data, actions: [] };
+}, {
+  description: 'Load a skill document on-demand (DCF, LBO, WACC, comps, 3-statement, audit, clean-data). Returns structured instructions and formulas.',
+  inputs: ['name'],
+  schema: {
+    type: 'object',
+    required: ['name'],
+    properties: {
+      name: { type: 'string', description: 'Skill name: dcf-model, wacc-model, lbo-model, comps-analysis, three-statement, clean-data, audit-xls' }
+    }
+  },
+  category: 'read',
+  costHint: 'low'
+});
+
 /* ---------- Execution ---------- */
 
 function dedupKey(toolName, params) {

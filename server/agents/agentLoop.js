@@ -32,6 +32,8 @@ function loadPromptVariant(variant) {
   }
 }
 
+const { getAvailableSkillsForPrompt, readSkill } = require('../skills/loader');
+
 const DEFAULT_PROMPT_VARIANT = process.env.AGENT_PROMPT_VARIANT || 'default';
 let AGENT_SYSTEM_PROMPT = loadPromptVariant(DEFAULT_PROMPT_VARIANT);
 
@@ -53,6 +55,12 @@ INDUSTRY ADD-IN FORMULAS (use when user mentions Bloomberg, CapIQ, Refinitiv):
 - CapIQ CIQ: =CIQ("AAPL","IQ_TOTAL_REV")
 - Refinitiv TR: =TR("AAPL.O","TR.Revenue")
 
+SKILLS RULES:
+- <available_skills> are listed at the top of this prompt.
+- BEFORE starting a complex task (DCF, LBO, comps, 3-statement, audit), call read_skill to load the relevant skill instructions.
+- NEVER load more than 2 skills per task.
+- After loading a skill, follow its structure and formulas exactly.
+
 LIMITATIONS — What You Cannot Do:
 - You cannot execute VBA macros.
 - You cannot download files from the internet to the user's disk.
@@ -63,7 +71,11 @@ AGENT_SYSTEM_PROMPT += AGENT_SYSTEM_PROMPT_SUFFIX;
 
 function getSystemPrompt(variant) {
   const v = variant || DEFAULT_PROMPT_VARIANT;
-  return loadPromptVariant(v) + AGENT_SYSTEM_PROMPT_SUFFIX;
+  const base = loadPromptVariant(v);
+  const skillsBlock = getAvailableSkillsForPrompt();
+  // Prepend available skills to the prompt (lightweight index, not full content)
+  const skillsPrefix = skillsBlock ? skillsBlock + '\n\n' : '';
+  return skillsPrefix + base + AGENT_SYSTEM_PROMPT_SUFFIX;
 }
 
 /* ---------- Tool Definitions (OpenAI function calling schema) ---------- */
@@ -507,6 +519,20 @@ IMPORTANT: DO NOT wrap in Excel.run yourself — it's already wrapped. Use 'cont
           to_id: { type: 'string' },
           summary: { type: 'string' }
         }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_skill',
+      description: 'Load a skill document on-demand before starting a complex task. Use for DCF, LBO, WACC, comps, 3-statement, audit, or data cleaning. Returns structured instructions and formulas.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Skill name: dcf-model, wacc-model, lbo-model, comps-analysis, three-statement, clean-data, audit-xls' }
+        },
+        required: ['name']
       }
     }
   },
@@ -1571,6 +1597,10 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
     case 'openbb_unemployment': {
       const r = await executeTool('openbb.economy.unemployment', params || {}, toolMemory);
       return r.data || r;
+    }
+    case 'read_skill': {
+      const skillData = readSkill(params.name);
+      return skillData;
     }
     default:
       // Fallback: try registry tool (e.g. yahoo.quote, llm.planLayout, etc.)
