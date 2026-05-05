@@ -1,0 +1,57 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Environment variables
+.env
+
+# Certificates and keys
+certs/
+*.pem
+*.key
+*.crt
+*.srl
+
+# Logs
+*.log
+server-openrouter.log
+opencode-serve.log
+openbb-api.log
+
+# OS files
+.DS_Store
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Cache
+.ruff_cache/
+
+# Build output
+dist/
+build/
+
+# Turn files and runtime data
+server/turns/turn-*.json
+server/memory/
+server/metrics/
+
+# Wiki raw PDFs (large binaries)
+docs/wiki/raw/*.pdf
+
+# Virtual environments
+.venv*/
+
+# Test output
+bench/results-*.jsonl
+
+# macOS
+.AppleDouble
+.LSOverride
+
+# Node
+.npm
+.eslintcache

@@ -1,0 +1,1605 @@
+const fs = require('fs');
+const path = require('path');
+const { callLLM, callLLMStreaming, getLLMConfig } = require('../tools/llm');
+const logger = require('../utils/logger');
+const { executeTool, registry } = require('../tools/registry');
+const { validateTaskOutput } = require('./critic');
+const streaming = require('./streaming');
+
+const AGENT_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT_AGENT || 'low';
+const AGENT_THINKING_FIRST_ITER = process.env.AGENT_THINKING_FIRST_ITER !== 'false';
+const AGENT_USE_STREAMING = process.env.AGENT_USE_STREAMING !== 'false';
+
+/* ---------- Load System Prompt from file (variant-aware) ---------- */
+const PROMPT_VARIANTS = {
+  default: 'system-prompt-ib-grade.md',
+  fast: 'system-prompt-ib-fast.md'
+};
+const PROMPT_CACHE = {};
+
+function loadPromptVariant(variant) {
+  if (PROMPT_CACHE[variant]) return PROMPT_CACHE[variant];
+  const file = PROMPT_VARIANTS[variant] || PROMPT_VARIANTS.default;
+  const filePath = path.join(__dirname, '..', '..', 'docs', file);
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    logger.info(`[AgentLoop] Loaded prompt variant "${variant}" from ${filePath} (${content.length} chars)`);
+    PROMPT_CACHE[variant] = content;
+    return content;
+  } catch (e) {
+    logger.warn(`[AgentLoop] Could not load prompt "${variant}": ${e.message}. Falling back to inline.`);
+    return `You are an expert analyst and spreadsheet builder embedded directly in Microsoft Excel.`;
+  }
+}
+
+const DEFAULT_PROMPT_VARIANT = process.env.AGENT_PROMPT_VARIANT || 'default';
+let AGENT_SYSTEM_PROMPT = loadPromptVariant(DEFAULT_PROMPT_VARIANT);
+
+/* Common output format suffix appended to ANY variant */
+const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nOUTPUT FORMAT: Respond with a JSON object containing:\n{\n  "thought": "Your reasoning about what to do next",\n  "tool": "tool_name",\n  "params": { ...tool parameters... }\n}\n\nIMPORTANT: NEVER call more than one tool at a time. Wait for the result before the next step.\n\nWHEN THE TASK IS COMPLETE: You MUST call the tool "done" with a summary. Do NOT keep calling other tools after the work is finished. Calling "done" ends the session.\n\nPYTHON RULES:\n- execute_python is ONLY for mathematical calculations on data provided as variables in the code string.\n- execute_python does NOT have access to the Excel workbook file system. Do NOT use openpyxl, xlrd, or any file paths like /tmp/current.xlsx, /files/input/workbook.xlsx, etc.\n- To read or write Excel, always use the dedicated Excel tools (set_cell_range, create_sheet, execute_excel_formula, etc.).\n\nWEB SEARCH RULES:\n- You may call web_search OR web_fetch AT MOST 2 times total per task.\n- If web search does not return detailed financial figures (revenue, EBITDA, net income, etc.), DO NOT keep searching.\n- Immediately proceed with your knowledge of publicly known figures and BUILD the model.\n- For well-known companies (AAPL, MSFT, GOOGL, TSLA, etc.), use publicly known FY2024/2025 figures from your training data.\n- NEVER get stuck in a search loop. After 2 search attempts, write the model.\n\nASK_USER_QUESTION RULES (CRITICAL):\n- The tool ask_user_question is an EMERGENCY BREAK. Use it ONLY when a truly critical piece of information is missing AND cannot be inferred from the workbook context or the user's original request.\n- NEVER ask the user for confirmation before proceeding (e.g. "Should I proceed?", "Continue?", "Go ahead?"). Just DO the work.\n- NEVER ask which sheet to use — the active sheet is provided in the context. If unspecified, default to the active sheet.\n- NEVER ask for a ticker/company name if the user already mentioned it in the original request.\n- NEVER ask for data that is already visible in the workbook context preview. Reference those cells directly.\n- If you are unsure about a minor assumption, make a reasonable default choice and proceed. Do NOT pause the flow.`;
+
+AGENT_SYSTEM_PROMPT += AGENT_SYSTEM_PROMPT_SUFFIX;
+
+function getSystemPrompt(variant) {
+  const v = variant || DEFAULT_PROMPT_VARIANT;
+  return loadPromptVariant(v) + AGENT_SYSTEM_PROMPT_SUFFIX;
+}
+
+/* ---------- Tool Definitions (OpenAI function calling schema) ---------- */
+
+const TOOL_DEFINITIONS = [
+  {
+    type: 'function',
+    function: {
+      name: 'read_workbook',
+      description: 'Read the current Excel workbook structure and data. Returns the already-captured workbook context.',
+      parameters: {
+        type: 'object',
+        properties: {
+          maxRows: { type: 'number', description: 'Max rows to read per sheet' },
+          maxCols: { type: 'number', description: 'Max cols to read per sheet' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_sheet',
+      description: 'Read a specific Excel sheet',
+      parameters: {
+        type: 'object',
+        properties: {
+          sheet: { type: 'string', description: 'Sheet name' },
+          maxRows: { type: 'number' },
+          maxCols: { type: 'number' }
+        },
+        required: ['sheet']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_cell_ranges',
+      description: 'Read specific cell ranges (values, formulas, formatting) across multiple sheets. Supports batch multi-range read in one call. Use this to read scattered data (e.g., headers and totals) efficiently.\n\nExample:\n{\n  "ranges": [\n    { "sheet": "SINTECO_S_R_L", "target": "A1:H1" },\n    { "sheet": "SINTECO_S_R_L", "target": "A1112:H1114" }\n  ]\n}',
+      parameters: {
+        type: 'object',
+        properties: {
+          ranges: {
+            type: 'array',
+            description: 'Array of range specs to read',
+            items: {
+              type: 'object',
+              properties: {
+                sheet: { type: 'string', description: 'Sheet name' },
+                target: { type: 'string', description: 'Range in A1 notation (e.g. "A1:H100")' },
+                maxRows: { type: 'number', description: 'Max rows per range (default 100)' }
+              },
+              required: ['sheet', 'target']
+            }
+          }
+        },
+        required: ['ranges']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_range_as_csv',
+      description: 'Read a range as CSV string for pandas analysis. Preferred for large data. Set maxRows if you only need a preview (e.g. 100 for inspection). Omit maxRows to read ALL rows in the range.',
+      parameters: {
+        type: 'object',
+        properties: {
+          sheet: { type: 'string', description: 'Sheet name' },
+          target: { type: 'string', description: 'Range (e.g. A1:D100)' },
+          maxRows: { type: 'number', description: 'Max rows to return (omit to read ALL rows)' },
+          includeHeaders: { type: 'boolean', description: 'Include header row' }
+        },
+        required: ['sheet', 'target']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_sheet',
+      description: 'Create a new Excel sheet',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Sheet name' }
+        },
+        required: ['name']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'rename_sheet',
+      description: 'Rename an existing Excel sheet',
+      parameters: {
+        type: 'object',
+        properties: {
+          old_name: { type: 'string', description: 'Current sheet name' },
+          new_name: { type: 'string', description: 'New sheet name' }
+        },
+        required: ['old_name', 'new_name']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_sheet',
+      description: 'Delete an Excel sheet. WARNING: irreversible!',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Sheet name to delete' }
+        },
+        required: ['name']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'duplicate_sheet',
+      description: 'Duplicate an existing sheet (exact copy)',
+      parameters: {
+        type: 'object',
+        properties: {
+          source: { type: 'string', description: 'Source sheet name to copy' },
+          new_name: { type: 'string', description: 'Name for the new sheet (default: "Source (copy)")' }
+        },
+        required: ['source']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'copy_range',
+      description: 'Copy a range from one sheet to another (formulas, values, formatting). Use for cross-sheet data movement.',
+      parameters: {
+        type: 'object',
+        properties: {
+          from_sheet: { type: 'string', description: 'Source sheet name' },
+          from: { type: 'string', description: 'Source range in A1 notation (e.g. "A1:B10")' },
+          to_sheet: { type: 'string', description: 'Destination sheet name' },
+          to: { type: 'string', description: 'Destination range in A1 notation (e.g. "C5")' }
+        },
+        required: ['from_sheet', 'from', 'to_sheet', 'to']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_named_range',
+      description: 'Create a named range/reference that can be used across ALL sheets in formulas. Ideal for shared inputs like "Revenue", "TaxRate", "Beta". Creates Excel defined names.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Name for the reference (e.g. "Revenue", "WACC", "TaxRate")' },
+          refers_to: { type: 'string', description: 'Cell reference (e.g. "=Assumptions!B3")' }
+        },
+        required: ['name', 'refers_to']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_named_ranges',
+      description: 'List all named ranges in the workbook with their references',
+      parameters: {
+        type: 'object',
+        properties: {}
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'set_cell_range',
+      description: `Write cells using a map of A1 addresses to {value, formula, note, cellStyles, borderStyles}. Supports copyToRange for pattern fill. Supports allow_overwrite for overwrite protection. This is the PRIMARY write tool.\n\nExample:\n{\n  "sheet": "Sheet1",\n  "cells": {\n    "A1": { "value": "Revenue" },\n    "B1": { "value": 100, "cellStyles": { "fontColor": "#0000FF" } },\n    "B2": { "formula": "=B1*1.05" }\n  },\n  "copyToRange": "B2:B10",\n  "allow_overwrite": false\n}`,
+      parameters: {
+        type: 'object',
+        properties: {
+          sheet: { type: 'string', description: 'Sheet name' },
+          cells: {
+            type: 'object',
+            description: 'Map of A1 address to cell spec: {value, formula, note, cellStyles: {fontColor, backgroundColor, bold, numberFormat}, borderStyles}',
+            additionalProperties: {
+              type: 'object',
+              properties: {
+                value: {},
+                formula: { type: 'string' },
+                note: { type: 'string' },
+                cellStyles: {
+                  type: 'object',
+                  properties: {
+                    fontColor: { type: 'string' },
+                    backgroundColor: { type: 'string' },
+                    bold: { type: 'boolean' },
+                    numberFormat: { type: 'string' }
+                  }
+                },
+                borderStyles: { type: 'object' }
+              }
+            }
+          },
+          copyToRange: { type: 'string', description: 'Optional: copy the pattern to this range (e.g. "B2:B100")' },
+          allow_overwrite: { type: 'boolean', description: 'If false (default), fails if cells are non-empty. If true, overwrites without confirmation.' }
+        },
+        required: ['sheet', 'cells']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'set_format',
+      description: 'Apply formatting to a cell range (colors, number format, alignment)',
+      parameters: {
+        type: 'object',
+        properties: {
+          sheet: { type: 'string' },
+          target: { type: 'string' },
+          options: {
+            type: 'object',
+            properties: {
+              backgroundColor: { type: 'string' },
+              fontColor: { type: 'string' },
+              bold: { type: 'boolean' },
+              numberFormat: { type: 'string' },
+              horizontalAlignment: { type: 'string' }
+            }
+          }
+        },
+        required: ['sheet', 'target', 'options']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'execute_excel_formula',
+      description: 'Write an Excel formula to a cell for Excel engine evaluation (XIRR, XNPV, etc). Writes the formula, letting Excel compute the result.\n\nExample:\n{\n  "sheet": "Valuation",\n  "target": "B10",\n  "formula": "=XIRR(B2:B9,A2:A9,0.1)"\n}',
+      parameters: {
+        type: 'object',
+        properties: {
+          sheet: { type: 'string', description: 'Sheet name' },
+          target: { type: 'string', description: 'Cell address in A1 notation (e.g. "B10")' },
+          formula: { type: 'string', description: 'Excel formula with = prefix (e.g. "=SUM(A1:A10)")' },
+          note: { type: 'string', description: 'Optional cell comment' }
+        },
+        required: ['sheet', 'target', 'formula']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'add_chart',
+      description: 'Add a native Excel chart',
+      parameters: {
+        type: 'object',
+        properties: {
+          sheet: { type: 'string' },
+          target: { type: 'string', description: 'Data range for the chart' },
+          options: {
+            type: 'object',
+            properties: {
+              chartType: { type: 'string', enum: ['ColumnClustered', 'Line', 'Pie', 'Scatter', 'BarClustered'] },
+              title: { type: 'string' }
+            }
+          }
+        },
+        required: ['sheet', 'target', 'options']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'execute_python',
+      description: 'Execute Python code for complex calculations. Return result as string or JSON.',
+      parameters: {
+        type: 'object',
+        properties: {
+          code: { type: 'string', description: 'Python code to execute' }
+        },
+        required: ['code']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'ask_user_question',
+      description: `Ask the user a question with tappable options. Use for clarifications, plan approval, or mid-task check-ins.\n\nExample:\n{\n  "questions": [\n    {\n      "header": "Proceed?",\n      "question": "Should I proceed with the DCF build?",\n      "options": [\n        { "label": "Yes", "description": "Build the DCF" },\n        { "label": "No", "description": "Cancel" }\n      ]\n    }\n  ]\n}`,
+      parameters: {
+        type: 'object',
+        properties: {
+          questions: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                header: { type: 'string' },
+                question: { type: 'string' },
+                options: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      label: { type: 'string' },
+                      description: { type: 'string' }
+                    }
+                  }
+                },
+                multiSelect: { type: 'boolean' }
+              }
+            }
+          }
+        },
+        required: ['questions']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'todo_write',
+      description: `Update the task list shown to the user. Use to track progress on multi-phase tasks.\n\nExample:\n{\n  "todos": [\n    { "content": "Set up assumptions", "status": "completed", "priority": "high" },\n    { "content": "Build revenue projections", "status": "in_progress", "priority": "high" }\n  ]\n}`,
+      parameters: {
+        type: 'object',
+        properties: {
+          todos: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                content: { type: 'string' },
+                status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'cancelled'] },
+                priority: { type: 'string', enum: ['high', 'medium', 'low'] }
+              }
+            }
+          }
+        },
+        required: ['todos']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: 'Search finance-specific sources (Yahoo Finance quote, SEC EDGAR filings) for company/ticker data. Use ONLY for official investor relations pages, SEC filings, or press releases. Cite the source in cell comments.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search query or ticker' },
+          ticker: { type: 'string', description: 'Optional explicit ticker symbol' }
+        },
+        required: ['query']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'web_fetch',
+      description: 'Fetch a web page URL and extract readable text. Use ONLY for official investor relations pages, SEC EDGAR filings, or company press releases.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'URL to fetch' }
+        },
+        required: ['url']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'execute_office_js',
+      description: `Execute arbitrary Office.js JavaScript code on the Excel client. Use for complex formatting, sheet operations, charts, pivot tables, conditional formatting, data validation — anything not covered by structured tools.
+
+PREFERRED over execute_python for ALL Excel-specific operations.
+
+KEY PATTERNS:
+
+1. BULK FORMULA WRITES (suspend calculation):
+\`\`\`javascript
+context.application.load("calculationMode");
+await context.sync();
+const savedMode = context.application.calculationMode;
+context.application.calculationMode = Excel.CalculationMode.manual;
+await context.sync();
+try {
+  // ... write all formulas ...
+} finally {
+  context.application.calculationMode = savedMode;
+  await context.sync();
+}
+\`\`\`
+
+2. FILL FORMULAS (autoFill):
+\`\`\`javascript
+sheet.getRange("C2").formulas = [["=A2+B2"]];
+sheet.getRange("C2").autoFill("C2:C100", Excel.AutoFillType.fillDefault);
+await context.sync();
+\`\`\`
+
+3. MERGE CELLS + FORMAT TITLE:
+\`\`\`javascript
+sheet.getRange("A1:H1").merge(false);
+sheet.getRange("A1").format.fill.color = "#0D1F2D";
+sheet.getRange("A1").format.font.color = "#FFFFFF";
+sheet.getRange("A1").format.font.bold = true;
+\`\`\`
+
+4. COLUMN WIDTHS / FREEZE:
+\`\`\`javascript
+sheet.getRange("A:A").format.columnWidth = 230;
+sheet.getRange("B:B").format.columnWidth = 85;
+sheet.freezePanes.freezeAt("B2");
+\`\`\`
+
+5. BORDERS / ROW HEIGHTS / NUMBER FORMATS:
+\`\`\`javascript
+const r = sheet.getRange("A10:D10");
+r.format.borders.getItem("EdgeBottom").style = "Continuous";
+r.format.borders.getItem("EdgeBottom").color = "#B0C8D5";
+r.format.rowHeight = 22;
+r.numberFormat = [["0.0%"]];\`\`\`
+
+6. CLEAR CELLS:
+\`\`\`javascript
+sheet.getRange("C2:C3").clear(Excel.ClearApplyTo.contents);
+\`\`\`
+
+7. VERIFY FORMULAS AFTER WRITE:
+\`\`\`javascript
+const check = sheet.getRange("B10:B20");
+check.load(["values", "formulas"]);
+await context.sync();
+const errors = check.values.flat().filter(v => typeof v === "string" && v.startsWith("#"));
+\`\`\`
+
+IMPORTANT: DO NOT wrap in Excel.run yourself — it's already wrapped. Use 'context' parameter. Always load() before read, sync() before use. Return JSON-serializable results.`,
+      parameters: {
+        type: 'object',
+        properties: {
+          code: { type: 'string', description: 'Office.js JavaScript code. Receives "context" param (Excel.RequestContext). DO NOT wrap in Excel.run().' }
+        },
+        required: ['code']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'context_snip',
+      description: 'Mark a range of transcript for deferred compression. Use silently to manage context window.',
+      parameters: {
+        type: 'object',
+        properties: {
+          from_id: { type: 'string' },
+          to_id: { type: 'string' },
+          summary: { type: 'string' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'done',
+      description: 'Signal that the task is complete',
+      parameters: {
+        type: 'object',
+        properties: {
+          summary: { type: 'string', description: 'Summary of what was accomplished' }
+        }
+      }
+    }
+  },
+  /* ---------- OpenBB Financial Data Tools ---------- */
+  {
+    type: 'function',
+    function: {
+      name: 'openbb_equity_profile',
+      description: 'Company profile: description, sector, market cap, employees, beta, dividend yield. Provider: yfinance (free)',
+      parameters: {
+        type: 'object', required: ['symbol'],
+        properties: { symbol: { type: 'string', description: 'Ticker symbol (e.g. AAPL)' } }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'openbb_equity_metrics',
+      description: 'Key financial metrics: PE ratio, forward PE, PEG, EV/EBITDA, ROE, ROA, margins, growth rates, debt/equity. Provider: yfinance (free)',
+      parameters: {
+        type: 'object', required: ['symbol'],
+        properties: { symbol: { type: 'string' } }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'openbb_equity_balance',
+      description: 'Balance sheet: cash, receivables, inventory, total assets, total debt, shareholders equity. Period: annual|quarter. Provider: yfinance (free)',
+      parameters: {
+        type: 'object', required: ['symbol'],
+        properties: {
+          symbol: { type: 'string' },
+          period: { type: 'string', enum: ['annual', 'quarter'] }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'openbb_equity_income',
+      description: 'Income statement: revenue, COGS, gross profit, EBITDA, EBIT, net income, EPS. Period: annual|quarter. Provider: yfinance (free)',
+      parameters: {
+        type: 'object', required: ['symbol'],
+        properties: {
+          symbol: { type: 'string' },
+          period: { type: 'string', enum: ['annual', 'quarter'] }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'openbb_equity_cashflow',
+      description: 'Cash flow statement: operating/investing/financing cash flows, free cash flow, CapEx. Provider: yfinance (free)',
+      parameters: {
+        type: 'object', required: ['symbol'],
+        properties: {
+          symbol: { type: 'string' },
+          period: { type: 'string', enum: ['annual', 'quarter'] }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'openbb_treasury_rates',
+      description: 'Current US Treasury rates for all maturities (1mo-30y). Use for risk-free rate in DCF/WACC. Provider: federal_reserve (free)',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'openbb_fed_rate',
+      description: 'Effective Federal Funds Rate (Fed policy rate). Provider: federal_reserve (free)',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'openbb_cpi',
+      description: 'Consumer Price Index (inflation) by country. Country: united_states, italy, etc. Provider: oecd (free). ALWAYS use this instead of guessing inflation.',
+      parameters: {
+        type: 'object',
+        properties: { country: { type: 'string', description: 'Country name (e.g. united_states, italy)' } }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'openbb_gdp',
+      description: 'Real GDP growth by country. Provider: oecd (free)',
+      parameters: {
+        type: 'object',
+        properties: { country: { type: 'string' } }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'openbb_unemployment',
+      description: 'Unemployment rate by country. Provider: oecd (free)',
+      parameters: {
+        type: 'object',
+        properties: { country: { type: 'string' } }
+      }
+    }
+  }
+];
+
+/* ---------- Context helpers ---------- */
+
+function truncateMatrix(value, maxRows, maxCols) {
+  if (!Array.isArray(value)) return value;
+  return value.slice(0, maxRows).map(row =>
+    Array.isArray(row) ? row.slice(0, maxCols) : row
+  );
+}
+
+function compactAgentContext(context) {
+  if (!context || typeof context !== 'object') return {};
+  const out = {
+    activeSheet: context.activeSheet,
+    workbookSheets: Array.isArray(context.workbookSheets) ? context.workbookSheets.slice(0, 24) : [],
+    sheetCount: context.sheetCount || (Array.isArray(context.workbookSheets) ? context.workbookSheets.length : 0),
+    selectedRange: context.selectedRange,
+    selectionSize: context.selectionSize,
+    selectedPreview: truncateMatrix(context.selectedValues, 12, 8),
+    selectedFormulasPreview: truncateMatrix(context.selectedFormulas, 12, 8),
+    sheets: {}
+  };
+  const all = context.allSheetsData || {};
+  for (const [name, info] of Object.entries(all)) {
+    if (!info) continue;
+    const isActive = info.isActive || name === context.activeSheet;
+    out.sheets[name] = {
+      isActive: !!isActive,
+      usedRange: info.usedRange || null,
+      rowCount: info.rowCount || 0,
+      columnCount: info.columnCount || 0,
+      truncated: !!info.truncated,
+      empty: !!info.empty,
+      omitted: !!info.omitted,
+      preview: truncateMatrix(info.preview, isActive ? 30 : 10, isActive ? 14 : 8),
+      formulas: isActive ? truncateMatrix(info.formulas, 30, 14) : undefined
+    };
+  }
+  return out;
+}
+
+function buildWorkbookOverview(context) {
+  if (!context || typeof context !== 'object') return 'Workbook overview: (no context)';
+  const lines = [];
+  lines.push(`Workbook overview — active sheet: "${context.activeSheet || '?'}", total sheets: ${context.sheetCount || (context.workbookSheets || []).length}`);
+  const all = context.allSheetsData || {};
+  for (const [name, info] of Object.entries(all)) {
+    if (!info) continue;
+    const tag = info.isActive || name === context.activeSheet ? ' [ACTIVE]' : '';
+    if (info.empty) {
+      lines.push(`  • "${name}"${tag}: empty`);
+    } else if (info.omitted) {
+      lines.push(`  • "${name}"${tag}: ${info.usedRange || '?'} (${info.rowCount}×${info.columnCount}) — preview omitted (sheet limit)`);
+    } else {
+      lines.push(`  • "${name}"${tag}: ${info.usedRange || '?'} (${info.rowCount}×${info.columnCount})${info.truncated ? ' [truncated]' : ''}`);
+    }
+  }
+  if (lines.length === 1 && Array.isArray(context.workbookSheets)) {
+    lines.push('  ' + context.workbookSheets.join(', '));
+  }
+  return lines.join('\n');
+}
+
+/* ---------- Auto-answer trivial questions to protect flow ---------- */
+
+function normalizeQuestion(q) {
+  if (typeof q === 'string') return { text: q, options: [] };
+  if (!q || typeof q !== 'object') return { text: '', options: [] };
+  const text = String(q.header || q.question || q.text || q.prompt || q.title || '');
+  const opts = Array.isArray(q.options) ? q.options : [];
+  return { text: text.toLowerCase(), options: opts };
+}
+
+function tryAutoAnswer(questionData, context, objective) {
+  if (!Array.isArray(questionData)) questionData = [questionData];
+  const answers = [];
+  let autoAnsweredCount = 0;
+
+  for (const rawQ of questionData) {
+    const q = normalizeQuestion(rawQ);
+    const text = q.text;
+    let answer = null;
+
+    // 1. Generic confirmations / proceed questions → always Yes
+    const confirmationPatterns = [
+      /should i proceed/, /shall i proceed/, /do you want me to proceed/, /want me to continue/,
+      /should i continue/, /go ahead/, /proceed\?/, /continue\?/, /ok to proceed/,
+      /vuoi che proceda/, /procedo\?/, /devo procedere/, /continuo\?/, /vado avanti/
+    ];
+    if (confirmationPatterns.some(p => p.test(text))) {
+      answer = 'Yes';
+    }
+
+    // 2. Which sheet → default to active sheet
+    if (!answer && /(which|what) sheet/.test(text)) {
+      answer = context?.activeSheet || 'Active sheet';
+    }
+    if (!answer && /(quale|in quale) foglio/.test(text)) {
+      answer = context?.activeSheet || 'Foglio attivo';
+    }
+
+    // 3. Ticker / company name already in objective
+    if (!answer && /(ticker|symbol|company name|nome dell.azienda|titolo)/.test(text)) {
+      const knownTickers = ['AAPL','MSFT','GOOGL','GOOG','TSLA','AMZN','META','NVDA','NFLX','JPM','V','WMT','DIS','BA','GE','IBM','INTC','AMD','CRM','UBER'];
+      const objUpper = String(objective || '').toUpperCase();
+      const matched = knownTickers.find(t => objUpper.includes(t));
+      if (matched) answer = matched;
+    }
+
+    // 4. "What is the revenue / EBITDA / etc." when data is in context
+    if (!answer && /(what is|what are|qual è|quali sono)/.test(text)) {
+      const hasWorkbookData = context && (
+        context.selectedValues?.length > 0 ||
+        context.usedRangeData?.length > 0 ||
+        Object.keys(context.allSheetsData || {}).length > 0
+      );
+      if (hasWorkbookData) {
+        answer = 'Use the data already present in the workbook';
+      }
+    }
+
+    // 5. Empty / malformed questions
+    if (!answer && text.trim().length === 0) {
+      answer = 'Please proceed with the available information.';
+    }
+
+    if (answer) {
+      answers.push(answer);
+      autoAnsweredCount++;
+    } else {
+      // Cannot auto-answer this one → abort whole auto-answer and let UI handle it
+      return null;
+    }
+  }
+
+  if (autoAnsweredCount === 0) return null;
+  return answers.length === 1 ? answers[0] : answers.join(' | ');
+}
+
+/* ---------- Agent Loop ---------- */
+
+async function runAgentLoop(objective, context, options = {}) {
+  const maxIterations = options.maxIterations || Number(process.env.AGENT_MAX_ITER) || 200;
+  const maxConsecutiveErrors = options.maxConsecutiveErrors || 4;
+  const timeoutMs = options.timeoutMs || 180000;
+  const fallbackTimeoutMs = options.fallbackTimeoutMs || 90000;
+  const onEvent = options.onEvent || (() => {});
+
+  const FATAL_ERROR_PATTERNS = [
+    /no api key configured/i,
+    /invalid api key/i,
+    /authentication failed/i,
+    /unauthorized/i,
+    /402/i,
+    /payment required/i,
+    /credit exhausted/i,
+    /insufficient quota/i,
+    /rate limit/i
+  ];
+
+  // Build enhanced user prompt with known-data hints for common companies
+  const compactCtx = compactAgentContext(context);
+  const overview = buildWorkbookOverview(context);
+  let userPrompt = `Goal: ${objective}\n\n${overview}\n\nWorkbook context (compact JSON):\n${JSON.stringify(compactCtx, null, 2)}\n\nProceed step by step. When writing, ALWAYS pass an explicit "sheet" parameter — the active sheet at task start may NOT be where the user wants the data.`;
+  const lowerObjective = objective.toLowerCase();
+  if (lowerObjective.includes('apple') || lowerObjective.includes('aapl')) {
+    userPrompt += `\n\nHINT — Use these publicly known Apple FY2024 figures (build the model with these; no need to search):\n- Revenue: ~$394B\n- Net Income: ~$97B\n- EBITDA: ~$120B\n- CapEx: ~$10B\n- D&A: ~$12B\n- Shares Outstanding: ~15.5B\n- Cash & Equivalents: ~$70B\n- Total Debt: ~$110B\n- Tax Rate: ~16%\nStart immediately with todo_write to plan the DCF, then build it.`;
+  }
+
+  const promptVariant = options.promptVariant || DEFAULT_PROMPT_VARIANT;
+  const systemPromptForRun = getSystemPrompt(promptVariant);
+  logger.info(`[AgentLoop] Using prompt variant "${promptVariant}" (${systemPromptForRun.length} chars)`);
+  const messages = options.resumeMessages || [
+    { role: 'system', content: systemPromptForRun },
+    { role: 'user', content: userPrompt }
+  ];
+
+  const results = options.resumeResults || [];
+  let iteration = options.resumeIteration || 0;
+  let done = false;
+  const codeLog = options.resumeCodeLog || [];
+
+  logger.info(`[AgentLoop] Starting loop for: ${objective}`);
+  onEvent('agentStarted', { objective, iteration });
+
+  let webSearchCount = 0;
+  const MAX_WEB_SEARCH = 2;
+  let consecutiveErrors = 0;
+  let lastErrorMessage = '';
+  let aborted = false;
+  let abortReason = '';
+
+  while (!done && iteration < maxIterations) {
+    iteration++;
+    logger.info(`[AgentLoop] Iteration ${iteration}/${maxIterations}`);
+    onEvent('iterationStart', { iteration, maxIterations });
+
+    try {
+      // Adaptive thinking: enable only on first iter (planning), disable for tool execution
+      const useThinking = AGENT_THINKING_FIRST_ITER && iteration === 1;
+      const turnId = options.turnId || options.agentId;
+      const callOpts = {
+        messages,
+        timeoutMs,
+        fallbackTimeoutMs,
+        label: `AgentLoop iter ${iteration}`,
+        modelOverride: options.modelOverride,
+        thinkingDisabled: !useThinking,
+        reasoningEffort: useThinking ? (process.env.DEEPSEEK_REASONING_EFFORT || 'high') : AGENT_REASONING_EFFORT
+      };
+
+      let llmResult;
+      if (AGENT_USE_STREAMING && turnId && !useThinking) {
+        // Stream non-thinking responses for live UI feedback (thinking responses are JSON-only at end)
+        const accumulated = await callLLMStreaming({
+          ...callOpts,
+          label: `AgentLoop iter ${iteration} stream`,
+          onChunk: (delta, text, isDone) => {
+            if (delta || isDone) {
+              try { streaming.sendLLMProgress(turnId, text, isDone); } catch (_) {}
+            }
+          }
+        });
+        // Parse the streamed JSON
+        try {
+          llmResult = JSON.parse(accumulated);
+        } catch (e) {
+          llmResult = { raw: accumulated, jsonError: e.message };
+        }
+      } else {
+        llmResult = await callLLM(callOpts);
+      }
+
+      // Detect JSON parse failure from LLM layer (raw payload returned, no parsed fields)
+      const parseFailed = !!(llmResult && llmResult.raw && llmResult.jsonError);
+      if (parseFailed) {
+        logger.warn(`[AgentLoop] iter ${iteration} LLM JSON parse failed: ${llmResult.jsonError}`);
+        onEvent('iterationError', { iteration, error: `LLM JSON parse failed: ${llmResult.jsonError}` });
+        messages.push({
+          role: 'user',
+          content: `Your previous response was not valid JSON (${llmResult.jsonError}). Reply with ONLY a single JSON object {"thought","tool","params"} — no extra text, no trailing characters. Continue the task from where you left off.`
+        });
+        continue;
+      }
+
+      // Extract thought and tool call from LLM response
+      const thought = llmResult.thought || llmResult.reasoning || '';
+      const toolName = llmResult.tool || llmResult.action || '';
+      const params = llmResult.params || llmResult.parameters || llmResult.arguments || {};
+
+      logger.info(`[AgentLoop] Thought: ${thought.slice(0, 120)}`);
+      logger.info(`[AgentLoop] Tool: ${toolName}`);
+      onEvent('thought', { iteration, thought: thought.slice(0, 300), tool: toolName });
+
+      // Append assistant message
+      messages.push({
+        role: 'assistant',
+        content: JSON.stringify({ thought, tool: toolName, params })
+      });
+
+      // Empty/noop tool — never auto-done. Force LLM to either call `done` or continue.
+      if (!toolName || toolName === '' || toolName === 'noop' || toolName === 'none') {
+        messages.push({
+          role: 'user',
+          content: 'No tool was called. If task is complete, call tool "done" with a summary. Otherwise continue with the next tool.'
+        });
+        continue;
+      }
+
+      // Enforce max web search attempts
+      if (toolName === 'web_search' || toolName === 'web_fetch') {
+        webSearchCount++;
+        if (webSearchCount > MAX_WEB_SEARCH) {
+          const blockMsg = `Maximum web search attempts (${MAX_WEB_SEARCH}) reached. Proceed with your knowledge of publicly known figures and BUILD the model. Do NOT search again.`;
+          logger.info(`[AgentLoop] ${blockMsg}`);
+          messages.push({ role: 'user', content: blockMsg });
+          results.push({ type: 'error', error: blockMsg });
+          onEvent('iterationError', { iteration, error: blockMsg });
+          continue;
+        }
+      }
+
+      // Handle done
+      if (toolName === 'done') {
+        done = true;
+        results.push({ type: 'done', summary: params.summary || 'Task completed' });
+        messages.push({ role: 'user', content: 'Task completed successfully.' });
+        onEvent('agentDone', { summary: params.summary || 'Task completed', iteration });
+        break;
+      }
+
+      // Handle ask_user / ask_user_question — try auto-answer first, then pause only if needed
+      if (toolName === 'ask_user' || toolName === 'ask_user_question') {
+        let questionData = toolName === 'ask_user_question'
+          ? params.questions
+          : params.question;
+
+        // Fallback: LLM might send singular 'question' instead of 'questions'
+        if (!questionData && params.question) {
+          questionData = Array.isArray(params.question) ? params.question : [params.question];
+        }
+
+        // Validate: if still no valid question data, tell LLM to retry
+        if (!questionData || (Array.isArray(questionData) && questionData.length === 0)) {
+          const retryMsg = 'You called ask_user_question with no valid questions. The "questions" parameter must be a non-empty array of objects with "question" (or "header") and "options" fields. Call ask_user_question again with a proper question.';
+          logger.warn(`[AgentLoop] ask_user_question called with empty/invalid questions: ${JSON.stringify(params).slice(0, 200)}`);
+          messages.push({ role: 'user', content: retryMsg });
+          continue;
+        }
+
+        // Try auto-answer to protect flow from trivial questions
+        const autoAnswer = tryAutoAnswer(questionData, context, objective);
+        if (autoAnswer) {
+          logger.info(`[AgentLoop] Auto-answered question: "${JSON.stringify(questionData).slice(0, 120)}" → "${autoAnswer}"`);
+          messages.push({
+            role: 'user',
+            content: `Auto-answered: ${autoAnswer}. Do NOT ask again unless absolutely critical. Proceed with the task.`
+          });
+          results.push({ type: 'ask_user', question: questionData, autoAnswer });
+          onEvent('agentAutoAnswer', { question: questionData, answer: autoAnswer, iteration });
+          continue;
+        }
+
+        results.push({ type: 'ask_user', question: questionData });
+        // SSE payload: only send what the client UI needs (not messages/results/codeLog)
+        logger.info(`[AgentLoop] PAUSING loop — emitting agentPaused to ${typeof onEvent === 'function' ? 'client' : 'no one'}`);
+        const eventPayload = { reason: 'user_input_required', question: questionData, iteration };
+        onEvent('agentPaused', eventPayload);
+        logger.info(`[AgentLoop] agentPaused emitted with question count=${Array.isArray(questionData) ? questionData.length : 1}`);
+        return {
+          status: 'paused',
+          reason: 'user_input_required',
+          question: questionData,
+          messages,
+          results,
+          iteration,
+          codeLog,
+          context
+        };
+      }
+
+      // Execute tool
+      const toolResult = await executeAgentTool(toolName, params, context, options.requestClientTool);
+
+      // Handle todo_write — pass to client as UI update, don't pause
+      if (toolName === 'todo_write') {
+        results.push({ type: 'todo_write', todos: params.todos });
+        onEvent('todoWrite', { todos: params.todos });
+        messages.push({
+          role: 'user',
+          content: `Task list updated: ${params.todos.map(t => `[${t.status}] ${t.content}`).join(', ')}`
+        });
+        continue;
+      }
+
+      // Emit actions for Excel mutations
+      if (toolResult && toolResult.actions && toolResult.actions.length > 0) {
+        onEvent('actions', { tool: toolName, actions: toolResult.actions });
+      }
+
+      // Log code transparency
+      if (toolName === 'execute_python') {
+        codeLog.push({ type: 'python', code: params.code, result: toolResult });
+        onEvent('codeLog', { code: params.code, result: toolResult });
+      }
+
+      results.push({ type: 'tool', tool: toolName, params, result: toolResult });
+
+      // Append tool result
+      messages.push({
+        role: 'user',
+        content: `Tool result for ${toolName}:\n${JSON.stringify(toolResult, null, 2)}`
+      });
+      onEvent('toolResult', { iteration, tool: toolName, result: toolResult });
+
+      // Auto-compact context if too large (LLM should also call context_snip explicitly)
+      const AUTO_COMPACT_LIMIT = Number(process.env.AGENT_AUTO_COMPACT_LIMIT) || 18;
+      if (messages.length > AUTO_COMPACT_LIMIT) {
+        const keepCount = 6;
+        const toCompact = messages.slice(1, messages.length - keepCount);
+        const compacted = toCompact.filter(m => {
+          if (m.role === 'assistant') {
+            try { const p = JSON.parse(m.content); return p.tool && !['done','todo_write','context_snip'].includes(p.tool); }
+            catch (_) { return m.content.length > 50; }
+          }
+          return m.role === 'user' && !m.content.startsWith('Tool result') && !m.content.startsWith('CONVERSATION SUMMARY');
+        });
+        const compactLines = compacted.map(m => {
+          if (m.role === 'assistant') {
+            try { const p = JSON.parse(m.content); return `[${p.tool}] ${(p.thought||'').slice(0,100)}`; }
+            catch (_) { return m.content.slice(0,100); }
+          }
+          return m.content.slice(0,100);
+        });
+        if (compactLines.length > 0) {
+          const summary = 'AUTO-COMPACTED HISTORY (' + toCompact.length + ' msgs):\n' + compactLines.join('\n').slice(0, 3000);
+          const newMsgs = [messages[0]];
+          newMsgs.push({ role: 'user', content: summary + '\n\nContinue from where you left off.' });
+          newMsgs.push(...messages.slice(messages.length - keepCount));
+          messages.length = 0;
+          messages.push(...newMsgs);
+          logger.info(`[AgentLoop] Auto-compacted ${toCompact.length} messages. New length: ${messages.length}`);
+        }
+      }
+
+    } catch (error) {
+      logger.error(`[AgentLoop] Error iteration ${iteration}: ${error.message}`);
+      const isFatal = FATAL_ERROR_PATTERNS.some(p => p.test(error.message || ''));
+      if (isFatal) {
+        aborted = true;
+        abortReason = `fatal_error: ${error.message}`;
+        results.push({ type: 'error', error: error.message, fatal: true });
+        onEvent('iterationError', { iteration, error: error.message, fatal: true });
+        logger.error(`[AgentLoop] Fatal error → abort: ${error.message}`);
+        break;
+      }
+      if (error.message === lastErrorMessage) {
+        consecutiveErrors++;
+      } else {
+        consecutiveErrors = 1;
+        lastErrorMessage = error.message;
+      }
+      results.push({ type: 'error', error: error.message });
+      onEvent('iterationError', { iteration, error: error.message });
+      if (consecutiveErrors >= maxConsecutiveErrors) {
+        aborted = true;
+        abortReason = `repeated_error_x${consecutiveErrors}: ${error.message}`;
+        logger.error(`[AgentLoop] Same error ${consecutiveErrors}x → abort: ${error.message}`);
+        break;
+      }
+      messages.push({
+        role: 'user',
+        content: `Error: ${error.message}. Please try a different approach.`
+      });
+    }
+  }
+
+  logger.info(`[AgentLoop] Completed after ${iteration} iterations${aborted ? ` (aborted: ${abortReason})` : ''}`);
+  const finalStatus = done ? 'completed' : (aborted ? 'aborted' : 'max_iterations');
+  const finalSummary = done
+    ? results.find(r => r.type === 'done')?.summary
+    : (aborted ? abortReason : 'Reached max iterations');
+
+  return {
+    status: finalStatus,
+    results,
+    messages,
+    iteration,
+    codeLog,
+    summary: finalSummary
+  };
+}
+
+/* ---------- Tool Execution Router ---------- */
+
+function normalizeAgentParams(toolName, params) {
+  if (!params || typeof params !== 'object') return params || {};
+  const p = { ...params };
+  // Sheet aliases: LLM may emit sheetName / sheet_name / worksheet
+  if (p.sheet === undefined) {
+    if (p.sheetName !== undefined) p.sheet = p.sheetName;
+    else if (p.sheet_name !== undefined) p.sheet = p.sheet_name;
+    else if (p.worksheet !== undefined) p.sheet = p.worksheet;
+    else if (p.worksheetName !== undefined) p.sheet = p.worksheetName;
+  }
+  // Target aliases: range / address / cell
+  if (p.target === undefined) {
+    if (p.range !== undefined) p.target = p.range;
+    else if (p.address !== undefined) p.target = p.address;
+    else if (p.cell !== undefined) p.target = p.cell;
+  }
+  // copy_range: snake/camel aliases
+  if (toolName === 'copy_range') {
+    if (p.from_sheet === undefined && p.fromSheet !== undefined) p.from_sheet = p.fromSheet;
+    if (p.to_sheet === undefined && p.toSheet !== undefined) p.to_sheet = p.toSheet;
+  }
+  // rename_sheet
+  if (toolName === 'rename_sheet') {
+    if (p.old_name === undefined && p.oldName !== undefined) p.old_name = p.oldName;
+    if (p.new_name === undefined && p.newName !== undefined) p.new_name = p.newName;
+  }
+  // duplicate_sheet
+  if (toolName === 'duplicate_sheet') {
+    if (p.new_name === undefined && p.newName !== undefined) p.new_name = p.newName;
+  }
+  // create_named_range
+  if (toolName === 'create_named_range') {
+    if (p.refers_to === undefined && p.refersTo !== undefined) p.refers_to = p.refersTo;
+  }
+  return p;
+}
+
+async function executeAgentTool(toolName, params, context, requestClientTool) {
+  params = normalizeAgentParams(toolName, params);
+  switch (toolName) {
+    case 'read_workbook': {
+      // Try client round-trip for fresh data if available
+      if (requestClientTool) {
+        try {
+          const data = await requestClientTool('workbook.readWorkbook', { maxRows: params.maxRows || 50, maxCols: params.maxCols || 20 });
+          return {
+            activeSheet: data.activeSheet || context?.activeSheet,
+            workbookSheets: data.workbookSheets || [],
+            selectedRange: data.selectedRange,
+            selectedValues: data.selectedValues,
+            selectedFormulas: data.selectedFormulas,
+            allSheetsData: (data.sheets || []).reduce((acc, s) => {
+              acc[s.name] = { usedRange: s.usedRange, rowCount: s.rowCount, columnCount: s.columnCount, preview: s.preview || [] };
+              return acc;
+            }, {})
+          };
+        } catch (err) {
+          logger.warn(`[AgentLoop] Client read failed for read_workbook: ${err.message}. Falling back to static context.`);
+        }
+      }
+      return {
+        activeSheet: context?.activeSheet,
+        workbookSheets: context?.workbookSheets,
+        selectedRange: context?.selectedRange,
+        selectedValues: context?.selectedValues,
+        usedRangeData: context?.usedRangeData,
+        allSheetsData: context?.allSheetsData
+      };
+    }
+    case 'read_sheet': {
+      if (requestClientTool) {
+        try {
+          const data = await requestClientTool('workbook.readSheet', {
+            sheet: params.sheet,
+            maxRows: params.maxRows || 200,
+            maxCols: params.maxCols || 20
+          });
+          return {
+            sheet: data.sheet || params.sheet,
+            usedRange: data.usedRange,
+            usedRangeData: data.values || [],
+            rowCount: data.rowCount || 0,
+            columnCount: data.columnCount || 0
+          };
+        } catch (err) {
+          logger.warn(`[AgentLoop] Client read failed for read_sheet: ${err.message}. Falling back to static context.`);
+        }
+      }
+      // Fallback: try to get data from the specific sheet if available in allSheetsData
+      if (params.sheet && context?.allSheetsData && context.allSheetsData[params.sheet]) {
+        const sheetData = context.allSheetsData[params.sheet];
+        return {
+          sheet: params.sheet,
+          usedRange: sheetData.usedRange || context?.usedRange,
+          usedRangeData: sheetData.preview || [],
+          rowCount: sheetData.rowCount || 0,
+          columnCount: sheetData.columnCount || 0
+        };
+      }
+      return {
+        sheet: params.sheet || context?.activeSheet,
+        usedRange: context?.usedRange,
+        usedRangeData: context?.usedRangeData,
+        rowCount: context?.totalRows || context?.usedRangeSize?.rows,
+        columnCount: context?.totalColumns || context?.usedRangeSize?.columns
+      };
+    }
+    case 'get_range_as_csv': {
+      // If requestClientTool is available, do a real client-side read
+      // Otherwise fall back to static context (read-only agent, no UI open)
+      if (requestClientTool) {
+        try {
+          const data = await requestClientTool('workbook.readRange', {
+            sheet: params.sheet,
+            target: params.target,
+            maxRows: params.maxRows || 0,  // 0 = no limit
+            format: 'csv'
+          });
+          return {
+            sheet: data.sheet || params.sheet,
+            target: data.target || params.target,
+            csv: data.csv || '',
+            rowCount: data.rowCount || 0,
+            columnCount: data.columnCount || 0,
+            truncated: data.truncated || false
+          };
+        } catch (err) {
+          // Fall back to static context if client read fails
+          logger.warn(`[AgentLoop] Client read failed for get_range_as_csv: ${err.message}. Falling back to static context.`);
+        }
+      }
+      // Fallback: static context — build CSV from values if available
+      let values = context?.selectedValues || context?.usedRangeData || [];
+      let sourceSheet = params.sheet || context?.activeSheet;
+      let targetRange = params.target || context?.selectedRange;
+      let rowCount = values.length;
+      let columnCount = values.length > 0 ? values[0].length : 0;
+
+      // Try to get data from the specific sheet if available
+      if (params.sheet && context?.allSheetsData && context.allSheetsData[params.sheet]) {
+        const sheetData = context.allSheetsData[params.sheet];
+        if (sheetData.preview && sheetData.preview.length > 0) {
+          values = sheetData.preview;
+          sourceSheet = params.sheet;
+          targetRange = params.target || sheetData.usedRange;
+          rowCount = sheetData.preview.length;
+          columnCount = sheetData.preview.length > 0 ? sheetData.preview[0].length : 0;
+        }
+      }
+
+      // Apply maxRows limit if specified
+      const maxRows = Number(params.maxRows) || 500;
+      if (values.length > maxRows) {
+        values = values.slice(0, maxRows);
+        rowCount = maxRows;
+      }
+
+      const escapeCsv = (val) => {
+        if (val == null) return '';
+        const str = String(val);
+        if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+          return '"' + str.replace(/"/g, '""') + '"';
+        }
+        return str;
+      };
+      const csv = values.map(row => row.map(escapeCsv).join(',')).join('\n');
+      return {
+        sheet: sourceSheet,
+        target: targetRange,
+        csv,
+        rowCount,
+        columnCount,
+        truncated: values.length < rowCount,
+        _warning: 'Using stale static context (client read unavailable). Data may be truncated.'
+      };
+    }
+    case 'get_cell_ranges': {
+      const ranges = params.ranges || [];
+      if (ranges.length === 0) {
+        return { ranges: [], _warning: 'No ranges specified' };
+      }
+      // If requestClientTool is available, batch-read all ranges from client
+      if (requestClientTool) {
+        const results = [];
+        for (const rangeSpec of ranges) {
+          try {
+            const data = await requestClientTool('workbook.readRange', {
+              sheet: rangeSpec.sheet,
+              target: rangeSpec.target,
+              maxRows: rangeSpec.maxRows || 100,
+              format: 'snapshot'
+            });
+            results.push({
+              sheet: data.sheet || rangeSpec.sheet,
+              target: data.target || rangeSpec.target,
+              values: data.values || [],
+              formulas: data.formulas || [],
+              rowCount: data.rowCount || 0,
+              columnCount: data.columnCount || 0,
+              error: null
+            });
+          } catch (err) {
+            results.push({
+              sheet: rangeSpec.sheet,
+              target: rangeSpec.target,
+              values: [],
+              formulas: [],
+              rowCount: 0,
+              columnCount: 0,
+              error: err.message
+            });
+          }
+        }
+        return { ranges: results };
+      }
+      // Fallback: extract from static context (allSheetsData or selectedValues)
+      logger.warn('[AgentLoop] get_cell_ranges called without client connection. Using static context.');
+      const fallbackRanges = [];
+      for (const rangeSpec of ranges) {
+        const sheetName = rangeSpec.sheet || context?.activeSheet;
+        let values = [];
+        let formulas = [];
+        let rowCount = 0;
+        let columnCount = 0;
+        let resolvedTarget = rangeSpec.target;
+
+        if (sheetName && context?.allSheetsData && context.allSheetsData[sheetName]) {
+          const sheetData = context.allSheetsData[sheetName];
+          if (sheetData.preview && sheetData.preview.length > 0) {
+            values = sheetData.preview;
+            rowCount = sheetData.preview.length;
+            columnCount = sheetData.preview.length > 0 ? sheetData.preview[0].length : 0;
+            resolvedTarget = rangeSpec.target || sheetData.usedRange;
+          }
+        } else if (context?.selectedValues && (!rangeSpec.sheet || rangeSpec.sheet === context?.activeSheet)) {
+          values = context.selectedValues;
+          rowCount = values.length;
+          columnCount = values.length > 0 ? values[0].length : 0;
+          resolvedTarget = rangeSpec.target || context?.selectedRange;
+        }
+
+        fallbackRanges.push({
+          sheet: sheetName,
+          target: resolvedTarget,
+          values,
+          formulas,
+          rowCount,
+          columnCount,
+          error: null
+        });
+      }
+      return {
+        ranges: fallbackRanges,
+        _warning: 'Using stale static context (client read unavailable). Data may be incomplete.'
+      };
+    }
+    case 'create_sheet': {
+      return {
+        actions: [{ type: 'createSheet', name: params.name }]
+      };
+    }
+    case 'rename_sheet': {
+      return {
+        actions: [{ type: 'renameSheet', oldName: params.old_name, newName: params.new_name }]
+      };
+    }
+    case 'delete_sheet': {
+      return {
+        actions: [{ type: 'deleteSheet', name: params.name }]
+      };
+    }
+    case 'duplicate_sheet': {
+      return {
+        actions: [{ type: 'duplicateSheet', source: params.source, newName: params.new_name || (params.source + ' (copy)') }]
+      };
+    }
+    case 'copy_range': {
+      return {
+        actions: [{ type: 'copyRange', fromSheet: params.from_sheet, toSheet: params.to_sheet, from: params.from, to: params.to }]
+      };
+    }
+    case 'create_named_range': {
+      return {
+        actions: [{ type: 'createNamedRange', name: params.name, refersTo: params.refers_to }]
+      };
+    }
+    case 'list_named_ranges': {
+      if (requestClientTool) {
+        try {
+          const data = await requestClientTool('workbook.listNamedRanges', params || {});
+          return data;
+        } catch (err) {
+          logger.warn(`[AgentLoop] Client read failed for list_named_ranges: ${err.message}`);
+          return { error: err.message, namedRanges: [] };
+        }
+      }
+      // Fallback: try registry (may fail in agent mode without runtime)
+      try {
+        const r = await executeTool('workbook.listNamedRanges', params || {}, {});
+        return r.data || r;
+      } catch (err) {
+        return { error: err.message, namedRanges: [] };
+      }
+    }
+    case 'set_cell_range': {
+      // Normalize copyToRange: accept string or {patternCell, range}
+      let copyToRange = params.copyToRange;
+      if (copyToRange && typeof copyToRange === 'object' && copyToRange.range) {
+        copyToRange = copyToRange.range;
+      }
+      const targetSheet = params.sheet || context?.activeSheet;
+      if (!params.sheet) {
+        logger.warn(`[AgentLoop] set_cell_range called without 'sheet' param; defaulting to activeSheet="${targetSheet}". LLM should specify sheet explicitly.`);
+      }
+      return {
+        actions: [{
+          type: 'setCellRange',
+          sheet: targetSheet,
+          cells: params.cells,
+          copyToRange: copyToRange,
+          allow_overwrite: params.allow_overwrite
+        }]
+      };
+    }
+    case 'set_format': {
+      const targetSheet = params.sheet || context?.activeSheet;
+      if (!params.sheet) logger.warn(`[AgentLoop] set_format without 'sheet'; defaulting to "${targetSheet}".`);
+      return {
+        actions: [{
+          type: 'setCellFormat',
+          sheet: targetSheet,
+          target: params.target,
+          options: params.options
+        }]
+      };
+    }
+    case 'execute_excel_formula': {
+      const targetSheet = params.sheet || context?.activeSheet;
+      if (!params.sheet) logger.warn(`[AgentLoop] execute_excel_formula without 'sheet'; defaulting to "${targetSheet}".`);
+      return {
+        actions: [{
+          type: 'setCellRange',
+          sheet: targetSheet,
+          cells: {
+            [params.target]: {
+              formula: params.formula,
+              ...(params.note ? { note: params.note } : {})
+            }
+          }
+        }]
+      };
+    }
+    case 'add_chart': {
+      const targetSheet = params.sheet || context?.activeSheet;
+      if (!params.sheet) logger.warn(`[AgentLoop] add_chart without 'sheet'; defaulting to "${targetSheet}".`);
+      return {
+        actions: [{
+          type: 'createChart',
+          sheet: targetSheet,
+          target: params.target,
+          options: params.options
+        }]
+      };
+    }
+    case 'execute_python': {
+      return await executePythonCode(params.code);
+    }
+    case 'web_search': {
+      const searchResult = await executeTool('web.search', params || {}, {});
+      return searchResult.data || searchResult;
+    }
+    case 'web_fetch': {
+      const fetchResult = await executeTool('web.fetch', params || {}, {});
+      return fetchResult.data || fetchResult;
+    }
+    case 'ask_user_question': {
+      return {
+        type: 'ask_user_question',
+        questions: params.questions
+      };
+    }
+    case 'todo_write': {
+      return {
+        type: 'todo_write',
+        todos: params.todos
+      };
+    }
+    case 'execute_office_js': {
+      return {
+        actions: [{
+          type: 'runJavaScript',
+          code: params.code
+        }]
+      };
+    }
+    case 'context_snip': {
+      // Trigger real context compaction if conversation is too long
+      const COMPACT_THRESHOLD = 25;
+      if (messages.length > COMPACT_THRESHOLD) {
+        const keepCount = 8; // keep last 8 messages for continuity
+        const toCompact = messages.slice(1, messages.length - keepCount); // skip system prompt, keep recent
+        // Build a summary of compacted messages
+        const summaryParts = [];
+        for (const m of toCompact) {
+          if (m.role === 'assistant') {
+            try {
+              const parsed = JSON.parse(m.content);
+              if (parsed.tool && parsed.tool !== 'done' && parsed.tool !== 'todo_write' && parsed.tool !== 'context_snip') {
+                summaryParts.push(`[${parsed.tool}]: ${(parsed.thought || '').slice(0, 80)}`);
+              }
+            } catch (_) {
+              summaryParts.push(m.content.slice(0, 80));
+            }
+          } else if (m.role === 'user' && m.content.startsWith('Tool result')) {
+            // Skip tool results in summary
+            continue;
+          }
+        }
+        const summary = summaryParts.length > 0
+          ? 'CONVERSATION SUMMARY (compressed ' + toCompact.length + ' messages):\n' + summaryParts.join('\n').slice(0, 2000)
+          : '';
+
+        // Replace old messages: keep system prompt + summary + recent messages
+        const newMessages = [messages[0]]; // system prompt
+        if (summary) {
+          newMessages.push({ role: 'user', content: summary + '\n\nContinue from where you left off.' });
+        }
+        newMessages.push(...messages.slice(messages.length - keepCount));
+        // Mutate the array in-place
+        messages.length = 0;
+        messages.push(...newMessages);
+        logger.info(`[AgentLoop] Context compacted: ${toCompact.length} messages -> summary (${summary.length} chars). New length: ${messages.length}`);
+      }
+      return { ok: true, note: `Context snip applied. Messages: ${messages.length}` };
+    }
+    /* ---------- OpenBB Financial Data ---------- */
+    case 'openbb_equity_profile': {
+      const r = await executeTool('openbb.equity.profile', params || {}, {});
+      return r.data || r;
+    }
+    case 'openbb_equity_metrics': {
+      const r = await executeTool('openbb.equity.fundamentals.metrics', params || {}, {});
+      return r.data || r;
+    }
+    case 'openbb_equity_balance': {
+      const r = await executeTool('openbb.equity.fundamentals.balance', params || {}, {});
+      return r.data || r;
+    }
+    case 'openbb_equity_income': {
+      const r = await executeTool('openbb.equity.fundamentals.income', params || {}, {});
+      return r.data || r;
+    }
+    case 'openbb_equity_cashflow': {
+      const r = await executeTool('openbb.equity.fundamentals.cash', params || {}, {});
+      return r.data || r;
+    }
+    case 'openbb_treasury_rates': {
+      const r = await executeTool('openbb.fixedincome.treasury', params || {}, {});
+      return r.data || r;
+    }
+    case 'openbb_fed_rate': {
+      const r = await executeTool('openbb.fixedincome.effr', params || {}, {});
+      return r.data || r;
+    }
+    case 'openbb_cpi': {
+      const r = await executeTool('openbb.economy.cpi', params || {}, {});
+      return r.data || r;
+    }
+    case 'openbb_gdp': {
+      const r = await executeTool('openbb.economy.gdp_real', params || {}, {});
+      return r.data || r;
+    }
+    case 'openbb_unemployment': {
+      const r = await executeTool('openbb.economy.unemployment', params || {}, {});
+      return r.data || r;
+    }
+    default:
+      // Fallback: try registry tool (e.g. yahoo.quote, llm.planLayout, etc.)
+      if (registry.has(toolName)) {
+        const result = await executeTool(toolName, params || {}, {
+          runtime: { requestClientTool: requestClientTool || (async () => { throw new Error('Client tool not available'); }) }
+        });
+        return result.data || result;
+      }
+      throw new Error(`Unknown tool: ${toolName}`);
+  }
+}
+
+/* ---------- Python Execution ---------- */
+const { executePython } = require('../tools/python');
+
+async function executePythonCode(code) {
+  logger.info(`[Python] Executing code (${code.length} chars)`);
+  try {
+    const result = await executePython(code);
+    return { success: true, result: result.stdout, stderr: result.stderr, code };
+  } catch (e) {
+    return { success: false, error: e.message, code };
+  }
+}
+
+module.exports = { runAgentLoop, TOOL_DEFINITIONS, AGENT_SYSTEM_PROMPT, getSystemPrompt, PROMPT_VARIANTS };
