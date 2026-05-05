@@ -674,13 +674,27 @@ async function callLLM({
   label = 'LLM call',
   cachePrompt = false,
   thinkingDisabled = false,
-  reasoningEffort = null
+  reasoningEffort = null,
+  systemReminder = null
 }) {
   // messages ha priorità se passato
-  const msgs = messages || [
+  let msgs = messages || [
     { role: 'system', content: system },
     { role: 'user', content: userText }
   ];
+
+  // System-reminder injection: append contextual nudge to last user message without rebuilding system prompt
+  if (systemReminder) {
+    const lastUserIdx = msgs.findLastIndex(m => m.role === 'user');
+    if (lastUserIdx >= 0) {
+      const original = msgs[lastUserIdx].content;
+      msgs[lastUserIdx] = {
+        ...msgs[lastUserIdx],
+        content: `<system-reminder>\n${systemReminder}\n</system-reminder>\n\n${original}`
+      };
+      logger.debug(`[LLM] Injected system-reminder (${systemReminder.length} chars) into message ${lastUserIdx}`);
+    }
+  }
 
   const provider = dynamicConfig.provider || AI_PROVIDER;
   if (provider !== 'opencode' && !msgs) {
@@ -914,12 +928,25 @@ async function callLLMStreaming({
   label = 'LLM stream',
   onChunk,
   thinkingDisabled = false,
-  reasoningEffort = null
+  reasoningEffort = null,
+  systemReminder = null
 }) {
-  const msgs = messages || [
+  let msgs = messages || [
     { role: 'system', content: system },
     { role: 'user', content: userText }
   ];
+
+  // System-reminder injection for streaming calls
+  if (systemReminder) {
+    const lastUserIdx = msgs.findLastIndex(m => m.role === 'user');
+    if (lastUserIdx >= 0) {
+      const original = msgs[lastUserIdx].content;
+      msgs[lastUserIdx] = {
+        ...msgs[lastUserIdx],
+        content: `<system-reminder>\n${systemReminder}\n</system-reminder>\n\n${original}`
+      };
+    }
+  }
 
   const provider = dynamicConfig.provider || AI_PROVIDER;
   const primaryModel = resolvePrimaryModel(modelOverride);
