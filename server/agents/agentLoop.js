@@ -1111,6 +1111,9 @@ function normalizeAgentParams(toolName, params) {
 
 async function executeAgentTool(toolName, params, context, requestClientTool) {
   params = normalizeAgentParams(toolName, params);
+  // Build a memory object compatible with registry.executeTool so that
+  // workbook.* tools can access requestClientTool via memory.runtime.
+  const toolMemory = requestClientTool ? { runtime: { requestClientTool } } : {};
   switch (toolName) {
     case 'read_workbook': {
       // Try client round-trip for fresh data if available
@@ -1370,7 +1373,7 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       }
       // Fallback: try registry (may fail in agent mode without runtime)
       try {
-        const r = await executeTool('workbook.listNamedRanges', params || {}, {});
+        const r = await executeTool('workbook.listNamedRanges', params || {}, toolMemory);
         return r.data || r;
       } catch (err) {
         return { error: err.message, namedRanges: [] };
@@ -1440,11 +1443,11 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       return await executePythonCode(params.code);
     }
     case 'web_search': {
-      const searchResult = await executeTool('web.search', params || {}, {});
+      const searchResult = await executeTool('web.search', params || {}, toolMemory);
       return searchResult.data || searchResult;
     }
     case 'web_fetch': {
-      const fetchResult = await executeTool('web.fetch', params || {}, {});
+      const fetchResult = await executeTool('web.fetch', params || {}, toolMemory);
       return fetchResult.data || fetchResult;
     }
     case 'ask_user_question': {
@@ -1509,43 +1512,43 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
     }
     /* ---------- OpenBB Financial Data ---------- */
     case 'openbb_equity_profile': {
-      const r = await executeTool('openbb.equity.profile', params || {}, {});
+      const r = await executeTool('openbb.equity.profile', params || {}, toolMemory);
       return r.data || r;
     }
     case 'openbb_equity_metrics': {
-      const r = await executeTool('openbb.equity.fundamentals.metrics', params || {}, {});
+      const r = await executeTool('openbb.equity.fundamentals.metrics', params || {}, toolMemory);
       return r.data || r;
     }
     case 'openbb_equity_balance': {
-      const r = await executeTool('openbb.equity.fundamentals.balance', params || {}, {});
+      const r = await executeTool('openbb.equity.fundamentals.balance', params || {}, toolMemory);
       return r.data || r;
     }
     case 'openbb_equity_income': {
-      const r = await executeTool('openbb.equity.fundamentals.income', params || {}, {});
+      const r = await executeTool('openbb.equity.fundamentals.income', params || {}, toolMemory);
       return r.data || r;
     }
     case 'openbb_equity_cashflow': {
-      const r = await executeTool('openbb.equity.fundamentals.cash', params || {}, {});
+      const r = await executeTool('openbb.equity.fundamentals.cash', params || {}, toolMemory);
       return r.data || r;
     }
     case 'openbb_treasury_rates': {
-      const r = await executeTool('openbb.fixedincome.treasury', params || {}, {});
+      const r = await executeTool('openbb.fixedincome.treasury', params || {}, toolMemory);
       return r.data || r;
     }
     case 'openbb_fed_rate': {
-      const r = await executeTool('openbb.fixedincome.effr', params || {}, {});
+      const r = await executeTool('openbb.fixedincome.effr', params || {}, toolMemory);
       return r.data || r;
     }
     case 'openbb_cpi': {
-      const r = await executeTool('openbb.economy.cpi', params || {}, {});
+      const r = await executeTool('openbb.economy.cpi', params || {}, toolMemory);
       return r.data || r;
     }
     case 'openbb_gdp': {
-      const r = await executeTool('openbb.economy.gdp_real', params || {}, {});
+      const r = await executeTool('openbb.economy.gdp_real', params || {}, toolMemory);
       return r.data || r;
     }
     case 'openbb_unemployment': {
-      const r = await executeTool('openbb.economy.unemployment', params || {}, {});
+      const r = await executeTool('openbb.economy.unemployment', params || {}, toolMemory);
       return r.data || r;
     }
     default:
