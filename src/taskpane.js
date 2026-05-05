@@ -1597,10 +1597,33 @@
 
   // -------- Action Execution (extended) --------
 
+  function countBatchCells(actions) {
+    let total = 0;
+    for (const action of actions) {
+      if (action.type === 'setCellRange') {
+        if (action.map) total += Object.keys(action.map).length;
+        else if (action.values) total += action.values.length * (action.values[0]?.length || 1);
+        else if (action.formulas) total += action.formulas.length * (action.formulas[0]?.length || 1);
+      } else if (action.type === 'writeRange') {
+        total += (action.values?.length || 0) * (action.values?.[0]?.length || 0);
+      } else if (action.type === 'fillRange') {
+        total += (action.values?.length || 0) * (action.values?.[0]?.length || 0);
+      }
+    }
+    return total;
+  }
+
   async function executeActions(actions) {
     if (!actions || actions.length === 0) return;
+    const cellCount = countBatchCells(actions);
+    const shouldAutoSuspend = cellCount > 200;
 
     return Excel.run(async (context) => {
+      if (shouldAutoSuspend) {
+        context.application.calculationMode = Excel.CalculationMode.manual;
+        console.log(`[Excel] Auto-suspended calculation for ${cellCount} cells`);
+      }
+
       const defaultSheet = context.workbook.worksheets.getActiveWorksheet();
       const sheetCache = new Map();
 
@@ -1688,6 +1711,11 @@
           const where = action.sheet ? ` (sheet=${action.sheet})` : '';
           addLog(`Azione ${action.type} fallita${where}: ${detail}`, 'error');
         }
+      }
+
+      if (shouldAutoSuspend) {
+        context.application.calculationMode = Excel.CalculationMode.automatic;
+        console.log('[Excel] Auto-resumed calculation after bulk write');
       }
 
       await context.sync();
