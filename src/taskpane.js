@@ -1158,6 +1158,50 @@
     actionsPreview.classList.add('hidden');
   }
 
+  function showSettingWidget(action) {
+    const id = 'setting-widget-' + Date.now();
+    const div = document.createElement('div');
+    div.id = id;
+    div.className = 'setting-widget';
+    div.innerHTML = `
+      <div class="setting-widget-inner">
+        <strong>Suggested setting change</strong>
+        <p>${escapeHtml(action.reason)}</p>
+        <div class="setting-row">
+          <span class="setting-label">${escapeHtml(action.setting)}</span>
+          <span class="setting-current">${escapeHtml(action.current_value)}</span>
+          <span class="setting-arrow">→</span>
+          <span class="setting-suggested">${escapeHtml(action.suggested_value)}</span>
+        </div>
+        <div class="setting-buttons">
+          <button class="btn-accept" data-setting="${escapeAttr(action.setting)}" data-value="${escapeAttr(action.suggested_value)}">Accept</button>
+          <button class="btn-dismiss">Dismiss</button>
+        </div>
+      </div>
+    `;
+    messagesContainer.appendChild(div);
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+
+    div.querySelector('.btn-accept').addEventListener('click', async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/settings`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ [action.setting]: action.suggested_value })
+        });
+        if (!res.ok) throw new Error('Failed to save setting');
+        addLog(`Setting updated: ${action.setting} = ${action.suggested_value}`, 'success');
+        div.remove();
+      } catch (e) {
+        addLog(`Failed to update setting: ${e.message}`, 'error');
+      }
+    });
+
+    div.querySelector('.btn-dismiss').addEventListener('click', () => {
+      div.remove();
+    });
+  }
+
   function escapeHtml(text) {
     if (text == null) return '';
     return String(text)
@@ -1707,6 +1751,9 @@
               break;
             case 'todoWrite':
               updateStepsPanel(action.todos);
+              break;
+            case 'updateSetting':
+              showSettingWidget(action);
               break;
             default:
               console.warn('Azione non supportata:', action.type);
