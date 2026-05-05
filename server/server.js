@@ -307,6 +307,48 @@ app.get('/api/skills/:name', (req, res) => {
   }
 });
 
+/* ---------- Settings API ---------- */
+const SETTINGS_PATH = path.join(__dirname, '..', 'docs', 'user-settings.json');
+
+function loadSettings() {
+  try {
+    if (!fs.existsSync(SETTINGS_PATH)) return {};
+    return JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf-8'));
+  } catch (e) {
+    logger.warn('[Settings] Failed to load:', e.message);
+    return {};
+  }
+}
+
+function saveSettings(settings) {
+  try {
+    fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2), 'utf-8');
+  } catch (e) {
+    logger.warn('[Settings] Failed to save:', e.message);
+  }
+}
+
+app.get('/api/settings', (req, res) => {
+  try {
+    res.json(loadSettings());
+  } catch (error) {
+    logger.error('Errore settings/get:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/settings', (req, res) => {
+  try {
+    const settings = loadSettings();
+    Object.assign(settings, req.body);
+    saveSettings(settings);
+    res.json({ ok: true, settings });
+  } catch (error) {
+    logger.error('Errore settings/post:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 /* ---------- Wiki API ---------- */
 const { loadWikiDomain, searchWiki, listWikiDomains, getWikiContextForPrompt } = require('./wiki/loader');
 const { ingestPdf, ingestAllRawPdfs } = require('./wiki/ingest');

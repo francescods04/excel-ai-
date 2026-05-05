@@ -1382,6 +1382,39 @@ registerTool('skill.read', async (params) => {
   costHint: 'low'
 });
 
+registerTool('update_setting', async (params) => {
+  return {
+    data: {
+      setting: params.setting,
+      current_value: params.current_value,
+      suggested_value: params.suggested_value,
+      reason: params.reason
+    },
+    actions: [{
+      type: 'updateSetting',
+      setting: params.setting,
+      current_value: params.current_value,
+      suggested_value: params.suggested_value,
+      reason: params.reason
+    }]
+  };
+}, {
+  description: 'Suggest a setting change to the user via an inline widget. Use when current settings mismatch user intent.',
+  inputs: ['setting', 'current_value', 'suggested_value', 'reason'],
+  schema: {
+    type: 'object',
+    required: ['setting', 'current_value', 'suggested_value', 'reason'],
+    properties: {
+      setting: { type: 'string' },
+      current_value: { type: 'string' },
+      suggested_value: { type: 'string' },
+      reason: { type: 'string' }
+    }
+  },
+  category: 'read',
+  costHint: 'low'
+});
+
 registerTool('suspend_calculation', async () => {
   return {
     data: { status: 'suspended', message: 'Excel calculation mode set to manual. Call resume_calculation when done.' },

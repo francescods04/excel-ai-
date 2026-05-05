@@ -818,6 +818,23 @@ IMPORTANT: DO NOT wrap in Excel.run yourself — it's already wrapped. Use 'cont
         required: ['query']
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_setting',
+      description: 'Suggest a setting change to the user via an inline widget. Use this when you notice a mismatch between user intent and current settings (e.g., wrong currency, wrong date format, wrong decimal places). The user can accept or dismiss the suggestion.',
+      parameters: {
+        type: 'object',
+        properties: {
+          setting: { type: 'string', description: 'Setting key, e.g. "currency", "date_format", "decimal_places", "language"' },
+          current_value: { type: 'string', description: 'Current value of the setting' },
+          suggested_value: { type: 'string', description: 'Suggested new value' },
+          reason: { type: 'string', description: 'Why this change is recommended' }
+        },
+        required: ['setting', 'current_value', 'suggested_value', 'reason']
+      }
+    }
   }
 ];
 
