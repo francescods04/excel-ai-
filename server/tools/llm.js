@@ -59,6 +59,143 @@ const DEFAULT_LLM_FALLBACK_TIMEOUT_MS = Number(process.env.LLM_FALLBACK_TIMEOUT_
 const LLM_JSON_MODE = process.env.LLM_JSON_MODE !== 'false';
 const MAX_TOKENS = Number(process.env.MAX_TOKENS) || 16384;
 
+/* ---------- Cache optimization ---------- */
+const CACHE_BREAKPOINT_ENABLED = process.env.CACHE_BREAKPOINT_ENABLED !== 'false';
+
+/**
+ * Anthropic-style 4-breakpoint cache optimization:
+ * 1. system[0] (identity+workflow) → cache_control: ephemeral
+ * 2. system[1] (skills+context) → cache_control: ephemeral
+ * 3. Last message with tool definitions → cache_control: ephemeral
+ * 4. Last assistant message → cache_control: ephemeral (rolling)
+ *
+ * DeepSeek: no explicit cache_control (cache is automatic on identical prefixes),
+ * but we log prefix sizes to help manual optimization.
+ */
+class CacheMessageBuilder {
+  constructor(provider, model) {
+    this.provider = provider;
+    this.model = model;
+    this.supportsCacheControl = this._supportsCacheControl();
+  }
+
+  _supportsCacheControl() {
+    // OpenRouter with Anthropic models supports cache_control via their API
+    if (this.provider === 'openrouter') return true;
+    // Native Anthropic (future)
+    if (this.provider === 'anthropic') return true;
+    return false;
+  }
+
+  /**
+   * Split a system prompt into identity + skills/context parts.
+   * Identity = first N lines (first paragraph + workflow)
+   * Skills = remaining content
+   */
+  splitSystemPrompt(systemText) {
+    if (!systemText || typeof systemText !== 'string') {
+      return { identity: systemText || '', skills: '' };
+    }
+    const lines = systemText.split('\n');
+    // Find first blank line after ~10 lines (heuristic: identity is compact)
+    let splitIdx = lines.length;
+    let blankCount = 0;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].trim() === '') blankCount++;
+      if (blankCount >= 2 && i > 10) {
+        splitIdx = i;
+        break;
+      }
+    }
+    const identity = lines.slice(0, splitIdx).join('\n').trim();
+    const skills = lines.slice(splitIdx).join('\n').trim();
+    return { identity, skills };
+  }
+
+  /**
+   * Build cache-optimized messages array.
+   * @param {Array} messages - Original messages
+   * @param {string} systemText - Resolved system prompt text
+   * @param {boolean} cachePrompt - Whether to apply cache breakpoints
+   */
+  build(messages, systemText, cachePrompt = false) {
+    if (!CACHE_BREAKPOINT_ENABLED || !cachePrompt || !this.supportsCacheControl) {
+      // DeepSeek path: no cache_control, but log prefix size
+      if (this.provider === 'deepseek' && systemText) {
+        const prefixLen = systemText.length;
+        logger.debug(`[Cache] DeepSeek prefix size: ${prefixLen} chars (${Math.round(prefixLen / 4)} tokens est.)`);
+      }
+      return messages;
+    }
+
+    // OpenRouter / Anthropic path: apply 4-breakpoint pattern
+    const { identity, skills } = this.splitSystemPrompt(systemText);
+    const optimized = [];
+
+    // Breakpoint 1: system[0] identity
+    if (identity) {
+      optimized.push({
+        role: 'system',
+        content: [
+          { type: 'text', text: identity, cache_control: { type: 'ephemeral' } }
+        ]
+      });
+    }
+
+    // Breakpoint 2: system[1] skills/context
+    if (skills) {
+      optimized.push({
+        role: 'system',
+        content: [
+          { type: 'text', text: skills, cache_control: { type: 'ephemeral' } }
+        ]
+      });
+    }
+
+    // Copy remaining messages (user, assistant, tool)
+    let lastToolIdx = -1;
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+      if (msg.role === 'system') continue; // Already handled above
+      optimized.push(msg);
+      if (msg.role === 'tool' || (msg.content && typeof msg.content === 'string' && msg.content.includes('Tool result'))) {
+        lastToolIdx = optimized.length - 1;
+      }
+    }
+
+    // Breakpoint 3: last tool/result message
+    if (lastToolIdx >= 0) {
+      const msg = optimized[lastToolIdx];
+      if (typeof msg.content === 'string') {
+        optimized[lastToolIdx] = {
+          ...msg,
+          content: [
+            { type: 'text', text: msg.content, cache_control: { type: 'ephemeral' } }
+          ]
+        };
+      }
+    }
+
+    // Breakpoint 4: last assistant message (rolling cache)
+    const lastAssistantIdx = optimized.findLastIndex(m => m.role === 'assistant');
+    if (lastAssistantIdx >= 0) {
+      const msg = optimized[lastAssistantIdx];
+      if (typeof msg.content === 'string') {
+        optimized[lastAssistantIdx] = {
+          ...msg,
+          content: [
+            { type: 'text', text: msg.content, cache_control: { type: 'ephemeral' } }
+          ]
+        };
+      }
+    }
+
+    const originalTokens = messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+    logger.info(`[Cache] Built ${optimized.length} messages with 4 breakpoints (original: ${messages.length}, est. tokens: ${Math.round(originalTokens / 4)})`);
+    return optimized;
+  }
+}
+
 function safeTimeoutMs(value, fallback) {
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? numeric : fallback;
@@ -151,19 +288,11 @@ async function callOpenRouterAI(messages, options = {}) {
   logger.info(`[LLM] OpenRouter request → ${model} (timeout ${requestTimeoutMs}ms)`);
   const start = Date.now();
 
+  // Anthropic-style 4-breakpoint cache optimization
   let bodyMessages = messages;
   if (options.cachePrompt && messages && messages.length > 0) {
-    bodyMessages = messages.map((msg) => {
-      if (msg.role === 'system' && typeof msg.content === 'string') {
-        return {
-          ...msg,
-          content: [
-            { type: 'text', text: msg.content, cache_control: { type: 'ephemeral' } }
-          ]
-        };
-      }
-      return msg;
-    });
+    const builder = new CacheMessageBuilder('openrouter', model);
+    bodyMessages = builder.build(messages, options.systemText || '', true);
   }
 
   const body = {
@@ -503,7 +632,7 @@ async function executeProviderCall({ provider, system, messages, userText, model
     return callOpenCodeAI(system, userText, { model, requestTimeoutMs });
   }
   if (provider === 'openrouter') {
-    return callOpenRouterAI(messages, { model, requestTimeoutMs, cachePrompt });
+    return callOpenRouterAI(messages, { model, requestTimeoutMs, cachePrompt, systemText: system });
   }
   if (provider === 'xiaomi') {
     logger.info(`[LLM] Xiaomi direct API → ${model}`);
@@ -516,6 +645,11 @@ async function executeProviderCall({ provider, system, messages, userText, model
     });
   }
   if (provider === 'deepseek') {
+    // Log prefix size for cache optimization even though DeepSeek cache is automatic
+    if (system && CACHE_BREAKPOINT_ENABLED) {
+      const builder = new CacheMessageBuilder('deepseek', model);
+      builder.build(messages, system, false); // false = don't mutate, just log
+    }
     return callDeepSeekAI(messages, {
       model,
       requestTimeoutMs,
