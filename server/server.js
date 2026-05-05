@@ -281,6 +281,32 @@ app.get('/api/metrics/summary', (req, res) => {
   }
 });
 
+/* ---------- Skills API ---------- */
+const { listSkills, readSkill } = require('./skills/loader');
+
+app.get('/api/skills', (req, res) => {
+  try {
+    const skills = listSkills();
+    res.json({ skills, count: skills.length });
+  } catch (error) {
+    logger.error('Errore skills:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/skills/:name', (req, res) => {
+  try {
+    const skill = readSkill(req.params.name);
+    if (skill.error) {
+      return res.status(404).json({ error: skill.error });
+    }
+    res.json(skill);
+  } catch (error) {
+    logger.error('Errore skill/read:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 /* ---------- Wiki API ---------- */
 const { loadWikiDomain, searchWiki, listWikiDomains, getWikiContextForPrompt } = require('./wiki/loader');
 const { ingestPdf, ingestAllRawPdfs } = require('./wiki/ingest');
