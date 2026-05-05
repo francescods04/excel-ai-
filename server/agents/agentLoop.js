@@ -26,6 +26,63 @@ function stripMsgId(content) {
   return String(content).replace(/^\[id:[a-z0-9]{6}\]\s*/, '');
 }
 
+/* ---------- Snipped content store (global, per-process) ---------- */
+const snippedStore = new Map(); // key: "from_id:to_id" -> { summary, content, timestamp }
+const MAX_SNIP_AGE_MS = 30 * 60 * 1000; // 30 min
+
+function cleanupOldSnips() {
+  const now = Date.now();
+  for (const [key, entry] of snippedStore.entries()) {
+    if (now - entry.timestamp > MAX_SNIP_AGE_MS) {
+      snippedStore.delete(key);
+    }
+  }
+}
+
+function snipContext(messages, fromId, toId, summary) {
+  const indices = [];
+  let fromIdx = -1;
+  let toIdx = -1;
+  for (let i = 0; i < messages.length; i++) {
+    const id = extractMsgId(messages[i].content);
+    if (id === fromId) fromIdx = i;
+    if (id === toId) toIdx = i;
+  }
+  if (fromIdx === -1 || toIdx === -1 || fromIdx > toIdx) {
+    return { ok: false, error: `IDs not found or invalid range: ${fromId} -> ${toId}` };
+  }
+  const snippedContent = messages.slice(fromIdx, toIdx + 1)
+    .map(m => `[${m.role}] ${stripMsgId(m.content || '')}`)
+    .join('\n');
+  const key = `${fromId}:${toId}`;
+  snippedStore.set(key, { summary, content: snippedContent, timestamp: Date.now() });
+  // Replace snipped range with placeholder
+  const placeholder = makeUserMessage(`[snipped: ${summary}] (use retrieve_snipped to expand)`);
+  const newMessages = [
+    ...messages.slice(0, fromIdx),
+    placeholder,
+    ...messages.slice(toIdx + 1)
+  ];
+  messages.length = 0;
+  messages.push(...newMessages);
+  return { ok: true, removed: toIdx - fromIdx + 1, key };
+}
+
+function retrieveSnipped(fromId, search, maxChars = 4000) {
+  cleanupOldSnips();
+  const results = [];
+  for (const [key, entry] of snippedStore.entries()) {
+    if (fromId && !key.startsWith(fromId)) continue;
+    if (!search || entry.content.toLowerCase().includes(search.toLowerCase()) || entry.summary.toLowerCase().includes(search.toLowerCase())) {
+      results.push({ key, summary: entry.summary, content: entry.content.slice(0, maxChars) });
+    }
+  }
+  if (results.length === 0) {
+    return { found: false, message: `No snipped content found${search ? ` for "${search}"` : ''}` };
+  }
+  return { found: true, count: results.length, results };
+}
+
 /* ---------- Load System Prompt from file (variant-aware) ---------- */
 const PROMPT_VARIANTS = {
   default: 'system-prompt-ib-grade.md',
@@ -527,13 +584,29 @@ IMPORTANT: DO NOT wrap in Excel.run yourself — it's already wrapped. Use 'cont
     type: 'function',
     function: {
       name: 'context_snip',
-      description: 'Mark a range of transcript for deferred compression. Use silently to manage context window.',
+      description: 'Compress a range of previous messages to save context window. Provide from_id and to_id (message IDs like "abc123" from [id:abc123] tags) and a 1-sentence summary. The compressed content is stored and can be retrieved later with retrieve_snipped.',
       parameters: {
         type: 'object',
         properties: {
-          from_id: { type: 'string' },
-          to_id: { type: 'string' },
-          summary: { type: 'string' }
+          from_id: { type: 'string', description: 'Start message ID (e.g. "abc123")' },
+          to_id: { type: 'string', description: 'End message ID (e.g. "def456")' },
+          summary: { type: 'string', description: 'One-sentence summary of what was snipped' }
+        },
+        required: ['from_id', 'to_id', 'summary']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'retrieve_snipped',
+      description: 'Retrieve previously compressed message content by searching for a term. Use when you need details that were snipped earlier.',
+      parameters: {
+        type: 'object',
+        properties: {
+          from_id: { type: 'string', description: 'Optional: start message ID to narrow search' },
+          search: { type: 'string', description: 'Keyword to search in snipped content' },
+          max_chars: { type: 'number', description: 'Max characters to return (default 4000)' }
         }
       }
     }
@@ -1016,6 +1089,26 @@ async function runAgentLoop(objective, context, options = {}) {
           codeLog,
           context
         };
+      }
+
+      // Handle context_snip — managed directly in the loop (needs access to messages array)
+      if (toolName === 'context_snip') {
+        const snipResult = snipContext(messages, params.from_id, params.to_id, params.summary);
+        logger.info(`[AgentLoop] context_snip: ${snipResult.ok ? 'removed ' + snipResult.removed + ' messages' : 'failed: ' + snipResult.error}`);
+        messages.push(makeUserMessage(`Context snipped: ${params.summary}`));
+        results.push({ type: 'context_snip', ...snipResult });
+        onEvent('contextSnip', snipResult);
+        continue;
+      }
+
+      // Handle retrieve_snipped — lookup in global store
+      if (toolName === 'retrieve_snipped') {
+        const retrieved = retrieveSnipped(params.from_id, params.search, params.max_chars);
+        logger.info(`[AgentLoop] retrieve_snipped: ${retrieved.found ? retrieved.count + ' results' : 'none found'}`);
+        messages.push(makeUserMessage(`Retrieved snipped context: ${JSON.stringify(retrieved.results?.map(r => r.summary) || [])}`));
+        results.push({ type: 'retrieve_snipped', ...retrieved });
+        onEvent('retrieveSnipped', retrieved);
+        continue;
       }
 
       // Execute tool
