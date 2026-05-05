@@ -57,6 +57,7 @@ const DEFAULT_LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS) || 90000;
 const DEFAULT_LLM_FALLBACK_TIMEOUT_MS = Number(process.env.LLM_FALLBACK_TIMEOUT_MS) || 45000;
 
 const LLM_JSON_MODE = process.env.LLM_JSON_MODE !== 'false';
+const MAX_TOKENS = Number(process.env.MAX_TOKENS) || 16384;
 
 function safeTimeoutMs(value, fallback) {
   const numeric = Number(value);
@@ -168,7 +169,8 @@ async function callOpenRouterAI(messages, options = {}) {
   const body = {
     model,
     messages: bodyMessages,
-    temperature: 0.2
+    temperature: 0.2,
+    max_tokens: MAX_TOKENS
   };
   if (jsonMode) body.response_format = { type: 'json_object' };
 
@@ -221,7 +223,8 @@ async function callOpenAICompat(messages, options = {}) {
   const body = {
     model,
     messages: messages,
-    temperature: 0.2
+    temperature: 0.2,
+    max_tokens: MAX_TOKENS
   };
   if (jsonMode) body.response_format = { type: 'json_object' };
   if (options.thinkingDisabled) body.thinking = { type: 'disabled' };
@@ -266,7 +269,8 @@ async function callDeepSeekAI(messages, options = {}) {
   const body = {
     model,
     messages,
-    temperature: 0.2
+    temperature: 0.2,
+    max_tokens: MAX_TOKENS
   };
   if (jsonMode) body.response_format = { type: 'json_object' };
   if (options.thinkingDisabled) {
