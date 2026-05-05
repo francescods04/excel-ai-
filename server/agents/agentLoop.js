@@ -106,6 +106,7 @@ function loadPromptVariant(variant) {
 }
 
 const { getAvailableSkillsForPrompt, readSkill } = require('../skills/loader');
+const { updateInstructions, getInstructionsForPrompt } = require('../utils/instructions');
 
 const DEFAULT_PROMPT_VARIANT = process.env.AGENT_PROMPT_VARIANT || 'default';
 let AGENT_SYSTEM_PROMPT = loadPromptVariant(DEFAULT_PROMPT_VARIANT);
@@ -146,9 +147,11 @@ function getSystemPrompt(variant) {
   const v = variant || DEFAULT_PROMPT_VARIANT;
   const base = loadPromptVariant(v);
   const skillsBlock = getAvailableSkillsForPrompt();
+  const instructionsBlock = getInstructionsForPrompt();
   // Prepend available skills to the prompt (lightweight index, not full content)
   const skillsPrefix = skillsBlock ? skillsBlock + '\n\n' : '';
-  return skillsPrefix + base + AGENT_SYSTEM_PROMPT_SUFFIX;
+  const instructionsPrefix = instructionsBlock ? instructionsBlock + '\n\n' : '';
+  return skillsPrefix + instructionsPrefix + base + AGENT_SYSTEM_PROMPT_SUFFIX;
 }
 
 /* ---------- Tool Definitions (OpenAI function calling schema) ---------- */
@@ -609,6 +612,29 @@ IMPORTANT: DO NOT wrap in Excel.run yourself — it's already wrapped. Use 'cont
           max_chars: { type: 'number', description: 'Max characters to return (default 4000)' }
         }
       }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_instructions',
+      description: 'Update persistent user preferences. Use for broad style changes ("use Oxford commas", "bold titles", "Italian language"). NOT for task-specific changes. Supports find/replace or append.',
+      parameters: {
+        type: 'object',
+        properties: {
+          find: { type: 'string', description: 'Text to find for replacement' },
+          replace: { type: 'string', description: 'Replacement text' },
+          append: { type: 'string', description: 'Text to append at end of instructions' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_instructions',
+      description: 'Read the current persistent user preferences (style, formatting, language, defaults).',
+      parameters: { type: 'object', properties: {} }
     }
   },
   {
@@ -1803,6 +1829,14 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
     case 'read_skill': {
       const skillData = readSkill(params.name);
       return skillData;
+    }
+    case 'update_instructions': {
+      const result = updateInstructions(params);
+      return { data: result, actions: [] };
+    }
+    case 'read_instructions': {
+      const instr = require('../utils/instructions');
+      return { data: { content: instr.loadInstructions() }, actions: [] };
     }
     default:
       // Fallback: try registry tool (e.g. yahoo.quote, llm.planLayout, etc.)
