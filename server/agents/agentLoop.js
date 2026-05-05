@@ -1148,28 +1148,45 @@ async function runAgentLoop(objective, context, options = {}) {
       if (messages.length > AUTO_COMPACT_LIMIT) {
         const keepCount = 6;
         const toCompact = messages.slice(1, messages.length - keepCount);
-        const compacted = toCompact.filter(m => {
-          if (m.role === 'assistant') {
-            try { const p = JSON.parse(m.content); return p.tool && !['done','todo_write','context_snip'].includes(p.tool); }
-            catch (_) { return m.content.length > 50; }
+        // Find first and last user message IDs in the range for snipContext
+        const userMsgs = toCompact.filter(m => m.role === 'user');
+        let snipApplied = false;
+        if (userMsgs.length >= 2) {
+          const firstId = extractMsgId(userMsgs[0].content);
+          const lastId = extractMsgId(userMsgs[userMsgs.length - 1].content);
+          if (firstId && lastId) {
+            const snipResult = snipContext(messages, firstId, lastId, 'Auto-compacted history');
+            if (snipResult.ok) {
+              logger.info(`[AgentLoop] Auto-snipped ${snipResult.removed} messages (${firstId}..${lastId}). New length: ${messages.length}`);
+              snipApplied = true;
+            }
           }
-          return m.role === 'user' && !m.content.startsWith('Tool result') && !m.content.startsWith('CONVERSATION SUMMARY');
-        });
-        const compactLines = compacted.map(m => {
-          if (m.role === 'assistant') {
-            try { const p = JSON.parse(m.content); return `[${p.tool}] ${(p.thought||'').slice(0,100)}`; }
-            catch (_) { return m.content.slice(0,100); }
+        }
+        // Fallback to old text summary if snipContext failed
+        if (!snipApplied) {
+          const compacted = toCompact.filter(m => {
+            if (m.role === 'assistant') {
+              try { const p = JSON.parse(m.content); return p.tool && !['done','todo_write','context_snip'].includes(p.tool); }
+              catch (_) { return m.content.length > 50; }
+            }
+            return m.role === 'user' && !m.content.startsWith('Tool result') && !m.content.startsWith('CONVERSATION SUMMARY');
+          });
+          const compactLines = compacted.map(m => {
+            if (m.role === 'assistant') {
+              try { const p = JSON.parse(m.content); return `[${p.tool}] ${(p.thought||'').slice(0,100)}`; }
+              catch (_) { return m.content.slice(0,100); }
+            }
+            return m.content.slice(0,100);
+          });
+          if (compactLines.length > 0) {
+            const summary = 'AUTO-COMPACTED HISTORY (' + toCompact.length + ' msgs):\n' + compactLines.join('\n').slice(0, 3000);
+            const newMsgs = [messages[0]];
+            newMsgs.push(makeUserMessage(summary + '\n\nContinue from where you left off.'));
+            newMsgs.push(...messages.slice(messages.length - keepCount));
+            messages.length = 0;
+            messages.push(...newMsgs);
+            logger.info(`[AgentLoop] Auto-compacted ${toCompact.length} messages. New length: ${messages.length}`);
           }
-          return m.content.slice(0,100);
-        });
-        if (compactLines.length > 0) {
-          const summary = 'AUTO-COMPACTED HISTORY (' + toCompact.length + ' msgs):\n' + compactLines.join('\n').slice(0, 3000);
-          const newMsgs = [messages[0]];
-          newMsgs.push(makeUserMessage(summary + '\n\nContinue from where you left off.'));
-          newMsgs.push(...messages.slice(messages.length - keepCount));
-          messages.length = 0;
-          messages.push(...newMsgs);
-          logger.info(`[AgentLoop] Auto-compacted ${toCompact.length} messages. New length: ${messages.length}`);
         }
       }
 
