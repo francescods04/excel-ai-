@@ -1124,6 +1124,15 @@ async function runAgentLoop(objective, context, options = {}) {
         continue;
       }
 
+      // Handle preflight conflict (e.g. set_cell_range with allow_overwrite=false)
+      if (toolResult && toolResult._preflight && toolResult._preflight.conflict) {
+        logger.warn(`[AgentLoop] Preflight conflict blocked ${toolName}: ${toolResult._message}`);
+        onEvent('preflightConflict', { tool: toolName, ...toolResult._preflight });
+        results.push({ type: 'preflight_conflict', tool: toolName, ...toolResult._preflight });
+        messages.push(makeUserMessage(toolResult._message));
+        continue;
+      }
+
       // Emit actions for Excel mutations
       if (toolResult && toolResult.actions && toolResult.actions.length > 0) {
         onEvent('actions', { tool: toolName, actions: toolResult.actions });
@@ -1137,10 +1146,11 @@ async function runAgentLoop(objective, context, options = {}) {
 
       results.push({ type: 'tool', tool: toolName, params, result: toolResult });
 
-      // Append tool result
-      messages.push(makeUserMessage(
-        `Tool result for ${toolName}:\n${JSON.stringify(toolResult, null, 2)}`
-      ));
+      // Append tool result — use _message if provided, otherwise JSON
+      const resultMsg = toolResult && toolResult._message
+        ? toolResult._message
+        : `Tool result for ${toolName}:\n${JSON.stringify(toolResult, null, 2)}`;
+      messages.push(makeUserMessage(resultMsg));
       onEvent('toolResult', { iteration, tool: toolName, result: toolResult });
 
       // Auto-compact context if too large (LLM should also call context_snip explicitly)
@@ -1274,6 +1284,41 @@ function normalizeAgentParams(toolName, params) {
     if (p.refers_to === undefined && p.refersTo !== undefined) p.refers_to = p.refersTo;
   }
   return p;
+}
+
+/* ---------- Preflight helpers for cell range bounding box ---------- */
+function colToIndex(col) {
+  let idx = 0;
+  for (let i = 0; i < col.length; i++) {
+    idx = idx * 26 + (col.charCodeAt(i) - 64);
+  }
+  return idx;
+}
+function indexToCol(idx) {
+  let col = '';
+  while (idx > 0) {
+    const rem = (idx - 1) % 26;
+    col = String.fromCharCode(65 + rem) + col;
+    idx = Math.floor((idx - 1) / 26);
+  }
+  return col;
+}
+function getCellRangeBounds(cellMap) {
+  const cells = Object.keys(cellMap || {});
+  if (cells.length === 0) return null;
+  let minCol = Infinity, maxCol = -Infinity, minRow = Infinity, maxRow = -Infinity;
+  for (const addr of cells) {
+    const m = addr.match(/^([A-Z]+)(\d+)$/);
+    if (!m) continue;
+    const col = colToIndex(m[1]);
+    const row = parseInt(m[2], 10);
+    minCol = Math.min(minCol, col);
+    maxCol = Math.max(maxCol, col);
+    minRow = Math.min(minRow, row);
+    maxRow = Math.max(maxRow, row);
+  }
+  if (minCol === Infinity) return null;
+  return `${indexToCol(minCol)}${minRow}:${indexToCol(maxCol)}${maxRow}`;
 }
 
 async function executeAgentTool(toolName, params, context, requestClientTool) {
@@ -1556,13 +1601,50 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       if (!params.sheet) {
         logger.warn(`[AgentLoop] set_cell_range called without 'sheet' param; defaulting to activeSheet="${targetSheet}". LLM should specify sheet explicitly.`);
       }
+
+      // Preflight read: verify target cells are empty before writing (trust UX)
+      if (params.allow_overwrite === false && requestClientTool && params.cells && Object.keys(params.cells).length > 0) {
+        const bounds = getCellRangeBounds(params.cells);
+        if (bounds) {
+          try {
+            const preflight = await requestClientTool('workbook.readRange', {
+              sheet: targetSheet,
+              target: bounds,
+              format: 'snapshot'
+            });
+            const values = preflight.values || [];
+            const nonEmpty = [];
+            for (let r = 0; r < values.length && nonEmpty.length < 5; r++) {
+              for (let c = 0; c < values[r].length && nonEmpty.length < 5; c++) {
+                const v = values[r][c];
+                if (v !== null && v !== undefined && v !== '') {
+                  nonEmpty.push({ row: r + 1, col: indexToCol(colToIndex(bounds.match(/^([A-Z]+)/)[1]) + c), value: String(v).slice(0, 50) });
+                }
+              }
+            }
+            if (nonEmpty.length > 0) {
+              const conflictMsg = `Preflight CONFLICT: ${nonEmpty.length}+ cells in ${targetSheet}!${bounds} already contain data. Use allow_overwrite:true to force, or choose a different range.`;
+              logger.warn(`[AgentLoop] ${conflictMsg}`);
+              return {
+                actions: [],
+                _preflight: { conflict: true, range: bounds, sample: nonEmpty },
+                _message: conflictMsg
+              };
+            }
+          } catch (err) {
+            logger.warn(`[AgentLoop] Preflight read failed for set_cell_range: ${err.message}. Proceeding without check.`);
+          }
+        }
+      }
+
       return {
         actions: [{
           type: 'setCellRange',
           sheet: targetSheet,
           cells: params.cells,
           copyToRange: copyToRange,
-          allow_overwrite: params.allow_overwrite
+          allow_overwrite: params.allow_overwrite,
+          explanation: `Write ${Object.keys(params.cells || {}).length} cells to ${targetSheet}`
         }]
       };
     }
