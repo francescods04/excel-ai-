@@ -1,6 +1,7 @@
 const Ajv = require('ajv');
 const yahoo = require('../tools/yahoo');
 const { runLayoutAgent, runFormulaAgent, runFormatAgent } = require('../agents/specialists');
+const { searchTools } = require('../utils/toolSearch');
 
 const ajv = new Ajv({ removeAdditional: 'failing', useDefaults: true, coerceTypes: 'array' });
 
@@ -1375,6 +1376,35 @@ registerTool('skill.read', async (params) => {
     required: ['name'],
     properties: {
       name: { type: 'string', description: 'Skill name: dcf-model, wacc-model, lbo-model, comps-analysis, three-statement, clean-data, audit-xls' }
+    }
+  },
+  category: 'read',
+  costHint: 'low'
+});
+
+registerTool('search_tools', async (params) => {
+  const results = searchTools(params.query, params.top_k || 5);
+  return {
+    data: {
+      query: params.query,
+      results: results.map(r => ({
+        name: r.name,
+        description: r.description,
+        score: r.score,
+        parameters: r.parameters
+      }))
+    },
+    actions: []
+  };
+}, {
+  description: 'Search available tools by keyword or description using BM25 relevance scoring.',
+  inputs: ['query'],
+  schema: {
+    type: 'object',
+    required: ['query'],
+    properties: {
+      query: { type: 'string', description: 'What you want to do, e.g. "calculate WACC" or "download stock prices"' },
+      top_k: { type: 'number', description: 'Max results to return (default 5)' }
     }
   },
   category: 'read',

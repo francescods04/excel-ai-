@@ -5,6 +5,7 @@ const logger = require('../utils/logger');
 const { executeTool, registry } = require('../tools/registry');
 const { validateTaskOutput } = require('./critic');
 const streaming = require('./streaming');
+const { initializeTools } = require('../utils/toolSearch');
 
 const AGENT_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT_AGENT || 'low';
 const AGENT_THINKING_FIRST_ITER = process.env.AGENT_THINKING_FIRST_ITER !== 'false';
@@ -779,8 +780,26 @@ IMPORTANT: DO NOT wrap in Excel.run yourself — it's already wrapped. Use 'cont
         properties: { country: { type: 'string' } }
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_tools',
+      description: 'Search available tools by keyword or description. Use this when you are unsure which tool to use for a task, or to discover the correct tool name and its parameters. Returns the most relevant tools with descriptions and parameter schemas.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'What you want to do, e.g. "calculate WACC" or "download stock prices"' },
+          top_k: { type: 'number', description: 'Max results to return (default 5)' }
+        },
+        required: ['query']
+      }
+    }
   }
 ];
+
+/* ---------- BM25 tool index ---------- */
+initializeTools(TOOL_DEFINITIONS);
 
 /* ---------- Context helpers ---------- */
 
