@@ -1161,7 +1161,18 @@ async function runAgentLoop(objective, context, options = {}) {
 
       // Emit actions for Excel mutations
       if (toolResult && toolResult.actions && toolResult.actions.length > 0) {
-        onEvent('actions', { tool: toolName, actions: toolResult.actions });
+        // Auto-add explanation + citation if missing (Anthropic pattern)
+        const enrichedActions = toolResult.actions.map(a => {
+          if (a.explanation) return a;
+          const parts = [a.type];
+          if (a.sheet) parts.push(`on ${a.sheet}`);
+          if (a.target) parts.push(a.target);
+          else if (a.cells) parts.push(`${Object.keys(a.cells).length} cells`);
+          else if (a.name) parts.push(`"${a.name}"`);
+          const explanation = parts.join(' ').slice(0, 50);
+          return { ...a, explanation };
+        });
+        onEvent('actions', { tool: toolName, actions: enrichedActions });
       }
 
       // Log code transparency
