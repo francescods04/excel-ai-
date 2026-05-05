@@ -36,7 +36,7 @@ const DEFAULT_PROMPT_VARIANT = process.env.AGENT_PROMPT_VARIANT || 'default';
 let AGENT_SYSTEM_PROMPT = loadPromptVariant(DEFAULT_PROMPT_VARIANT);
 
 /* Common output format suffix appended to ANY variant */
-const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nOUTPUT FORMAT: Respond with a JSON object containing:\n{\n  "thought": "Your reasoning about what to do next",\n  "tool": "tool_name",\n  "params": { ...tool parameters... }\n}\n\nIMPORTANT: NEVER call more than one tool at a time. Wait for the result before the next step.\n\nWHEN THE TASK IS COMPLETE: You MUST call the tool "done" with a summary. Do NOT keep calling other tools after the work is finished. Calling "done" ends the session.\n\nPYTHON RULES:\n- execute_python is ONLY for mathematical calculations on data provided as variables in the code string.\n- execute_python does NOT have access to the Excel workbook file system. Do NOT use openpyxl, xlrd, or any file paths like /tmp/current.xlsx, /files/input/workbook.xlsx, etc.\n- To read or write Excel, always use the dedicated Excel tools (set_cell_range, create_sheet, execute_excel_formula, etc.).\n\nWEB SEARCH RULES:\n- You may call web_search OR web_fetch AT MOST 2 times total per task.\n- If web search does not return detailed financial figures (revenue, EBITDA, net income, etc.), DO NOT keep searching.\n- Immediately proceed with your knowledge of publicly known figures and BUILD the model.\n- For well-known companies (AAPL, MSFT, GOOGL, TSLA, etc.), use publicly known FY2024/2025 figures from your training data.\n- NEVER get stuck in a search loop. After 2 search attempts, write the model.\n\nASK_USER_QUESTION RULES (CRITICAL):\n- The tool ask_user_question is an EMERGENCY BREAK. Use it ONLY when a truly critical piece of information is missing AND cannot be inferred from the workbook context or the user's original request.\n- NEVER ask the user for confirmation before proceeding (e.g. "Should I proceed?", "Continue?", "Go ahead?"). Just DO the work.\n- NEVER ask which sheet to use — the active sheet is provided in the context. If unspecified, default to the active sheet.\n- NEVER ask for a ticker/company name if the user already mentioned it in the original request.\n- NEVER ask for data that is already visible in the workbook context preview. Reference those cells directly.\n- If you are unsure about a minor assumption, make a reasonable default choice and proceed. Do NOT pause the flow.`;
+const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nOUTPUT FORMAT: Respond with a JSON object containing:\n{\n  "thought": "Your reasoning about what to do next",\n  "tool": "tool_name",\n  "params": { ...tool parameters... }\n}\n\nIMPORTANT: NEVER call more than one tool at a time. Wait for the result before the next step.\n\nWHEN THE TASK IS COMPLETE: You MUST call the tool "done" with a summary. Do NOT keep calling other tools after the work is finished. Calling "done" ends the session.\n\nPYTHON RULES:\n- execute_python is ONLY for mathematical calculations on data provided as variables in the code string.\n- execute_python does NOT have access to the Excel workbook file system. Do NOT use openpyxl, xlrd, or any file paths like /tmp/current.xlsx, /files/input/workbook.xlsx, etc.\n- To read or write Excel, always use the dedicated Excel tools (set_cell_range, create_sheet, execute_excel_formula, etc.).\n\nDATA RULES:\n- Use publicly known FY2024/2025 figures from your training data for well-known companies (AAPL, MSFT, GOOGL, TSLA, etc.).\n- Do NOT search the web. Build the model immediately with available data.\n\nASK_USER_QUESTION RULES (CRITICAL):\n- The tool ask_user_question is an EMERGENCY BREAK. Use it ONLY when a truly critical piece of information is missing AND cannot be inferred from the workbook context or the user's original request.\n- NEVER ask the user for confirmation before proceeding (e.g. "Should I proceed?", "Continue?", "Go ahead?"). Just DO the work.\n- NEVER ask which sheet to use — the active sheet is provided in the context. If unspecified, default to the active sheet.\n- NEVER ask for a ticker/company name if the user already mentioned it in the original request.\n- NEVER ask for data that is already visible in the workbook context preview. Reference those cells directly.\n- If you are unsure about a minor assumption, make a reasonable default choice and proceed. Do NOT pause the flow.`;
 
 AGENT_SYSTEM_PROMPT += AGENT_SYSTEM_PROMPT_SUFFIX;
 
@@ -393,35 +393,6 @@ const TOOL_DEFINITIONS = [
           }
         },
         required: ['todos']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'web_search',
-      description: 'Search finance-specific sources (Yahoo Finance quote, SEC EDGAR filings) for company/ticker data. Use ONLY for official investor relations pages, SEC filings, or press releases. Cite the source in cell comments.',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: 'Search query or ticker' },
-          ticker: { type: 'string', description: 'Optional explicit ticker symbol' }
-        },
-        required: ['query']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'web_fetch',
-      description: 'Fetch a web page URL and extract readable text. Use ONLY for official investor relations pages, SEC EDGAR filings, or company press releases.',
-      parameters: {
-        type: 'object',
-        properties: {
-          url: { type: 'string', description: 'URL to fetch' }
-        },
-        required: ['url']
       }
     }
   },
