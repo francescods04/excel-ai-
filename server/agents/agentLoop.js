@@ -10,6 +10,22 @@ const AGENT_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT_AGENT || 'l
 const AGENT_THINKING_FIRST_ITER = process.env.AGENT_THINKING_FIRST_ITER !== 'false';
 const AGENT_USE_STREAMING = process.env.AGENT_USE_STREAMING !== 'false';
 
+/* ---------- Message ID helpers for context_snip targeting ---------- */
+function generateMsgId() {
+  return Math.random().toString(36).slice(2, 8).toLowerCase();
+}
+function makeUserMessage(content) {
+  const id = generateMsgId();
+  return { role: 'user', content: `[id:${id}] ${content}` };
+}
+function extractMsgId(content) {
+  const m = String(content).match(/^\[id:([a-z0-9]{6})\]\s*/);
+  return m ? m[1] : null;
+}
+function stripMsgId(content) {
+  return String(content).replace(/^\[id:[a-z0-9]{6}\]\s*/, '');
+}
+
 /* ---------- Load System Prompt from file (variant-aware) ---------- */
 const PROMPT_VARIANTS = {
   default: 'system-prompt-ib-grade.md',
@@ -838,7 +854,7 @@ async function runAgentLoop(objective, context, options = {}) {
   logger.info(`[AgentLoop] Using prompt variant "${promptVariant}" (${systemPromptForRun.length} chars)`);
   const messages = options.resumeMessages || [
     { role: 'system', content: systemPromptForRun },
-    { role: 'user', content: userPrompt }
+    makeUserMessage(userPrompt)
   ];
 
   const results = options.resumeResults || [];
@@ -902,10 +918,9 @@ async function runAgentLoop(objective, context, options = {}) {
       if (parseFailed) {
         logger.warn(`[AgentLoop] iter ${iteration} LLM JSON parse failed: ${llmResult.jsonError}`);
         onEvent('iterationError', { iteration, error: `LLM JSON parse failed: ${llmResult.jsonError}` });
-        messages.push({
-          role: 'user',
-          content: `Your previous response was not valid JSON (${llmResult.jsonError}). Reply with ONLY a single JSON object {"thought","tool","params"} — no extra text, no trailing characters. Continue the task from where you left off.`
-        });
+        messages.push(makeUserMessage(
+          `Your previous response was not valid JSON (${llmResult.jsonError}). Reply with ONLY a single JSON object {"thought","tool","params"} — no extra text, no trailing characters. Continue the task from where you left off.`
+        ));
         continue;
       }
 
@@ -926,10 +941,9 @@ async function runAgentLoop(objective, context, options = {}) {
 
       // Empty/noop tool — never auto-done. Force LLM to either call `done` or continue.
       if (!toolName || toolName === '' || toolName === 'noop' || toolName === 'none') {
-        messages.push({
-          role: 'user',
-          content: 'No tool was called. If task is complete, call tool "done" with a summary. Otherwise continue with the next tool.'
-        });
+        messages.push(makeUserMessage(
+          'No tool was called. If task is complete, call tool "done" with a summary. Otherwise continue with the next tool.'
+        ));
         continue;
       }
 
@@ -939,7 +953,7 @@ async function runAgentLoop(objective, context, options = {}) {
         if (webSearchCount > MAX_WEB_SEARCH) {
           const blockMsg = `Maximum web search attempts (${MAX_WEB_SEARCH}) reached. Proceed with your knowledge of publicly known figures and BUILD the model. Do NOT search again.`;
           logger.info(`[AgentLoop] ${blockMsg}`);
-          messages.push({ role: 'user', content: blockMsg });
+          messages.push(makeUserMessage(blockMsg));
           results.push({ type: 'error', error: blockMsg });
           onEvent('iterationError', { iteration, error: blockMsg });
           continue;
@@ -950,7 +964,7 @@ async function runAgentLoop(objective, context, options = {}) {
       if (toolName === 'done') {
         done = true;
         results.push({ type: 'done', summary: params.summary || 'Task completed' });
-        messages.push({ role: 'user', content: 'Task completed successfully.' });
+        messages.push(makeUserMessage('Task completed successfully.'));
         onEvent('agentDone', { summary: params.summary || 'Task completed', iteration });
         break;
       }
@@ -970,7 +984,7 @@ async function runAgentLoop(objective, context, options = {}) {
         if (!questionData || (Array.isArray(questionData) && questionData.length === 0)) {
           const retryMsg = 'You called ask_user_question with no valid questions. The "questions" parameter must be a non-empty array of objects with "question" (or "header") and "options" fields. Call ask_user_question again with a proper question.';
           logger.warn(`[AgentLoop] ask_user_question called with empty/invalid questions: ${JSON.stringify(params).slice(0, 200)}`);
-          messages.push({ role: 'user', content: retryMsg });
+          messages.push(makeUserMessage(retryMsg));
           continue;
         }
 
@@ -978,10 +992,9 @@ async function runAgentLoop(objective, context, options = {}) {
         const autoAnswer = tryAutoAnswer(questionData, context, objective);
         if (autoAnswer) {
           logger.info(`[AgentLoop] Auto-answered question: "${JSON.stringify(questionData).slice(0, 120)}" → "${autoAnswer}"`);
-          messages.push({
-            role: 'user',
-            content: `Auto-answered: ${autoAnswer}. Do NOT ask again unless absolutely critical. Proceed with the task.`
-          });
+          messages.push(makeUserMessage(
+            `Auto-answered: ${autoAnswer}. Do NOT ask again unless absolutely critical. Proceed with the task.`
+          ));
           results.push({ type: 'ask_user', question: questionData, autoAnswer });
           onEvent('agentAutoAnswer', { question: questionData, answer: autoAnswer, iteration });
           continue;
@@ -1012,10 +1025,9 @@ async function runAgentLoop(objective, context, options = {}) {
       if (toolName === 'todo_write') {
         results.push({ type: 'todo_write', todos: params.todos });
         onEvent('todoWrite', { todos: params.todos });
-        messages.push({
-          role: 'user',
-          content: `Task list updated: ${params.todos.map(t => `[${t.status}] ${t.content}`).join(', ')}`
-        });
+        messages.push(makeUserMessage(
+          `Task list updated: ${params.todos.map(t => `[${t.status}] ${t.content}`).join(', ')}`
+        ));
         continue;
       }
 
@@ -1033,10 +1045,9 @@ async function runAgentLoop(objective, context, options = {}) {
       results.push({ type: 'tool', tool: toolName, params, result: toolResult });
 
       // Append tool result
-      messages.push({
-        role: 'user',
-        content: `Tool result for ${toolName}:\n${JSON.stringify(toolResult, null, 2)}`
-      });
+      messages.push(makeUserMessage(
+        `Tool result for ${toolName}:\n${JSON.stringify(toolResult, null, 2)}`
+      ));
       onEvent('toolResult', { iteration, tool: toolName, result: toolResult });
 
       // Auto-compact context if too large (LLM should also call context_snip explicitly)
@@ -1061,7 +1072,7 @@ async function runAgentLoop(objective, context, options = {}) {
         if (compactLines.length > 0) {
           const summary = 'AUTO-COMPACTED HISTORY (' + toCompact.length + ' msgs):\n' + compactLines.join('\n').slice(0, 3000);
           const newMsgs = [messages[0]];
-          newMsgs.push({ role: 'user', content: summary + '\n\nContinue from where you left off.' });
+          newMsgs.push(makeUserMessage(summary + '\n\nContinue from where you left off.'));
           newMsgs.push(...messages.slice(messages.length - keepCount));
           messages.length = 0;
           messages.push(...newMsgs);
@@ -1094,10 +1105,9 @@ async function runAgentLoop(objective, context, options = {}) {
         logger.error(`[AgentLoop] Same error ${consecutiveErrors}x → abort: ${error.message}`);
         break;
       }
-      messages.push({
-        role: 'user',
-        content: `Error: ${error.message}. Please try a different approach.`
-      });
+      messages.push(makeUserMessage(
+        `Error: ${error.message}. Please try a different approach.`
+      ));
     }
   }
 
@@ -1547,7 +1557,7 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
         // Replace old messages: keep system prompt + summary + recent messages
         const newMessages = [messages[0]]; // system prompt
         if (summary) {
-          newMessages.push({ role: 'user', content: summary + '\n\nContinue from where you left off.' });
+          newMessages.push(makeUserMessage(summary + '\n\nContinue from where you left off.'));
         }
         newMessages.push(...messages.slice(messages.length - keepCount));
         // Mutate the array in-place
