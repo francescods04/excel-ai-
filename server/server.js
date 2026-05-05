@@ -266,6 +266,21 @@ app.get('/api/config/models', (req, res) => {
   });
 });
 
+/* ---------- Metrics API ---------- */
+const { summarizeMetrics } = require('./utils/metrics');
+
+app.get('/api/metrics/summary', (req, res) => {
+  try {
+    const since = req.query.since;
+    const sinceMs = since ? Date.parse(since) : null;
+    const summary = summarizeMetrics(sinceMs);
+    res.json(summary);
+  } catch (error) {
+    logger.error('Errore metrics/summary:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 /* ---------- Wiki API ---------- */
 const { loadWikiDomain, searchWiki, listWikiDomains, getWikiContextForPrompt } = require('./wiki/loader');
 const { ingestPdf, ingestAllRawPdfs } = require('./wiki/ingest');

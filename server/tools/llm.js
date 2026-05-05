@@ -1,6 +1,7 @@
 const axios = require('axios');
 require('dotenv').config();
 const logger = require('../utils/logger');
+const { logMetric } = require('../utils/metrics');
 
 /* ---------- Configurazione LLM (unificata) ---------- */
 const AI_PROVIDER = process.env.AI_PROVIDER || 'opencode';
@@ -709,6 +710,9 @@ async function callLLM({
   const systemText = buildSystemText(system, msgs);
   const userInput = userText || buildUserTextFromMessages(msgs);
 
+  const metric = { provider, model: primaryModel, label };
+  const start = Date.now();
+
   try {
     logger.info(`[LLM] ${label} start → [${provider}] ${primaryModel} (timeout ${timeoutMs}ms)`);
     const promise = executeProviderCall({
@@ -723,9 +727,23 @@ async function callLLM({
       reasoningEffort
     });
     const result = await withTimeout(promise, timeoutMs, label);
-    logger.info(`[LLM] ${label} success ← [${provider}] ${primaryModel}`);
+    const elapsed = Date.now() - start;
+    metric.latency_ms = elapsed;
+    metric.success = true;
+    if (result && result._usage) {
+      metric.prompt_tokens = result._usage.prompt_tokens;
+      metric.completion_tokens = result._usage.completion_tokens;
+    }
+    logMetric(metric);
+    logger.info(`[LLM] ${label} success ← [${provider}] ${primaryModel} in ${elapsed}ms`);
     return result;
   } catch (error) {
+    const elapsed = Date.now() - start;
+    metric.latency_ms = elapsed;
+    metric.success = false;
+    metric.error = error.message;
+    logMetric(metric);
+
     const rescueModel = resolveFallbackModel(primaryModel, fallbackModel);
     logger.warn(`[LLM] ${label} failed on ${primaryModel}: ${error.message}. Fallback model: ${rescueModel || 'none'}`);
     if (!shouldRetryWithFallback(error, rescueModel)) {
@@ -738,6 +756,7 @@ async function callLLM({
       ? 'openrouter'
       : provider;
     logger.info(`[LLM] ${label} retry → ${rescueProvider}/${rescueModel} (timeout ${fallbackTimeoutMs}ms)`);
+    const rescueStart = Date.now();
     const rescuePromise = executeProviderCall({
       provider: rescueProvider,
       system: systemText,
@@ -749,7 +768,19 @@ async function callLLM({
       thinkingDisabled,
       reasoningEffort
     });
-    return withTimeout(rescuePromise, fallbackTimeoutMs, `${label} fallback`);
+    const rescueResult = await withTimeout(rescuePromise, fallbackTimeoutMs, `${label} fallback`);
+    logMetric({
+      provider: rescueProvider,
+      model: rescueModel,
+      label: `${label} fallback`,
+      latency_ms: Date.now() - rescueStart,
+      success: true,
+      ...(rescueResult && rescueResult._usage ? {
+        prompt_tokens: rescueResult._usage.prompt_tokens,
+        completion_tokens: rescueResult._usage.completion_tokens
+      } : {})
+    });
+    return rescueResult;
   }
 }
 
