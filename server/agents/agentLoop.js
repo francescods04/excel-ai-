@@ -86,7 +86,9 @@ function retrieveSnipped(fromId, search, maxChars = 4000) {
 /* ---------- Load System Prompt from file (variant-aware) ---------- */
 const PROMPT_VARIANTS = {
   default: 'system-prompt-ib-grade.md',
-  fast: 'system-prompt-ib-fast.md'
+  fast: 'system-prompt-ib-fast.md',
+  analyst: 'system-prompt-analyst.md',
+  copilot: 'system-prompt-copilot.md'
 };
 const PROMPT_CACHE = {};
 
