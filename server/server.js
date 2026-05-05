@@ -25,16 +25,55 @@ app.use((req, res, next) => {
   next();
 });
 
+const START_TIME = Date.now();
+
 app.get('/api/health', (req, res) => {
+  const { TOOL_DEFINITIONS, PROMPT_VARIANTS } = require('./agents/agentLoop');
+  const llmCfg = getLLMConfig();
+  const promptVariant = process.env.AGENT_PROMPT_VARIANT || 'default';
+  const activeModel = llmCfg.model
+    || (llmCfg.provider === 'openrouter' ? process.env.OPENROUTER_MODEL : null)
+    || (llmCfg.provider === 'deepseek' ? process.env.DEEPSEEK_MODEL : null)
+    || process.env.AI_MODEL
+    || 'kimi-k2.6';
+
   res.json({
     ok: true,
     app: 'excel-ai-agent',
+    version: '2.0.0',
     runtime: 'turn-item-v2',
+    uptimeSec: Math.floor((Date.now() - START_TIME) / 1000),
+    model: {
+      provider: llmCfg.provider,
+      primary: activeModel,
+      fallback: llmCfg.fallbackModel || process.env.AI_FALLBACK_MODEL || '',
+      maxTokens: Number(process.env.MAX_TOKENS) || 16384
+    },
+    tools: {
+      count: TOOL_DEFINITIONS.length,
+      list: TOOL_DEFINITIONS.map(t => t.name)
+    },
+    promptVariant,
+    promptVariantsAvailable: Object.keys(PROMPT_VARIANTS),
     features: [
       'turn-runtime',
       'workbook-tools',
-      'interactive-requests'
-    ]
+      'interactive-requests',
+      'preflight-read',
+      'context-snip',
+      'cache-breakpoint',
+      'skills-lazyload',
+      'bm25-tool-search',
+      'calculation-suspension',
+      'persistent-instructions',
+      'update-setting',
+      'auto-skill-suggest'
+    ],
+    env: {
+      nodeEnv: process.env.NODE_ENV || 'development',
+      cacheBreakpointEnabled: process.env.CACHE_BREAKPOINT_ENABLED !== 'false',
+      autoCompactLimit: Number(process.env.AGENT_AUTO_COMPACT_LIMIT) || 18
+    }
   });
 });
 

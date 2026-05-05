@@ -1956,4 +1956,4 @@ async function executePythonCode(code) {
   }
 }
 
-module.exports = { runAgentLoop, TOOL_DEFINITIONS, AGENT_SYSTEM_PROMPT, getSystemPrompt, PROMPT_VARIANTS };
+module.exports = { runAgentLoop, TOOL_DEFINITIONS, AGENT_SYSTEM_PROMPT, getSystemPrompt, PROMPT_VARIANTS, getCellRangeBounds, colToIndex, indexToCol };
