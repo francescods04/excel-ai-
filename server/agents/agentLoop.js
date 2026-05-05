@@ -6,6 +6,7 @@ const { executeTool, registry } = require('../tools/registry');
 const { validateTaskOutput } = require('./critic');
 const streaming = require('./streaming');
 const { initializeTools } = require('../utils/toolSearch');
+const { detectSkills } = require('../utils/skillSuggest');
 
 const AGENT_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT_AGENT || 'low';
 const AGENT_THINKING_FIRST_ITER = process.env.AGENT_THINKING_FIRST_ITER !== 'false';
@@ -994,8 +995,22 @@ async function runAgentLoop(objective, context, options = {}) {
   const promptVariant = options.promptVariant || DEFAULT_PROMPT_VARIANT;
   const systemPromptForRun = getSystemPrompt(promptVariant);
   logger.info(`[AgentLoop] Using prompt variant "${promptVariant}" (${systemPromptForRun.length} chars)`);
+
+  // Auto-skill suggest: preload skill if user message matches known keywords
+  const suggestedSkills = detectSkills(objective);
+  let skillReminder = '';
+  if (suggestedSkills.length > 0) {
+    const loaded = suggestedSkills.map(name => readSkill(name)).filter(Boolean);
+    if (loaded.length > 0) {
+      skillReminder = `<system-reminder>\nPre-loaded skill${loaded.length > 1 ? 's' : ''} based on user request: ${suggestedSkills.join(', ')}.\n\n` +
+        loaded.map(s => `--- ${s.name} ---\n${s.content.slice(0, 4000)}`).join('\n\n') +
+        '\n</system-reminder>';
+      logger.info(`[AgentLoop] Auto-preloaded skills: ${suggestedSkills.join(', ')}`);
+    }
+  }
+
   const messages = options.resumeMessages || [
-    { role: 'system', content: systemPromptForRun },
+    { role: 'system', content: systemPromptForRun + (skillReminder ? '\n\n' + skillReminder : '') },
     makeUserMessage(userPrompt)
   ];
 
