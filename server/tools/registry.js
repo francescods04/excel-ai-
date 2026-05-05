@@ -1382,6 +1382,32 @@ registerTool('skill.read', async (params) => {
   costHint: 'low'
 });
 
+registerTool('suspend_calculation', async () => {
+  return {
+    data: { status: 'suspended', message: 'Excel calculation mode set to manual. Call resume_calculation when done.' },
+    actions: [{ type: 'suspendCalculation' }]
+  };
+}, {
+  description: 'Suspend Excel automatic calculation (switch to manual) before large bulk writes to prevent UI freeze and crashes.',
+  inputs: [],
+  schema: { type: 'object', properties: {} },
+  category: 'mutation',
+  costHint: 'low'
+});
+
+registerTool('resume_calculation', async () => {
+  return {
+    data: { status: 'resumed', message: 'Excel calculation mode restored to automatic.' },
+    actions: [{ type: 'resumeCalculation' }]
+  };
+}, {
+  description: 'Resume Excel automatic calculation after bulk operations are complete.',
+  inputs: [],
+  schema: { type: 'object', properties: {} },
+  category: 'mutation',
+  costHint: 'low'
+});
+
 registerTool('search_tools', async (params) => {
   const results = searchTools(params.query, params.top_k || 5);
   return {

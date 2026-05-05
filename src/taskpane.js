@@ -1668,6 +1668,14 @@
             case 'createNamedRange':
               await execCreateNamedRange(context, sheetCache, action);
               break;
+            case 'suspendCalculation':
+              context.application.calculationMode = Excel.CalculationMode.manual;
+              console.log('[Excel] Calculation suspended (manual mode)');
+              break;
+            case 'resumeCalculation':
+              context.application.calculationMode = Excel.CalculationMode.automatic;
+              console.log('[Excel] Calculation resumed (automatic mode)');
+              break;
             case 'todoWrite':
               updateStepsPanel(action.todos);
               break;

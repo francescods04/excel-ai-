@@ -784,6 +784,28 @@ IMPORTANT: DO NOT wrap in Excel.run yourself — it's already wrapped. Use 'cont
   {
     type: 'function',
     function: {
+      name: 'suspend_calculation',
+      description: 'Suspend Excel automatic calculation (switch to manual) before large bulk writes to prevent UI freeze and crashes. Always pair with resume_calculation.',
+      parameters: {
+        type: 'object',
+        properties: {}
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'resume_calculation',
+      description: 'Resume Excel automatic calculation after bulk operations are complete. Call this after suspend_calculation.',
+      parameters: {
+        type: 'object',
+        properties: {}
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'search_tools',
       description: 'Search available tools by keyword or description. Use this when you are unsure which tool to use for a task, or to discover the correct tool name and its parameters. Returns the most relevant tools with descriptions and parameter schemas.',
       parameters: {
