@@ -11,9 +11,9 @@ const PLANNER_FALLBACK_TIMEOUT_MS = Number(process.env.PLANNER_FALLBACK_TIMEOUT_
 const PLANNER_MODEL = process.env.PLANNER_MODEL || process.env.OPENROUTER_PLANNER_MODEL || '';
 const PLANNER_FALLBACK_MODEL = process.env.PLANNER_FALLBACK_MODEL || '';
 
-const PLANNER_SYSTEM_PROMPT = `You are a Senior Investment Banking Associate at Goldman Sachs / JPMorgan.
-Your task is to build institutional-grade financial models in Microsoft Excel.
-Every model must be presentation-ready: structured, labeled, color-coded, and internally consistent.
+const PLANNER_SYSTEM_PROMPT = `You are a world-class Excel AI agent for any workbook domain.
+Your task is to understand, analyze, repair, transform, model and format Microsoft Excel workbooks through safe, grounded tool use.
+You are especially strong at finance, but finance is only one domain. The product must work for sales, operations, HR, inventory, project management, pricing, research, budgets, scientific data and custom business models.
 
 OUTPUT FORMAT — respond ONLY with valid JSON. No markdown, no prose outside JSON.
 Schema:
@@ -33,10 +33,10 @@ Schema:
 }
 
 AGENTS:
-- data: external financial data (Yahoo Finance, OpenBB) or workbook reads
+- data: workbook reads, semantic understanding, external data where relevant
 - layout: sheet structure, cell maps, section design
-- formula: Excel formulas (THE MOST CRITICAL — must reference cells, never hardcode)
-- format: professional IB formatting (blue inputs, black calcs, grey headers)
+- formula: Excel formulas and transformations (must reference cells, never hardcode)
+- format: professional formatting adapted to the workbook domain
 
 TOOLS:
 - data (equity): yahoo.quote, yahoo.historical, yahoo.fundamentals
@@ -44,7 +44,7 @@ TOOLS:
 - data (macro): openbb.fixedincome.treasury, openbb.fixedincome.yield_curve, openbb.fixedincome.effr, openbb.economy.cpi, openbb.economy.gdp_real, openbb.economy.unemployment, openbb.economy.interest_rates, openbb.economy.risk_premium, openbb.economy.money_measures, openbb.economy.gdp_forecast
 - data (market): openbb.index.snapshots, openbb.index.historical, openbb.etf.info, openbb.etf.holdings, openbb.currency.historical, openbb.crypto.historical
 - AI-assisted finance: finance.dcf.buildSection (sections: shell, sources, assumptions, wacc, dcf, sensitivity, scenarios, summary, audit, format, all; formula sections use an analyst LLM with deterministic fallback)
-- read/intelligence: workbook.readWorkbook, workbook.scanDeep, workbook.buildGraph, workbook.readSheet, workbook.readRange
+- read/intelligence: workbook.readWorkbook, workbook.understand, workbook.scanDeep, workbook.buildGraph, workbook.readSheet, workbook.readRange
 - layout: llm.planLayout
 - formula: llm.writeFormulas
 - format: llm.planFormat, excel.applyFormat
@@ -64,7 +64,8 @@ INSTITUTIONAL DCF MODEL STRUCTURE (minimum standard):
 Sheets: Summary, Sources, Assumptions, WACC, DCF, Sensitivity, Scenarios, Audit
 
 IMPORTANT: A natural request like "voglio fare un DCF di Apple", "fammi DCF AAPL", or "build DCF for Microsoft" means FULL DCF BUILD. Do not treat it as a repair task. Use the complete sequence: workbook scan, workbook graph, market data, DCF shell, assumptions, WACC, DCF projection, sensitivity, formatting.
-For multi-sheet analysis, audits, repair, formatting or model completion, build a WorkbookGraph early with workbook.buildGraph or workbook.scanDeep so later tasks can reason over sheet roles, formula dependencies, errors and detected financial objects.
+For any request that depends on workbook content, read the workbook and run workbook.understand early. This gives the model a domain-agnostic semantic map of sheet roles, tables, measures, dimensions, key cells, formula zones, risks and likely next actions.
+For multi-sheet analysis, audits, repair, formatting or model completion, also build a WorkbookGraph early with workbook.buildGraph or workbook.scanDeep so later tasks can reason over dependencies and formulas.
 
 1) Assumptions Sheet:
    - Section headers (grey background, white bold text)
@@ -333,6 +334,89 @@ function patchWorkbookFirstTask(task, removedIds, explicitPublicTarget, localPri
     params.sourcePriority = 'workbook_first';
   }
   return { ...task, params, deps };
+}
+
+function hasWorkbookContext(planningContext = {}) {
+  return Boolean(
+    planningContext.activeSheet ||
+    planningContext.usedRange ||
+    planningContext.allSheetsData ||
+    (Array.isArray(planningContext.workbookSheets) && planningContext.workbookSheets.length > 0)
+  );
+}
+
+function isWorkbookReadTool(tool = '') {
+  return [
+    'workbook.readWorkbook',
+    'workbook.readSheet',
+    'workbook.scanDeep',
+    'workbook.buildGraph'
+  ].includes(tool);
+}
+
+function isAiReasoningTool(tool = '') {
+  return tool === 'workbook.buildGraph' ||
+    tool === 'llm.planLayout' ||
+    tool === 'llm.writeFormulas' ||
+    tool === 'llm.planFormat' ||
+    tool === 'finance.dcf.buildSection';
+}
+
+function nextTaskId(tasks = []) {
+  const used = new Set(tasks.map(task => task.id));
+  for (let i = 1; i < 500; i++) {
+    const id = `t${i}`;
+    if (!used.has(id)) return id;
+  }
+  return `t${tasks.length + 1}_${Date.now()}`;
+}
+
+function ensureWorkbookUnderstandingPlan(normalized, planningContext = {}, objective = '') {
+  if (!normalized || !Array.isArray(normalized.tasks)) return normalized;
+  if (process.env.PLANNER_WORKBOOK_UNDERSTANDING === 'false') return normalized;
+  if (normalized.tasks.some(task => task.tool === 'workbook.understand')) return normalized;
+
+  const hasContext = hasWorkbookContext(planningContext);
+  const readTask = normalized.tasks.find(task => ['workbook.readWorkbook', 'workbook.readSheet'].includes(task.tool));
+  const hasWorkbookRead = !!readTask || normalized.tasks.some(task => isWorkbookReadTool(task.tool));
+  const needsSemanticContext = normalized.tasks.some(task => isAiReasoningTool(task.tool));
+  if (!hasContext || (!hasWorkbookRead && !needsSemanticContext) || !needsSemanticContext) return normalized;
+
+  const understandId = nextTaskId(normalized.tasks);
+  const understandTask = {
+    id: understandId,
+    agent: 'data',
+    tool: 'workbook.understand',
+    description: 'Comprendi semanticamente workbook, tabelle, misure, dimensioni e zone formula',
+    params: {
+      objective: objective || normalized.objective || '',
+      ...(readTask ? { fromResult: readTask.id } : {}),
+      maxRows: 120,
+      maxCols: 60
+    },
+    deps: readTask ? [readTask.id] : [],
+    requiresApproval: false,
+    status: 'pending'
+  };
+
+  const tasks = [...normalized.tasks, understandTask].map(task => {
+    if (task.id === understandId) return task;
+    if (!isAiReasoningTool(task.tool)) return task;
+    if (readTask && task.id === readTask.id) return task;
+    const deps = new Set(Array.isArray(task.deps) ? task.deps : []);
+    if (!deps.has(understandId)) deps.add(understandId);
+    const params = task.params && typeof task.params === 'object' ? { ...task.params } : {};
+    if (['llm.planLayout', 'llm.writeFormulas', 'llm.planFormat', 'finance.dcf.buildSection'].includes(task.tool)) {
+      const usesResults = new Set(Array.isArray(params.usesResults) ? params.usesResults : []);
+      usesResults.add(understandId);
+      params.usesResults = Array.from(usesResults);
+      params.workbookUnderstanding = understandId;
+    }
+    return { ...task, params, deps: Array.from(deps) };
+  });
+
+  logger.info('[Planner] Added workbook.understand semantic grounding task');
+  return { ...normalized, tasks };
 }
 
 function findSheetPreview(context, sheetName) {
@@ -1472,8 +1556,16 @@ function isWeakFinancePlan(normalized, domainPlan) {
   return false;
 }
 
-function normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens) {
-  const normalized = normalizeAndValidatePlan(domainPlan);
+function prepareNormalizedPlan(rawPlan, planningContext = {}, objective = '') {
+  let normalized = normalizeAndValidatePlan(rawPlan);
+  normalized = enforceWorkbookFirstPlan(normalized, planningContext, objective);
+  normalized = ensureWorkbookUnderstandingPlan(normalized, planningContext, objective);
+  ensureNoCycles(normalized.tasks);
+  return normalized;
+}
+
+function normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens, planningContext = {}, objective = '') {
+  const normalized = prepareNormalizedPlan(domainPlan, planningContext, objective);
   setCachedPlan(cacheKey, normalized, objectiveTokens);
   return normalized;
 }
@@ -1502,7 +1594,7 @@ async function plan(objective, context, turnId, options = {}) {
   // finance turns the LLM planner sees it as a reference and still decides.
   if (domainPlan && shouldUseDomainPlaybookFirst(turnId, options, objective, planningContext, domainPlan)) {
     logger.info('[Planner] Domain playbook attivato');
-    return normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens);
+    return normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens, planningContext, objective);
   }
 
   const conversationCtx = planningContext.conversationHistory || '';
@@ -1537,12 +1629,10 @@ async function plan(objective, context, turnId, options = {}) {
       logger.info(`[Planner] LLM stream done in ${elapsed}ms (${accumulated.length} chars)`);
 
       let result = tryParsePlan(accumulated);
-      let normalized = normalizeAndValidatePlan(result);
-      normalized = enforceWorkbookFirstPlan(normalized, planningContext, objective);
-      ensureNoCycles(normalized.tasks);
+      let normalized = prepareNormalizedPlan(result, planningContext, objective);
       if (isWeakFinancePlan(normalized, domainPlan)) {
         logger.warn('[Planner] Piano LLM finance troppo debole; uso il domain playbook agentico');
-        return normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens);
+        return normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens, planningContext, objective);
       }
       logger.info(`[Planner] Piano generato:`, normalized.tasks.length, 'task');
       setCachedPlan(cacheKey, normalized, objectiveTokens);
@@ -1575,12 +1665,10 @@ async function plan(objective, context, turnId, options = {}) {
         result = tryParsePlan(result);
       }
 
-      let normalized = normalizeAndValidatePlan(result);
-      normalized = enforceWorkbookFirstPlan(normalized, planningContext, objective);
-      ensureNoCycles(normalized.tasks);
+      let normalized = prepareNormalizedPlan(result, planningContext, objective);
       if (isWeakFinancePlan(normalized, domainPlan)) {
         logger.warn('[Planner] Piano LLM finance troppo debole; uso il domain playbook agentico');
-        return normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens);
+        return normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens, planningContext, objective);
       }
       logger.info(`[Planner] Piano generato in ${elapsed}ms:`, normalized.tasks.length, 'task');
       setCachedPlan(cacheKey, normalized, objectiveTokens);
@@ -1595,7 +1683,7 @@ async function plan(objective, context, turnId, options = {}) {
 
   if (domainPlan) {
     logger.warn(`[Planner] Fallback euristico attivato dopo errore LLM: ${lastError.message}`);
-    return normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens);
+    return normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens, planningContext, objective);
   }
   throw lastError;
 }
@@ -1603,6 +1691,7 @@ async function plan(objective, context, turnId, options = {}) {
 module.exports = {
   plan,
   enforceWorkbookFirstPlan,
+  ensureWorkbookUnderstandingPlan,
   workbookHasLocalFinancials,
   shouldUseDomainPlaybookFirst,
   compactDomainPlanForPrompt

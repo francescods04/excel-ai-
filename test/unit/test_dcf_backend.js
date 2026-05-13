@@ -9,6 +9,7 @@ const { parseSheetMatrix } = require('../../server/utils/sheetParser');
 const { executeTool } = require('../../server/tools/registry');
 const { getAnalystDepth } = require('../../server/models/analystDepth');
 const { normalizeAiSchema } = require('../../server/models/workbookAiSchema');
+const { normalizeUnderstanding } = require('../../server/models/workbookUnderstanding');
 
 async function test(name, fn) {
   try {
@@ -118,6 +119,31 @@ const localFrenchContext = {
       rowCount: 11,
       columnCount: 5,
       preview: localFrenchFinancialSheet
+    }
+  }
+};
+
+const genericSalesContext = {
+  activeSheet: 'Sales',
+  workbookSheets: ['Sales'],
+  allSheetsData: {
+    Sales: {
+      isActive: true,
+      usedRange: 'Sales!A1:D4',
+      rowCount: 4,
+      columnCount: 4,
+      preview: [
+        ['Date', 'Region', 'Revenue', 'Units'],
+        ['2026-01-01', 'North', 1200, 12],
+        ['2026-01-02', 'South', 900, 9],
+        ['2026-01-03', 'North', 1400, 14]
+      ],
+      formulas: [
+        ['', '', '', ''],
+        ['', '', '', ''],
+        ['', '', '', ''],
+        ['', '', '', '']
+      ]
     }
   }
 };
@@ -346,6 +372,98 @@ async function main() {
     assert.strictEqual(schema.mappings.length, 2);
     assert.strictEqual(schema.mappings[0].value, 420000);
     assert.strictEqual(schema.mappings[1].value, 95000);
+  });
+
+  await test('generic workbook understanding validates AI semantic ranges against real cells', () => {
+    const normalized = normalizeUnderstanding({
+      workbookPurpose: 'Track sales by region and date',
+      domain: 'sales',
+      language: 'en',
+      confidence: 'high',
+      sheets: [
+        {
+          name: 'Sales',
+          role: 'source_data',
+          summary: 'Sales transaction table',
+          usedRange: 'Sales!A1:D4',
+          tables: [
+            {
+              name: 'Sales transactions',
+              range: 'Sales!A1:D4',
+              anchorCell: 'Sales!A1',
+              headerRow: 1,
+              headers: ['Date', 'Region', 'Revenue', 'Units'],
+              grain: 'one row per daily regional sale',
+              measures: ['Revenue', 'Units'],
+              dimensions: ['Region'],
+              timeFields: ['Date']
+            },
+            {
+              name: 'Invented table',
+              range: 'Sales!Z1:Z99',
+              anchorCell: 'Sales!Z1',
+              headers: ['Bad']
+            }
+          ],
+          keyCells: [
+            { cell: 'Sales!C2', label: 'Revenue sample', meaning: 'First transaction revenue' },
+            { cell: 'Sales!Z99', label: 'Invalid', meaning: 'Should be rejected' }
+          ],
+          formulaZones: [
+            { range: 'Sales!C2:D4', meaning: 'numeric transaction metrics' },
+            { range: 'Sales!X1:X4', meaning: 'invalid zone' }
+          ],
+          risks: ['No totals yet']
+        }
+      ],
+      crossSheetRelationships: [],
+      recommendedNextActions: ['Create a regional summary'],
+      questionsForUser: []
+    }, genericSalesContext, 'analizza vendite');
+
+    assert.strictEqual(normalized.domain, 'sales');
+    assert.strictEqual(normalized.sheets.length, 1);
+    assert.strictEqual(normalized.sheets[0].tables.length, 1);
+    assert.strictEqual(normalized.sheets[0].tables[0].range, 'Sales!A1:D4');
+    assert.strictEqual(normalized.sheets[0].keyCells.length, 1);
+    assert.strictEqual(normalized.sheets[0].formulaZones.length, 1);
+  });
+
+  await test('planner injects workbook.understand before AI reasoning tasks', () => {
+    const rawPlan = {
+      objective: 'crea un summary vendite',
+      tasks: [
+        { id: 't1', agent: 'data', tool: 'workbook.readWorkbook', description: 'read', params: { maxRows: 20, maxCols: 10 }, deps: [], requiresApproval: false, status: 'pending' },
+        { id: 't2', agent: 'formula', tool: 'llm.writeFormulas', description: 'summary', params: { sheet: 'Sales', section: 'summary' }, deps: ['t1'], requiresApproval: false, status: 'pending' }
+      ]
+    };
+    const plan = planner.ensureWorkbookUnderstandingPlan(rawPlan, genericSalesContext, 'crea un summary vendite');
+    const understand = plan.tasks.find(task => task.tool === 'workbook.understand');
+    const formula = plan.tasks.find(task => task.id === 't2');
+
+    assert.ok(understand);
+    assert.deepStrictEqual(understand.deps, ['t1']);
+    assert.ok(formula.deps.includes(understand.id));
+    assert.ok(formula.params.usesResults.includes(understand.id));
+    assert.strictEqual(formula.params.workbookUnderstanding, understand.id);
+  });
+
+  await test('workbook.understand deterministic fallback works for non-finance workbooks', async () => {
+    const previous = process.env.WORKBOOK_UNDERSTANDING_ENABLED;
+    process.env.WORKBOOK_UNDERSTANDING_ENABLED = 'false';
+    try {
+      const output = await executeTool('workbook.understand', { objective: 'analizza vendite' }, {
+        context: genericSalesContext,
+        results: {}
+      });
+      assert.strictEqual(output.actions.length, 0);
+      assert.strictEqual(output.data.builder, 'deterministic-fallback');
+      assert.strictEqual(output.data.sheets[0].name, 'Sales');
+      assert.strictEqual(output.data.sheets[0].tables[0].headers[0], 'Date');
+    } finally {
+      if (previous === undefined) delete process.env.WORKBOOK_UNDERSTANDING_ENABLED;
+      else process.env.WORKBOOK_UNDERSTANDING_ENABLED = previous;
+    }
   });
 
   await test('DCF template prefers local workbook financials over external/default data', () => {

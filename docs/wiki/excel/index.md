@@ -30,6 +30,7 @@
 
 ## Best Practices
 - [[Model Structure]] — Sheet organization
+- [[Workbook Understanding]] — Domain-agnostic semantic grounding before mutations
 - [[Formula Auditing]] — Trace precedents/dependents
 - [[Version Control]] — Named versions and changelog
 - [[Error Checking]] — Common errors and validation

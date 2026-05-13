@@ -2,6 +2,7 @@ const Ajv = require('ajv');
 const yahoo = require('../tools/yahoo');
 const { buildDcfSectionAi } = require('../models/dcfAiBuilder');
 const { buildWorkbookGraph } = require('../models/workbookGraph');
+const { understandWorkbook } = require('../models/workbookUnderstanding');
 const { runLayoutAgent, runFormulaAgent, runFormatAgent } = require('../agents/specialists');
 const { searchTools } = require('../utils/toolSearch');
 const SHARED_SCHEMAS = require('./schemas');
@@ -594,6 +595,28 @@ registerTool('workbook.buildGraph', async (params, memory = {}) => {
   },
   category: 'read',
   costHint: 'low',
+  requiresApproval: 'never'
+});
+
+registerTool('workbook.understand', async (params, memory = {}) => {
+  return understandWorkbook(params, memory);
+}, {
+  description: 'AI-first, domain-agnostic workbook understanding: identifies purpose, sheet roles, tables, measures, dimensions, key cells, formula zones, risks and next actions with validated cell/range grounding.',
+  inputs: ['fromResult', 'objective', 'maxRows', 'maxCols'],
+  schema: {
+    type: 'object',
+    properties: {
+      fromResult: { type: 'string', description: 'ID di un task workbook.readWorkbook/workbook.readSheet precedente' },
+      resultId: { type: 'string' },
+      objective: { type: 'string' },
+      maxRows: { type: 'integer', minimum: 1, maximum: 10000 },
+      maxCols: { type: 'integer', minimum: 1, maximum: 200 },
+      snapshot: { type: 'object' },
+      workbook: { type: 'object' }
+    }
+  },
+  category: 'read',
+  costHint: 'high',
   requiresApproval: 'never'
 });
 
