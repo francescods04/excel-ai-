@@ -365,7 +365,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'set_format',
-      description: 'Apply formatting to a cell range (colors, number format, alignment)',
+      description: 'Apply formatting to a cell range (colors, font, number format, alignment, widths/heights, borders)',
       parameters: {
         type: 'object',
         properties: {
@@ -377,8 +377,18 @@ const TOOL_DEFINITIONS = [
               backgroundColor: { type: 'string' },
               fontColor: { type: 'string' },
               bold: { type: 'boolean' },
+              italic: { type: 'boolean' },
+              fontSize: { type: 'number' },
+              fontName: { type: 'string' },
               numberFormat: { type: 'string' },
-              horizontalAlignment: { type: 'string' }
+              horizontalAlignment: { type: 'string' },
+              verticalAlignment: { type: 'string' },
+              wrapText: { type: 'boolean' },
+              columnWidth: { type: 'number' },
+              rowHeight: { type: 'number' },
+              borderBottomColor: { type: 'string' },
+              borderTopColor: { type: 'string' },
+              borders: { type: 'object' }
             }
           }
         },

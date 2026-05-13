@@ -580,6 +580,86 @@ function buildLayoutFromResults(results) {
   return { sheets: [...sheets], references };
 }
 
+const STANDARD_DCF_SHEETS = ['Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit'];
+
+function addSheetName(set, value) {
+  if (!value) return;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed) set.add(trimmed);
+    return;
+  }
+  if (typeof value === 'object') {
+    addSheetName(set, value.name || value.sheetName || value.sheet || value.targetSheet);
+  }
+}
+
+function addSheetsFromActions(set, actions) {
+  if (!Array.isArray(actions)) return;
+  for (const action of actions) {
+    if (!action || typeof action !== 'object') continue;
+    if (action.type === 'createSheet') addSheetName(set, action.name || action.sheet);
+    addSheetName(set, action.sheet || action.sheetName || action.targetSheet);
+    if (action.type === 'setCellRange' && action.cells && typeof action.cells === 'object') {
+      for (const address of Object.keys(action.cells)) {
+        const match = String(address).match(/^(?:'((?:[^']|'')+)'|([^!]+))!/);
+        if (match) addSheetName(set, (match[1] || match[2] || '').replace(/''/g, "'"));
+      }
+    }
+  }
+}
+
+function extractTurnMemorySummary(turn, failedTaskIds = new Set()) {
+  const sheets = new Set();
+  const dcfSections = new Set();
+  let modelType = null;
+
+  for (const task of (turn.plan?.tasks || [])) {
+    if (failedTaskIds.has(task.id)) continue;
+    if (task.tool === 'excel.createSheet') addSheetName(sheets, task.params?.name || task.params?.sheet);
+    if (task.tool === 'llm.planLayout' && task.params?.model) modelType = task.params.model;
+    if (task.tool === 'finance.dcf.buildSection') {
+      modelType = 'DCF';
+      if (task.params?.section) dcfSections.add(String(task.params.section).toLowerCase());
+      if (Array.isArray(task.params?.sheets)) task.params.sheets.forEach(sheet => addSheetName(sheets, sheet));
+    }
+  }
+
+  for (const result of Object.values(turn.results || {})) {
+    if (!result) continue;
+    addSheetsFromActions(sheets, result.actions);
+    const data = result.data && typeof result.data === 'object' ? result.data : null;
+    if (!data) continue;
+    addSheetName(sheets, data.sheetName || data.name || data.sheet);
+    if (Array.isArray(data.sheets)) data.sheets.forEach(sheet => addSheetName(sheets, sheet));
+    if (data.allSheetsData && typeof data.allSheetsData === 'object') {
+      Object.keys(data.allSheetsData).forEach(name => addSheetName(sheets, name));
+    }
+    addSheetsFromActions(sheets, data.actions);
+  }
+
+  const sheetList = Array.from(sheets);
+  const hasDcfSignal = modelType === 'DCF' ||
+    dcfSections.size > 0 ||
+    STANDARD_DCF_SHEETS.filter(sheet => sheetList.some(name => name.toLowerCase() === sheet.toLowerCase())).length >= 3;
+  const modelSheets = hasDcfSignal
+    ? STANDARD_DCF_SHEETS.filter(sheet => sheetList.some(name => name.toLowerCase() === sheet.toLowerCase()))
+    : sheetList;
+
+  const keyCells = hasDcfSignal ? {
+    assumptions: 'Assumptions!B10:B37',
+    wacc: 'WACC!B4:B30',
+    valuation: 'DCF!H30:H40',
+    sensitivity: 'Sensitivity!B4:G18'
+  } : null;
+
+  return {
+    sheetsCreated: modelSheets,
+    modelType: hasDcfSignal ? 'DCF' : (modelType || (sheetList.length > 0 ? 'custom' : null)),
+    keyCells
+  };
+}
+
 async function planTurn(turnId) {
   const turn = _getTurnRef(turnId);
   if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
@@ -924,23 +1004,15 @@ async function executeTurn(turnId) {
       logger.info(`[Turn ${turnId}] Turn completed successfully`);
     }
 
-    const sheetsCreated = [];
-    let modelType = null;
-    for (const task of (completedTurn.plan?.tasks || [])) {
-      if (task.tool === 'excel.createSheet' && task.params?.name) {
-        sheetsCreated.push(task.params.name);
-      }
-      if (task.tool === 'llm.planLayout' && task.params?.model) {
-        modelType = task.params.model;
-      }
-    }
+    const memorySummary = extractTurnMemorySummary(completedTurn, failedTaskIds);
     const successCount = turn.plan.tasks.length - failedTaskIds.size;
     conversationMemory.addTurnMemory({
       turnId,
       objective: completedTurn.objective,
       planSummary: `Piano con ${successCount}/${turn.plan.tasks.length} task completati${failedTaskIds.size > 0 ? ` (${failedTaskIds.size} falliti)` : ''}`,
-      sheetsCreated,
-      modelType: modelType || (sheetsCreated.length > 0 ? 'custom' : null)
+      sheetsCreated: memorySummary.sheetsCreated,
+      modelType: memorySummary.modelType,
+      keyCells: memorySummary.keyCells
     });
   } catch (error) {
     logger.error(`[Turn ${turnId}] Turn execution error: ${error.message}`);

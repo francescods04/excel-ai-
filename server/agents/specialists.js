@@ -217,7 +217,7 @@ If the user asks to change colors/theme/palette/style:
 - Use the exact requested color family or brand color when provided.
 
 Supported actions only:
-- setCellFormat with options: backgroundColor, fontColor, bold, italic, numberFormat, horizontalAlignment
+- setCellFormat with options: backgroundColor, fontColor, bold, italic, fontSize, fontName, numberFormat, horizontalAlignment, verticalAlignment, wrapText, columnWidth, rowHeight, borderBottomColor, borderTopColor, borders
 - addConditionalFormat with options: colorScale, dataBar, iconSet, cellValue
 
 INSTITUTIONAL FORMATTING STANDARDS (Goldman/JPMorgan style):
@@ -416,8 +416,17 @@ const FORMAT_OPTION_KEYS = new Set([
   'fontColor',
   'bold',
   'italic',
+  'fontSize',
+  'fontName',
   'numberFormat',
-  'horizontalAlignment'
+  'horizontalAlignment',
+  'verticalAlignment',
+  'wrapText',
+  'columnWidth',
+  'rowHeight',
+  'borderBottomColor',
+  'borderTopColor',
+  'borders'
 ]);
 
 function normalizeFormatActions(rawActions, defaultSheet) {

@@ -3,6 +3,8 @@
 const state = {
   isProcessing: false,
   currentTurnId: null,
+  lastTurnId: null,
+  lastCompletedTurnId: null,
   currentPlanTasks: null,
   currentAgentId: null,
   eventSource: null,

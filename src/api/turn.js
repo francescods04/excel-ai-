@@ -2,11 +2,11 @@
 
 import { API_BASE } from '../ui/tabs.js';
 
-async function startTurn(message, context, modelOverride) {
+async function startTurn(message, context, modelOverride, parentTurnId = null) {
   const res = await fetch(`${API_BASE}/api/turn/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, context, modelOverride })
+    body: JSON.stringify({ message, context, modelOverride, parentTurnId })
   });
   if (!res.ok) {
     throw new Error(await getErrorMessageFromResponse(res, 'Errore avvio turn'));

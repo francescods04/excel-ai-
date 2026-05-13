@@ -491,8 +491,8 @@ function buildWaccActions() {
   set(cells, 'A3', cell('Cost of Equity', STYLE.section));
   set(cells, 'A4', cell('Risk-Free Rate (%)', STYLE.label));
   set(cells, 'B4', formula('=Assumptions!$B$26', pct));
-  set(cells, 'A5', cell('Beta', STYLE.label));
-  set(cells, 'B5', formula('=Assumptions!$B$28', multiple));
+  set(cells, 'A5', cell('Selected Beta', STYLE.label));
+  set(cells, 'B5', formula('=B28', multiple));
   set(cells, 'A6', cell('Market Risk Premium (%)', STYLE.label));
   set(cells, 'B6', formula('=Assumptions!$B$27', pct));
   set(cells, 'A7', cell('Cost of Equity (CAPM) (%)', STYLE.total));
@@ -515,6 +515,26 @@ function buildWaccActions() {
   set(cells, 'B17', formula('=B15/(1+B15)', pct));
   set(cells, 'A19', cell('WACC (%)', STYLE.total));
   set(cells, 'B19', formula('=B16*B7+B17*B12', fmt(STYLE.total, { numberFormat: NUM_FORMATS.percent })));
+
+  set(cells, 'A21', cell('Beta Evidence & Peer Cross-Check', STYLE.section));
+  set(cells, 'A22', cell('Observed Levered Beta', STYLE.label));
+  set(cells, 'B22', formula('=Assumptions!$B$28', multiple));
+  set(cells, 'A23', cell('Peer / Sector Levered Beta', STYLE.label));
+  set(cells, 'B23', formula('=Assumptions!$B$28', multiple));
+  set(cells, 'A24', cell('Target Debt / Equity', STYLE.label));
+  set(cells, 'B24', formula('=B15', multiple));
+  set(cells, 'A25', cell('Tax Rate (%)', STYLE.label));
+  set(cells, 'B25', formula('=B11', pct));
+  set(cells, 'A26', cell('Unlevered Peer Beta', STYLE.label));
+  set(cells, 'B26', formula('=B23/(1+(1-B25)*B24)', multiple));
+  set(cells, 'A27', cell('Relevered Peer Beta', STYLE.label));
+  set(cells, 'B27', formula('=B26*(1+(1-B25)*B24)', multiple));
+  set(cells, 'A28', cell('Selected Beta', STYLE.total));
+  set(cells, 'B28', formula('=AVERAGE(B22,B27)', fmt(STYLE.total, { numberFormat: NUM_FORMATS.multiple })));
+  set(cells, 'A29', cell('Beta Cross-Check', STYLE.check));
+  set(cells, 'B29', formula('=IF(ABS(B28-B22)<=0.25,"OK","Review")', STYLE.check));
+  set(cells, 'A30', cell('Method Note', STYLE.label));
+  set(cells, 'B30', cell('Use observed beta plus peer/sector beta; unlever peers, then relever to target D/E.', STYLE.check));
 
   return [makeSetCellRangeAction('WACC', cells)];
 }
@@ -921,7 +941,7 @@ function buildFormatActions() {
     ['Summary', 'A1:C32', { horizontalAlignment: 'Left' }],
     ['Sources', 'A1:D42', { horizontalAlignment: 'Left' }],
     ['Assumptions', 'A1:A40', { horizontalAlignment: 'Left' }],
-    ['WACC', 'A1:A22', { horizontalAlignment: 'Left' }],
+    ['WACC', 'A1:A30', { horizontalAlignment: 'Left' }],
     ['DCF', 'A1:A40', { horizontalAlignment: 'Left' }],
     ['Sensitivity', 'A1:A18', { horizontalAlignment: 'Left' }],
     ['Scenarios', 'A1:G18', { horizontalAlignment: 'Left' }],
@@ -929,7 +949,7 @@ function buildFormatActions() {
     ['Summary', 'B1:C32', { horizontalAlignment: 'Right' }],
     ['Sources', 'B1:D42', { horizontalAlignment: 'Right' }],
     ['Assumptions', 'B1:B40', { horizontalAlignment: 'Right' }],
-    ['WACC', 'B1:B22', { horizontalAlignment: 'Right' }],
+    ['WACC', 'B1:B30', { horizontalAlignment: 'Right' }],
     ['DCF', 'B1:H40', { horizontalAlignment: 'Right' }],
     ['Sensitivity', 'B1:G18', { horizontalAlignment: 'Right' }],
     ['Scenarios', 'B1:G18', { horizontalAlignment: 'Right' }],

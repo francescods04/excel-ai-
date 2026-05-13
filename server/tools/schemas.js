@@ -28,8 +28,17 @@ const CELL_STYLES = {
     backgroundColor: { type: 'string', description: 'Hex color e.g. "#FFFFE0"' },
     bold: { type: 'boolean' },
     italic: { type: 'boolean' },
+    fontSize: { type: 'number' },
+    fontName: { type: 'string' },
     numberFormat: { type: 'string', description: 'Excel number format e.g. "#,##0.00"' },
-    horizontalAlignment: { type: 'string', enum: ['Left', 'Center', 'Right'] }
+    horizontalAlignment: { type: 'string', enum: ['Left', 'Center', 'Right'] },
+    verticalAlignment: { type: 'string', enum: ['Top', 'Center', 'Bottom'] },
+    wrapText: { type: 'boolean' },
+    columnWidth: { type: 'number' },
+    rowHeight: { type: 'number' },
+    borderBottomColor: { type: 'string' },
+    borderTopColor: { type: 'string' },
+    borders: { type: 'object' }
   }
 };
 

@@ -487,6 +487,7 @@ async function resumeAgent(agentId, userResponse) {
 }
 
 async function runTurnMode(text) {
+  const parentTurnId = state.currentTurnId || state.lastCompletedTurnId || state.lastTurnId || null;
   resetAgent();
   switchTab('progress');
   closeAgentEventStream();
@@ -498,9 +499,11 @@ async function runTurnMode(text) {
     const context = await getExcelContext();
     addLog('Lettura contesto Excel completata');
 
-    const startData = await startTurn(text, context, modelSelect.value);
+    const startData = await startTurn(text, context, modelSelect.value, parentTurnId);
     state.currentTurnId = startData.turnId;
+    state.lastTurnId = startData.turnId;
     addLog('Turn creato: ' + startData.turnId);
+    if (parentTurnId) addLog('Continuità chat: uso il contesto del turn precedente ' + parentTurnId);
     openTurnEventStream(startData.turnId, planMsgId);
   } catch (err) {
     removeMessage(planMsgId);
@@ -650,6 +653,10 @@ function openTurnEventStream(turnId, planMsgId) {
     src.addEventListener('turnCompleted', (e) => {
       try {
         const data = JSON.parse(e.data);
+        state.lastTurnId = data.turnId || turnId;
+        if (!(data.status === 'error' || data.error)) {
+          state.lastCompletedTurnId = data.turnId || turnId;
+        }
         removeMessage(planMsgId);
         hideApproveBar();
         hideTypingIndicator();

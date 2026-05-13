@@ -28,9 +28,9 @@ const SECTION_REQUIREMENTS = {
   },
   wacc: {
     sheet: 'WACC',
-    minCells: 22,
-    required: ['B4', 'B5', 'B6', 'B7', 'B10', 'B11', 'B12', 'B15', 'B16', 'B17', 'B19'],
-    mustMatchTemplate: ['B4', 'B5', 'B6', 'B7', 'B10', 'B11', 'B12', 'B15', 'B16', 'B17', 'B19']
+    minCells: 30,
+    required: ['B4', 'B5', 'B6', 'B7', 'B10', 'B11', 'B12', 'B15', 'B16', 'B17', 'B19', 'B22', 'B23', 'B26', 'B27', 'B28', 'B29'],
+    mustMatchTemplate: ['B4', 'B5', 'B6', 'B7', 'B10', 'B11', 'B12', 'B15', 'B16', 'B17', 'B19', 'B26', 'B27', 'B28', 'B29']
   },
   dcf: {
     sheet: 'DCF',
@@ -88,7 +88,7 @@ Operational rules:
 
 const SECTION_CONTRACTS = {
   assumptions: `Build only the Assumptions sheet. Include company/source, historical market inputs, projection assumptions, WACC inputs, and equity bridge inputs. Use values for inputs and formulas only where a calculation is required, such as current market cap.`,
-  wacc: `Build only the WACC sheet. Pull inputs from Assumptions. Include CAPM cost of equity, after-tax cost of debt, debt/equity weights, and final WACC.`,
+  wacc: `Build only the WACC sheet. Pull inputs from Assumptions. Include CAPM cost of equity, after-tax cost of debt, debt/equity weights, final WACC, and a beta evidence section that compares observed beta with peer/sector beta, unlevering and relevering peer beta to target D/E before selecting beta.`,
   dcf: `Build only the DCF sheet. Include five forecast years, terminal value, enterprise value, equity bridge, implied share price, current price, premium/discount, and a bridge check.`,
   projection: `Build only the DCF projection sheet content. Include five forecast years, terminal value, enterprise value, equity bridge, implied share price, current price, premium/discount, and a bridge check.`,
   sensitivity: `Build only the Sensitivity sheet. Include WACC x terminal-growth tables for implied share price and enterprise value. Use formulas, not Excel data-table syntax.`

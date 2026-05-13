@@ -357,6 +357,19 @@ async function main() {
     assert.ok(sensCells.G18.formula.includes('SUM(DCF!$C$24:$G$24)'));
   });
 
+  await test('DCF WACC template exposes beta peer cross-check methodology', () => {
+    const wacc = buildDcfSection({ section: 'wacc', ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
+    const cells = wacc.actions[0].cells;
+    assert.strictEqual(wacc.actions[0].sheet, 'WACC');
+    assert.strictEqual(cells.B5.formula, '=B28');
+    assert.strictEqual(cells.A21.value, 'Beta Evidence & Peer Cross-Check');
+    assert.strictEqual(cells.B26.formula, '=B23/(1+(1-B25)*B24)');
+    assert.strictEqual(cells.B27.formula, '=B26*(1+(1-B25)*B24)');
+    assert.strictEqual(cells.B28.formula, '=AVERAGE(B22,B27)');
+    assert.ok(cells.B30.value.includes('unlever peers'));
+    assert.strictEqual(validateDcfSectionContract('wacc', wacc.actions, wacc.actions).ok, true);
+  });
+
   await test('DCF template creates source, scenario, summary and audit layers', () => {
     const shell = buildDcfSection({ section: 'shell', ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
     const createdSheets = shell.actions.filter(action => action.type === 'createSheet').map(action => action.sheet || action.name);
@@ -409,6 +422,8 @@ async function main() {
     assert.strictEqual(plan.data.theme, 'red');
     assert.strictEqual(plan.data.strategy, 'semantic_restyle');
     assert.ok(plan.actions.length > 45);
+    assert.ok(plan.actions.some(action => action.options?.columnWidth));
+    assert.ok(plan.actions.some(action => action.options?.borders || action.options?.borderBottomColor));
     assert.ok(plan.actions.some(action => action.sheet === 'Summary' && action.target === 'A1:C1' && action.options.backgroundColor === '#7F1D1D'));
     assert.ok(plan.actions.some(action => action.sheet === 'Sensitivity' && action.type === 'addConditionalFormat' && action.target === 'C5:G9'));
     assert.ok(!plan.actions.some(action => action.sheet === 'Summary' && action.target === 'A1:C29' && action.options.backgroundColor === '#FFFFFF'));
@@ -437,6 +452,24 @@ async function main() {
     assert.strictEqual(plan.data.strategy, 'semantic_restyle');
     assert.ok(plan.actions.some(action => action.sheet === 'Sheet1' && action.target === 'A1:D1' && action.options.backgroundColor === '#14532D'));
     assert.ok(plan.actions.some(action => action.sheet === 'Sheet1' && action.target === 'A3:D3' && action.options.backgroundColor === '#D9EAD3'));
+  });
+
+  await test('planner keeps short formatting requests attached to the last model', async () => {
+    const plan = await planner.plan('cambia la formattazione in verde professionale', {
+      activeSheet: 'Sheet1',
+      workbookSheets: ['Sheet1', 'Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit'],
+      lastModelState: {
+        modelType: 'DCF',
+        sheets: ['Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit'],
+        turnId: 'turn-previous-dcf'
+      }
+    });
+    const formatTask = plan.tasks.find(task => task.tool === 'llm.planFormat');
+    assert.ok(formatTask);
+    assert.strictEqual(formatTask.params.sheet, 'Summary');
+    assert.strictEqual(formatTask.params.scope, 'workbook');
+    assert.deepStrictEqual(formatTask.params.sheets, ['Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit']);
+    assert.ok(!formatTask.params.sheets.includes('Sheet1'));
   });
 
   await test('formatter targets explicit model sheets without blanket-formatting source data', () => {

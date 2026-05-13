@@ -73,7 +73,9 @@ For multi-sheet analysis, audits, repair, formatting or model completion, build 
    - Market data (if public): Beta, Risk-Free Rate, Market Risk Premium, Cost of Debt, Target D/E
 
 2) WACC Sheet:
+   - Think like an analyst before writing formulas: define how WACC is built, identify missing inputs, then expose those inputs visibly.
    - Cost of Equity (CAPM): =RiskFree + Beta*MarketRiskPremium
+   - Beta must not be a blind hardcode: use observed beta, peer/sector beta cross-check, unlever peer beta, relever to target D/E, then select a visible beta.
    - Cost of Debt (after-tax): =PreTaxCostOfDebt*(1-TaxRate)
    - WACC: =(E/(D+E))*CostOfEquity + (D/(D+E))*CostOfDebt*(1-TaxRate)
 
@@ -230,6 +232,12 @@ function compactPlanningContext(context) {
     allSheetsData: compactAllSheetsData(context.allSheetsData, context.activeSheet),
     conversationHistory: context.conversationHistory || '',
     recentSheets: Array.isArray(context.recentSheets) ? context.recentSheets : [],
+    lastModelState: context.lastModelState && typeof context.lastModelState === 'object' ? {
+      modelType: context.lastModelState.modelType || null,
+      sheets: Array.isArray(context.lastModelState.sheets) ? context.lastModelState.sheets.slice(0, 16) : [],
+      turnId: context.lastModelState.turnId || null,
+      keyCells: context.lastModelState.keyCells || {}
+    } : null,
     inferredData: {
       inputCount: parsed.inferredInputs.length,
       highConfidenceInputs: parsed.inferredInputs.filter(i => i.confidence === 'high').map(i => ({
@@ -352,6 +360,45 @@ function inferExistingDcfIdentity(context = {}) {
     ticker: ticker ? String(ticker).trim().toUpperCase() : null,
     companyName: companyName ? String(companyName).trim() : null
   };
+}
+
+const CONTINUITY_MODEL_SHEETS = ['Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit'];
+
+function existingSheetNames(context = {}) {
+  return Array.isArray(context.workbookSheets) ? context.workbookSheets.filter(Boolean).map(String) : [];
+}
+
+function normalizeSheetSet(sheets = []) {
+  const seen = new Set();
+  const out = [];
+  for (const sheet of sheets) {
+    const name = typeof sheet === 'string' ? sheet : (sheet?.name || sheet?.sheetName || sheet?.sheet);
+    if (!name) continue;
+    const key = String(name).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(String(name));
+  }
+  return out;
+}
+
+function pickExistingModelSheets(context = {}) {
+  const existing = existingSheetNames(context);
+  const lowerExisting = new Map(existing.map(sheet => [sheet.toLowerCase(), sheet]));
+  const modelSheets = CONTINUITY_MODEL_SHEETS
+    .map(sheet => lowerExisting.get(sheet.toLowerCase()))
+    .filter(Boolean);
+  return modelSheets.length >= 2 ? modelSheets : [];
+}
+
+function getContinuityTargetSheets(context = {}, fallbackSheet = null) {
+  const lastSheets = normalizeSheetSet(context.lastModelState?.sheets || []);
+  if (lastSheets.length > 0) return lastSheets;
+  const existingModelSheets = pickExistingModelSheets(context);
+  if (existingModelSheets.length > 0) return existingModelSheets;
+  const recentSheets = normalizeSheetSet(context.recentSheets || []);
+  if (recentSheets.length > 0) return recentSheets;
+  return fallbackSheet ? [fallbackSheet] : [];
 }
 
 const planCache = new Map();
@@ -559,7 +606,7 @@ function buildAgenticDcfPlan(objective, context, equityIntent = {}) {
     {
       section: 'wacc',
       agent: 'formula',
-      description: 'AI-build WACC from CAPM, debt cost, tax rate and capital structure',
+      description: 'AI-build WACC from CAPM, debt cost, tax rate, capital structure and beta peer/sector cross-check',
       deps: [`t${nextId + 2}`]
     },
     {
@@ -823,13 +870,25 @@ function buildFinanceFallbackPlan(objective, context) {
   }
 
   if (isFormat) {
+    const targetSheets = getContinuityTargetSheets(context, activeSheet);
+    const targetSheet = targetSheets.includes(activeSheet) ? activeSheet : (targetSheets[0] || activeSheet);
     return {
       objective,
       tasks: [
         { id: 't1', agent: 'data', tool: 'workbook.readWorkbook', description: 'Leggi struttura, formule e used range del workbook corrente', params: { maxRows: 120, maxCols: 40, includeFormulas: true }, deps: [], requiresApproval: false },
         { id: 't2', agent: 'data', tool: 'workbook.buildGraph', description: 'Mappa fogli, tabelle e aree da formattare con WorkbookGraph', params: { fromResult: 't1', source: 'planner.format' }, deps: ['t1'], requiresApproval: false },
-        { id: 't3', agent: 'format', tool: 'llm.planFormat', description: 'Prepara formattazione professionale su tutto il workbook', params: { sheet: activeSheet, objective, mode: 'finance_cleanup', scope: 'workbook', usesResults: ['t1', 't2'] }, deps: ['t2'], requiresApproval: false },
-        { id: 't4', agent: 'format', tool: 'excel.applyFormat', description: 'Applica formattazione', params: { fromResult: 't3', sheet: activeSheet }, deps: ['t3'], requiresApproval: false }
+        {
+          id: 't3',
+          agent: 'format',
+          tool: 'llm.planFormat',
+          description: targetSheets.length > 1
+            ? `Prepara formattazione professionale sul modello corrente (${targetSheets.join(', ')})`
+            : 'Prepara formattazione professionale sul foglio corrente',
+          params: { sheet: targetSheet, sheets: targetSheets, objective, mode: 'finance_cleanup', scope: targetSheets.length > 1 ? 'workbook' : 'sheet', usesResults: ['t1', 't2'] },
+          deps: ['t2'],
+          requiresApproval: false
+        },
+        { id: 't4', agent: 'format', tool: 'excel.applyFormat', description: 'Applica formattazione', params: { fromResult: 't3', sheet: targetSheet }, deps: ['t3'], requiresApproval: false }
       ]
     };
   }
@@ -871,12 +930,14 @@ function buildFinanceFallbackPlan(objective, context) {
 
     // If formatting-related modification, only run format agent
     if (['formatta', 'format', 'stile', 'colore', 'color', 'riformatta'].some(k => lowerObjective.includes(k))) {
+      const targetSheets = getContinuityTargetSheets(context, activeSheet);
+      const targetSheet = targetSheets.includes(activeSheet) ? activeSheet : (targetSheets[0] || activeSheet);
       tasks.push({
         id: `t${nextId}`,
         agent: 'format',
         tool: 'llm.planFormat',
         description: `Aggiorna formattazione: ${objective}`,
-        params: { sheet: activeSheet, objective, mode: 'finance_cleanup', scope: 'workbook', usesResults: ['t1', 't2', 't3'] },
+        params: { sheet: targetSheet, sheets: targetSheets, objective, mode: 'finance_cleanup', scope: targetSheets.length > 1 ? 'workbook' : 'sheet', usesResults: ['t1', 't2', 't3'] },
         deps,
         requiresApproval: false
       });
@@ -885,7 +946,7 @@ function buildFinanceFallbackPlan(objective, context) {
         agent: 'format',
         tool: 'excel.applyFormat',
         description: 'Applica formattazione aggiornata',
-        params: { fromResult: `t${nextId}`, sheet: activeSheet },
+        params: { fromResult: `t${nextId}`, sheet: targetSheet },
         deps: [`t${nextId}`],
         requiresApproval: false
       });

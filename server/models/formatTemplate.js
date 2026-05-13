@@ -10,6 +10,8 @@ const DEFAULT_PALETTE = {
   checkFill: '#FFF2CC',
   bodyFont: '#111827',
   mutedFont: '#404040',
+  border: '#D9E2EC',
+  borderStrong: '#8EA9C1',
   white: '#FFFFFF'
 };
 
@@ -25,6 +27,8 @@ const RED_PALETTE = {
   checkFill: '#FFF2CC',
   bodyFont: '#111827',
   mutedFont: '#404040',
+  border: '#E6B8B7',
+  borderStrong: '#B45F5B',
   white: '#FFFFFF'
 };
 
@@ -43,6 +47,8 @@ const PALETTE_LIBRARY = {
     checkFill: '#FFF2CC',
     bodyFont: '#111827',
     mutedFont: '#404040',
+    border: '#B6D7A8',
+    borderStrong: '#6AA84F',
     white: '#FFFFFF',
     heatLow: '#F4CCCC',
     heatMid: '#FFFFFF',
@@ -60,6 +66,8 @@ const PALETTE_LIBRARY = {
     checkFill: '#FEF3C7',
     bodyFont: '#111827',
     mutedFont: '#4B5563',
+    border: '#D1D5DB',
+    borderStrong: '#6B7280',
     white: '#FFFFFF',
     heatLow: '#FEE2E2',
     heatMid: '#FFFFFF',
@@ -77,6 +85,8 @@ const PALETTE_LIBRARY = {
     checkFill: '#E0F2FE',
     bodyFont: '#111827',
     mutedFont: '#57534E',
+    border: '#FCD34D',
+    borderStrong: '#B45309',
     white: '#FFFFFF',
     heatLow: '#FECACA',
     heatMid: '#FFFFFF',
@@ -147,6 +157,31 @@ function cond(sheet, target, options) {
   return { type: 'addConditionalFormat', sheet, target, options };
 }
 
+function thinBorder(color) {
+  return { style: 'Continuous', color, weight: 'Thin' };
+}
+
+function mediumBorder(color) {
+  return { style: 'Continuous', color, weight: 'Medium' };
+}
+
+function gridBorders(palette) {
+  return {
+    insideHorizontal: thinBorder(palette.border || '#D9E2EC'),
+    insideVertical: thinBorder(palette.border || '#D9E2EC')
+  };
+}
+
+function baseFontOptions(extra = {}) {
+  return {
+    fontName: 'Aptos',
+    fontSize: 10,
+    verticalAlignment: 'Center',
+    wrapText: false,
+    ...extra
+  };
+}
+
 function normalizeText(value) {
   return String(value || '')
     .normalize('NFD')
@@ -196,6 +231,8 @@ function derivePaletteFromAccent(name, accentHex) {
     checkFill: '#FFF2CC',
     bodyFont: '#111827',
     mutedFont: '#404040',
+    border: mix(accentHex, '#FFFFFF', 0.68),
+    borderStrong: mix(accentHex, '#000000', 0.18),
     white: '#FFFFFF',
     heatLow: '#F4CCCC',
     heatMid: '#FFFFFF',
@@ -327,13 +364,13 @@ function applyDetectedRows(actions, sheet, info, range, palette) {
     const target = a1(range.startCol, rowNumber, range.endCol, rowNumber);
     const kind = classifyRow(row);
     if (kind === 'header') {
-      actions.push(fmt(sheet, target, { backgroundColor: palette.headerFill, fontColor: palette.white, bold: true, horizontalAlignment: 'Center' }));
+      actions.push(fmt(sheet, target, baseFontOptions({ backgroundColor: palette.headerFill, fontColor: palette.white, bold: true, horizontalAlignment: 'Center', rowHeight: 21, borderBottomColor: palette.borderStrong })));
     } else if (kind === 'section') {
-      actions.push(fmt(sheet, target, { backgroundColor: palette.sectionFill, fontColor: palette.sectionFont, bold: true, horizontalAlignment: 'Left' }));
+      actions.push(fmt(sheet, target, baseFontOptions({ backgroundColor: palette.sectionFill, fontColor: palette.sectionFont, bold: true, horizontalAlignment: 'Left', rowHeight: 22, borderTopColor: palette.borderStrong, borderBottomColor: palette.border })));
     } else if (kind === 'total') {
-      actions.push(fmt(sheet, target, { backgroundColor: palette.totalFill, fontColor: palette.bodyFont, bold: true }));
+      actions.push(fmt(sheet, target, baseFontOptions({ backgroundColor: palette.totalFill, fontColor: palette.bodyFont, bold: true, borderTopColor: palette.borderStrong })));
     } else if (kind === 'check') {
-      actions.push(fmt(sheet, target, { backgroundColor: palette.checkFill, fontColor: palette.bodyFont, italic: true }));
+      actions.push(fmt(sheet, target, baseFontOptions({ backgroundColor: palette.checkFill, fontColor: palette.bodyFont, italic: true })));
     }
   }
 }
@@ -344,17 +381,21 @@ function addBaseSheetFormatting(actions, sheet, info, palette, intent = {}) {
   if (range.endCol < range.startCol) range.endCol = range.startCol + Math.max(1, info.columnCount || 1) - 1;
 
   const used = a1(range.startCol, range.startRow, range.endCol, range.endRow);
+  actions.push(fmt(sheet, used, baseFontOptions({
+    fontColor: palette.bodyFont,
+    borders: gridBorders(palette)
+  })));
   if (intent.strategy !== 'semantic_restyle') {
     actions.push(fmt(sheet, used, { backgroundColor: palette.white, fontColor: palette.bodyFont }));
   }
-  actions.push(fmt(sheet, a1(range.startCol, range.startRow, range.startCol, range.endRow), { horizontalAlignment: 'Left', fontColor: palette.bodyFont }));
+  actions.push(fmt(sheet, a1(range.startCol, range.startRow, range.startCol, range.endRow), { horizontalAlignment: 'Left', fontColor: palette.bodyFont, columnWidth: 210 }));
   if (range.endCol > range.startCol) {
-    actions.push(fmt(sheet, a1(range.startCol + 1, range.startRow, range.endCol, range.endRow), { horizontalAlignment: 'Right' }));
+    actions.push(fmt(sheet, a1(range.startCol + 1, range.startRow, range.endCol, range.endRow), { horizontalAlignment: 'Right', columnWidth: 92 }));
   }
-  actions.push(fmt(sheet, a1(range.startCol, range.startRow, range.endCol, range.startRow), { backgroundColor: palette.titleFill, fontColor: palette.white, bold: true, horizontalAlignment: 'Left' }));
+  actions.push(fmt(sheet, a1(range.startCol, range.startRow, range.endCol, range.startRow), baseFontOptions({ backgroundColor: palette.titleFill, fontColor: palette.white, bold: true, fontSize: 12, horizontalAlignment: 'Left', rowHeight: 26, borderBottomColor: palette.borderStrong })));
 
   if (range.endRow > range.startRow && intent.strategy !== 'semantic_restyle') {
-    actions.push(fmt(sheet, a1(range.startCol, range.startRow + 1, range.endCol, range.startRow + 1), { backgroundColor: palette.headerFill, fontColor: palette.white, bold: true, horizontalAlignment: 'Center' }));
+    actions.push(fmt(sheet, a1(range.startCol, range.startRow + 1, range.endCol, range.startRow + 1), baseFontOptions({ backgroundColor: palette.headerFill, fontColor: palette.white, bold: true, horizontalAlignment: 'Center', rowHeight: 21, borderBottomColor: palette.borderStrong })));
   }
 
   applyDetectedRows(actions, sheet, info, range, palette);
@@ -364,6 +405,26 @@ function addBaseSheetFormatting(actions, sheet, info, palette, intent = {}) {
 function addDcfSheetFormatting(actions, sheet, palette) {
   const p = palette;
   const heat = { minColor: p.heatLow || '#F4CCCC', midColor: p.heatMid || '#FFFFFF', maxColor: p.heatHigh || '#D9EAD3' };
+  const key = sheet.toLowerCase();
+  const geometry = {
+    summary: { used: 'A1:C32', label: 'A1:A32', values: 'B1:C32', labelWidth: 220, valueWidth: 118 },
+    sources: { used: 'A1:D42', label: 'A1:A42', values: 'B1:D42', labelWidth: 190, valueWidth: 150 },
+    assumptions: { used: 'A1:B40', label: 'A1:A40', values: 'B1:B40', labelWidth: 245, valueWidth: 125 },
+    wacc: { used: 'A1:B30', label: 'A1:A30', values: 'B1:B30', labelWidth: 255, valueWidth: 125 },
+    dcf: { used: 'A1:H40', label: 'A1:A40', values: 'B1:H40', labelWidth: 230, valueWidth: 92 },
+    sensitivity: { used: 'A1:G18', label: 'A1:A18', values: 'B1:G18', labelWidth: 155, valueWidth: 94 },
+    scenarios: { used: 'A1:G18', label: 'A1:A18', values: 'B1:G18', labelWidth: 170, valueWidth: 94 },
+    audit: { used: 'A1:C24', label: 'A1:A24', values: 'B1:C24', labelWidth: 230, valueWidth: 140 }
+  }[key];
+  if (geometry) {
+    actions.push(fmt(sheet, geometry.used, baseFontOptions({
+      fontColor: p.bodyFont,
+      borders: gridBorders(p)
+    })));
+    actions.push(fmt(sheet, geometry.label, { horizontalAlignment: 'Left', columnWidth: geometry.labelWidth }));
+    actions.push(fmt(sheet, geometry.values, { horizontalAlignment: 'Right', columnWidth: geometry.valueWidth }));
+    actions.push(fmt(sheet, geometry.used.split(':')[0], { rowHeight: 26 }));
+  }
   switch (sheet.toLowerCase()) {
     case 'summary':
       actions.push(fmt(sheet, 'A1:C1', { backgroundColor: p.titleFill, fontColor: p.white, bold: true }));
@@ -397,11 +458,14 @@ function addDcfSheetFormatting(actions, sheet, palette) {
       break;
     case 'wacc':
       actions.push(fmt(sheet, 'A1:B1', { backgroundColor: p.titleFill, fontColor: p.white, bold: true }));
-      ['A3:B3', 'A9:B9', 'A14:B14'].forEach(target => actions.push(fmt(sheet, target, { backgroundColor: p.sectionFill, fontColor: p.sectionFont, bold: true })));
-      ['A7:B7', 'A12:B12', 'A19:B19'].forEach(target => actions.push(fmt(sheet, target, { backgroundColor: p.totalFill, fontColor: p.bodyFont, bold: true })));
-      actions.push(fmt(sheet, 'B4:B19', { numberFormat: NUM_FORMATS.percent }));
+      ['A3:B3', 'A9:B9', 'A14:B14', 'A21:B21'].forEach(target => actions.push(fmt(sheet, target, { backgroundColor: p.sectionFill, fontColor: p.sectionFont, bold: true, borderTopColor: p.borderStrong, borderBottomColor: p.border })));
+      ['A7:B7', 'A12:B12', 'A19:B19', 'A28:B28'].forEach(target => actions.push(fmt(sheet, target, { backgroundColor: p.totalFill, fontColor: p.bodyFont, bold: true, borderTopColor: p.borderStrong })));
+      actions.push(fmt(sheet, 'A29:B30', { backgroundColor: p.checkFill, fontColor: p.bodyFont, italic: true }));
+      actions.push(fmt(sheet, 'B4:B30', { numberFormat: NUM_FORMATS.percent }));
       actions.push(fmt(sheet, 'B5:B5', { numberFormat: NUM_FORMATS.multiple }));
       actions.push(fmt(sheet, 'B15:B15', { numberFormat: NUM_FORMATS.multiple }));
+      actions.push(fmt(sheet, 'B22:B24', { numberFormat: NUM_FORMATS.multiple }));
+      actions.push(fmt(sheet, 'B26:B28', { numberFormat: NUM_FORMATS.multiple }));
       break;
     case 'dcf':
       actions.push(fmt(sheet, 'A1:H1', { backgroundColor: p.titleFill, fontColor: p.white, bold: true }));
