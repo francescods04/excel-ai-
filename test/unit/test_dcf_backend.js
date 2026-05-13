@@ -2,8 +2,10 @@ const assert = require('assert');
 const planner = require('../../server/agents/planner');
 const { buildDcfSection, inferDcfInputs } = require('../../server/models/dcfTemplate');
 const { buildDcfSectionAi, normalizeActions, validateDcfSectionContract } = require('../../server/models/dcfAiBuilder');
+const { buildProfessionalFormatPlan } = require('../../server/models/formatTemplate');
 const { validateFormula, validateTaskOutput } = require('../../server/agents/critic');
 const { inferEquityIntent } = require('../../server/utils/equityIntent');
+const { executeTool } = require('../../server/tools/registry');
 
 async function test(name, fn) {
   try {
@@ -187,6 +189,65 @@ async function main() {
     const audit = buildDcfSection({ section: 'audit', ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
     assert.strictEqual(audit.actions[0].sheet, 'Audit');
     assert.ok(audit.actions[0].cells.B17.formula.includes('COUNTIF'));
+  });
+
+  await test('professional formatter builds workbook-wide red finance styling without LLM', () => {
+    const memory = {
+      results: {
+        t1: {
+          data: {
+            activeSheet: 'Sensitivity',
+            workbookSheets: ['Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit'],
+            sheets: [
+              { name: 'Summary', usedRange: 'Summary!A1:C29', rowCount: 29, columnCount: 3, preview: [['Apple Inc. - Summary'], [], ['Executive Valuation Output'], ['Metric', 'Value', 'Source']] },
+              { name: 'Assumptions', usedRange: 'Assumptions!A1:B37', rowCount: 37, columnCount: 2, preview: [['Apple Inc. - Assumptions'], [], ['Company & Source'], ['Company', 'Apple Inc.']] },
+              { name: 'DCF', usedRange: 'DCF!A1:H40', rowCount: 40, columnCount: 8, preview: [['Apple Inc. - DCF'], ['Metric', '2025A', '2026E']] },
+              { name: 'Sensitivity', usedRange: 'Sensitivity!A1:G18', rowCount: 18, columnCount: 7, preview: [['Sensitivity Analysis'], [], ['Implied Share Price Sensitivity'], ['WACC \\ g', 0.015, 0.02]] },
+              { name: 'Scenarios', usedRange: 'Scenarios!A1:G17', rowCount: 17, columnCount: 7, preview: [['Scenario Analysis'], [], ['Operating Case Matrix'], ['Scenario', 'Revenue Haircut / Uplift']] },
+              { name: 'Audit', usedRange: 'Audit!A1:C23', rowCount: 23, columnCount: 3, preview: [['Model Audit & QA'], [], ['Readiness Checks'], ['Check', 'Result', 'Why It Matters']] }
+            ]
+          }
+        }
+      }
+    };
+    const plan = buildProfessionalFormatPlan({
+      sheet: 'Sensitivity',
+      objective: 'cambia la formattazione fallo sui colori del rosso ma in modalità professionale',
+      scope: 'workbook'
+    }, memory);
+
+    assert.strictEqual(plan.data.builder, 'deterministic-format');
+    assert.strictEqual(plan.data.theme, 'red');
+    assert.ok(plan.actions.length > 45);
+    assert.ok(plan.actions.some(action => action.sheet === 'Summary' && action.target === 'A1:C1' && action.options.backgroundColor === '#7F1D1D'));
+    assert.ok(plan.actions.some(action => action.sheet === 'Sensitivity' && action.type === 'addConditionalFormat' && action.target === 'C5:G9'));
+  });
+
+  await test('format plan task is non-mutating and applyFormat applies planned actions once', async () => {
+    const memory = {
+      results: {
+        t1: {
+          data: {
+            activeSheet: 'Sensitivity',
+            sheets: [
+              { name: 'Sensitivity', usedRange: 'Sensitivity!A1:G18', rowCount: 18, columnCount: 7, preview: [['Sensitivity Analysis'], [], ['Implied Share Price Sensitivity'], ['WACC \\ g', 0.015, 0.02]] }
+            ]
+          }
+        }
+      }
+    };
+    const planned = await executeTool('llm.planFormat', {
+      sheet: 'Sensitivity',
+      objective: 'formatta in rosso professionale',
+      scope: 'workbook',
+      usesResults: ['t1']
+    }, memory);
+    assert.strictEqual(planned.actions.length, 0);
+    assert.ok(planned.data.actions.length > 10);
+
+    memory.results.t2 = planned;
+    const applied = await executeTool('excel.applyFormat', { fromResult: 't2', sheet: 'Sensitivity' }, memory);
+    assert.strictEqual(applied.actions.length, planned.data.actions.length);
   });
 
   await test('critic validates DCF cross-sheet formulas without regex crash', () => {

@@ -1,6 +1,7 @@
 const { callLLM } = require('../tools/llm');
 const logger = require('../utils/logger');
 const { getWikiContextForPrompt } = require('../wiki/loader');
+const { buildProfessionalFormatPlan } = require('../models/formatTemplate');
 
 const LAYOUT_TIMEOUT_MS = Number(process.env.LAYOUT_TIMEOUT_MS) || 60000;
 const LAYOUT_FALLBACK_TIMEOUT_MS = Number(process.env.LAYOUT_FALLBACK_TIMEOUT_MS) || 35000;
@@ -327,6 +328,12 @@ async function runFormulaAgent(params, memory) {
 
 async function runFormatAgent(params, memory) {
   logger.info('[FormatAgent] Avvio formattazione');
+  if (process.env.FORMAT_LLM_ENABLED !== 'true') {
+    const result = buildProfessionalFormatPlan(params, memory);
+    logger.info(`[FormatAgent] Piano deterministico: ${result.actions.length} azioni su ${result.data.sheetCount} fogli`);
+    return result;
+  }
+
   const context = JSON.stringify(compactResultsForPrompt(memory.results, params.usesResults), null, 2);
 
   // Inject relevant wiki knowledge for formatting

@@ -686,8 +686,8 @@ function buildFinanceFallbackPlan(objective, context) {
     return {
       objective,
       tasks: [
-        { id: 't1', agent: 'data', tool: 'workbook.readWorkbook', description: 'Leggi il workbook corrente', params: { maxRows: 12, maxCols: 8 }, deps: [], requiresApproval: false },
-        { id: 't2', agent: 'format', tool: 'llm.planFormat', description: 'Prepara formattazione professionale', params: { sheet: activeSheet, objective, mode: 'finance_cleanup' }, deps: ['t1'], requiresApproval: false },
+        { id: 't1', agent: 'data', tool: 'workbook.readWorkbook', description: 'Leggi struttura e used range del workbook corrente', params: { maxRows: 80, maxCols: 20 }, deps: [], requiresApproval: false },
+        { id: 't2', agent: 'format', tool: 'llm.planFormat', description: 'Prepara formattazione professionale su tutto il workbook', params: { sheet: activeSheet, objective, mode: 'finance_cleanup', scope: 'workbook', usesResults: ['t1'] }, deps: ['t1'], requiresApproval: false },
         { id: 't3', agent: 'format', tool: 'excel.applyFormat', description: 'Applica formattazione', params: { fromResult: 't2', sheet: activeSheet }, deps: ['t2'], requiresApproval: false }
       ]
     };
@@ -726,7 +726,7 @@ function buildFinanceFallbackPlan(objective, context) {
         agent: 'format',
         tool: 'llm.planFormat',
         description: `Aggiorna formattazione: ${objective}`,
-        params: { sheet: activeSheet, objective, mode: 'finance_cleanup' },
+        params: { sheet: activeSheet, objective, mode: 'finance_cleanup', scope: 'workbook', usesResults: ['t1', 't2'] },
         deps: ['t2'],
         requiresApproval: false
       });
@@ -755,7 +755,7 @@ function buildFinanceFallbackPlan(objective, context) {
         agent: 'format',
         tool: 'llm.planFormat',
         description: 'Mantieni/pulisci formattazione dopo modifica',
-        params: { sheet: activeSheet, objective, mode: 'finance_cleanup' },
+        params: { sheet: activeSheet, objective, mode: 'finance_cleanup', scope: 'workbook', usesResults: ['t1', 't2'] },
         deps: [`t${nextId}`],
         requiresApproval: false
       });
@@ -959,7 +959,7 @@ function buildFinanceFallbackPlan(objective, context) {
         agent: 'format',
         tool: 'llm.planFormat',
         description: 'Prepara una pulizia visiva professionale del modello',
-        params: { sheet: activeSheet, objective, mode: 'finance_cleanup' },
+        params: { sheet: activeSheet, objective, mode: 'finance_cleanup', scope: 'workbook', usesResults: ['t1', 't2', 't3'] },
         deps: ['t3'],
         requiresApproval: false
       },

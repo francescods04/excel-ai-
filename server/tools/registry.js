@@ -331,9 +331,14 @@ registerTool('llm.writeFormulas', async (params, memory) => {
 registerTool('llm.planFormat', async (params, memory) => {
   const result = await runFormatAgent(params, memory);
   const defaultSheet = params.sheet || (Array.isArray(params.sheets) && params.sheets.length === 1 ? params.sheets[0] : undefined);
+  const plannedActions = attachSheetToActions(result.actions || [], defaultSheet);
   return {
-    data: result,
-    actions: attachSheetToActions(result.actions || [], defaultSheet)
+    data: {
+      ...(result.data || {}),
+      actions: plannedActions,
+      actionCount: plannedActions.length
+    },
+    actions: []
   };
 }, {
   description: 'Pianifica la formattazione Excel: colori, font, bordi, number format, conditional formatting. Output: azioni setCellFormat/addConditionalFormat',
@@ -345,10 +350,15 @@ registerTool('llm.planFormat', async (params, memory) => {
       sheet: SCHEMA_SHEET_NAME,
       formatType: { type: 'string', 'enum': ['headers', 'conditional', 'full', 'numbers', 'percents', 'currency'] },
       section: { type: 'string' },
-      model: { type: 'string', 'enum': ['dcf', 'lbo', 'comps', 'ddm', 'wacc', 'three_statement', 'custom'] }
+      model: { type: 'string', 'enum': ['dcf', 'lbo', 'comps', 'ddm', 'wacc', 'three_statement', 'custom'] },
+      objective: { type: 'string' },
+      mode: { type: 'string' },
+      scope: { type: 'string', enum: ['sheet', 'workbook'] },
+      theme: { type: 'string' },
+      usesResults: { type: 'array', items: { type: 'string' } }
     }
   },
-  category: 'mutation',
+  category: 'analysis',
   costHint: 'low'
 });
 
@@ -449,7 +459,8 @@ registerTool('excel.addChart', async (params) => {
 
 registerTool('excel.applyFormat', async (params, memory) => {
   const sourceResultId = params.fromResult || params.planRef;
-  const actions = params.actions || (sourceResultId && memory.results[sourceResultId]?.actions) || [];
+  const source = sourceResultId && memory.results[sourceResultId];
+  const actions = params.actions || source?.data?.actions || source?.actions || [];
   return {
     data: { count: actions.length },
     actions: attachSheetToActions(actions, params.sheet)
