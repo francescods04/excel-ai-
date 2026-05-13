@@ -546,7 +546,17 @@ body {
 [data-theme="dark"] .step-item.completed { background: #1a2a1a; }
 .step-item.cancelled { border-left: 3px solid #999; opacity: 0.5; text-decoration: line-through; }
 
-.step-icon { font-size: 13px; width: 18px; text-align: center; }
+.step-icon { font-size: 13px; width: 18px; text-align: center; display: inline-flex; align-items: center; justify-content: center; }
+.step-spinner {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--color-primary);
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: step-spin 0.8s linear infinite;
+}
+@keyframes step-spin { to { transform: rotate(360deg); } }
 .step-content { flex: 1; color: var(--color-text); }
 .step-priority {
   font-size: 9px;

@@ -311,7 +311,7 @@ function emitToolRequestResolved(turnId, request, response, status = 'resolved')
   });
 }
 
-function buildTurn(message, context, parentTurnId = null) {
+function buildTurn(message, context, parentTurnId = null, options = {}) {
   const turnId = makeTurnId();
   const createdAt = nowIso();
 
@@ -319,6 +319,9 @@ function buildTurn(message, context, parentTurnId = null) {
     id: turnId,
     objective: message,
     context: context || {},
+    llm: {
+      modelOverride: options.modelOverride || null
+    },
     status: 'planning',
     error: null,
     plan: null,
@@ -604,7 +607,9 @@ async function planTurn(turnId) {
       parentResults,
       parentPlan
     };
-    const plan = await planner.plan(turn.objective, enrichedContext, turnId);
+    const plan = await planner.plan(turn.objective, enrichedContext, turnId, {
+      modelOverride: turn.llm?.modelOverride || undefined
+    });
 
     const updatedTurn = _getTurnRef(turnId);
     updatedTurn.plan = plan;
@@ -646,7 +651,7 @@ async function planTurn(turnId) {
       (async () => {
         for (const batch of prefetchByLevel) {
           const results = await Promise.allSettled(batch.tasks.map(task => executeSingleTask(turnId, task)));
-          const failed = results.filter(r => r.status === 'rejected');
+          const failed = results.filter(r => r.status === 'rejected' || r.value?.ok === false);
           if (failed.length > 0) {
             appendLog(turnId, `Errore prefetch livello ${batch.level}: ${failed.length} task falliti`, 'error');
           }
@@ -743,13 +748,15 @@ async function executeSingleTask(turnId, task) {
       // Smart approval: check requiresApproval from tool registry
       const AUTO_APPROVE = process.env.AUTO_APPROVE_ALL === 'true';
       const toolMeta = registry.meta(task.tool);
+      const actionHasMutations = hasMutationActions(result.actions);
       const needsApproval = !AUTO_APPROVE && (
         task.requiresApproval === true ||
         toolMeta?.requiresApproval === 'always' ||
-        (!criticResult.ok && hasMutationActions(result.actions))
+        (toolMeta?.category === 'mutation' && actionHasMutations) ||
+        actionHasMutations
       );
 
-      if (needsApproval && (hasMutationActions(result.actions) || task.requiresApproval)) {
+      if (needsApproval && (actionHasMutations || task.requiresApproval)) {
         const preview = buildActionPreview(result.actions, task);
         appendLog(turnId, `[${task.id}] In attesa di conferma per ${preview.mutationCount} modifiche`, 'info', {
           taskId: task.id,
@@ -779,8 +786,15 @@ async function executeSingleTask(turnId, task) {
 
     emitItemCompleted(turnId, completedItem);
     appendLog(turnId, `[${task.id}] completato`, 'info', { taskId: task.id, itemId });
+    return { ok: true, taskId: task.id, result };
   } catch (error) {
     logger.error(`[Turn ${turnId}][${task.id}] Task error: ${error.message}`);
+    storeTaskResult(turnId, task.id, {
+      ok: false,
+      error: error.message,
+      agent: task.agent,
+      tool: task.tool
+    });
     const failedItem = upsertItem(turnId, {
       id: itemId,
       type: 'taskExecution',
@@ -795,8 +809,9 @@ async function executeSingleTask(turnId, task) {
 
     emitItemCompleted(turnId, failedItem);
     appendLog(turnId, `[${task.id}] errore: ${error.message}`, 'error', { taskId: task.id, itemId });
-    // NON lanciare l'errore: permetti agli altri task dello stesso livello di continuare
-    // Il turn continuerà; i task dipendenti riceveranno contesto vuoto per questo task fallito
+    // Non rilanciare: gli altri task dello stesso livello possono continuare,
+    // ma il caller riceve un esito strutturato per marcare il turn come fallito.
+    return { ok: false, taskId: task.id, error: error.message };
   }
 }
 
@@ -830,13 +845,20 @@ async function executeTurn(turnId) {
       }));
 
       results.forEach((result, idx) => {
-        if (result.status === 'rejected') {
+        if (result.status === 'rejected' || result.value?.ok === false) {
           failedTaskIds.add(taskIds[idx]);
         }
       });
     }
 
-    const completedTurn = setTurnStatus(turnId, 'completed');
+    const finalError = failedTaskIds.size > 0
+      ? `${failedTaskIds.size} task falliti su ${turn.plan.tasks.length}: ${Array.from(failedTaskIds).join(', ')}`
+      : undefined;
+    const completedTurn = setTurnStatus(
+      turnId,
+      failedTaskIds.size > 0 ? 'error' : 'completed',
+      finalError
+    );
     if (failedTaskIds.size > 0) {
       appendLog(turnId, `Turn completato con ${failedTaskIds.size} task falliti su ${turn.plan.tasks.length}.`, 'warn');
       logger.warn(`[Turn ${turnId}] Turn completed with ${failedTaskIds.size} failed tasks: ${Array.from(failedTaskIds).join(', ')}`);
@@ -887,8 +909,8 @@ async function executeTurn(turnId) {
   }
 }
 
-function startTurn(message, context, parentTurnId = null) {
-  const turn = buildTurn(message, context, parentTurnId);
+function startTurn(message, context, parentTurnId = null, options = {}) {
+  const turn = buildTurn(message, context, parentTurnId, options);
   saveTurn(turn);
 
   emitTurnStarted(turn);

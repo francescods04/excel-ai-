@@ -188,14 +188,12 @@ async function handleSend() {
   try {
     if (shouldUseAgentMode(text)) {
       if (!agentModeCheck.checked) {
-        addMessage('Ho rilevato una richiesta complessa. Attivo la modalità <strong>Agent</strong> per costruire il modello con multi-agente parallelo.', 'bot');
+        addMessage('Ho rilevato una richiesta complessa. Preparo un piano agentico con preview e approvazione prima delle modifiche.', 'bot');
         agentModeCheck.checked = true;
         agentModeToggle.classList.add('active');
       }
-      await runAgentMode(text);
-    } else {
-      await runAgentMode(text);
     }
+    await runTurnMode(text);
   } catch (err) {
     console.error(err);
     addMessage('Errore: ' + err.message, 'error');
@@ -482,9 +480,19 @@ async function resumeAgent(agentId, userResponse) {
   }
 }
 
-async function runLegacyTurn(text, context, planMsgId) {
+async function runTurnMode(text) {
+  resetAgent();
+  switchTab('progress');
+  closeAgentEventStream();
+  startElapsedTimer();
+
+  const planMsgId = addMessage('Analizzo il workbook e genero un piano...', 'bot');
+
   try {
-    const startData = await startTurn(text, context);
+    const context = await getExcelContext();
+    addLog('Lettura contesto Excel completata');
+
+    const startData = await startTurn(text, context, modelSelect.value);
     state.currentTurnId = startData.turnId;
     addLog('Turn creato: ' + startData.turnId);
     openTurnEventStream(startData.turnId, planMsgId);

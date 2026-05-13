@@ -51,7 +51,7 @@ app.get('/api/health', (req, res) => {
     },
     tools: {
       count: TOOL_DEFINITIONS.length,
-      list: TOOL_DEFINITIONS.map(t => t.name)
+      list: TOOL_DEFINITIONS.map(t => t.function?.name || t.name)
     },
     promptVariant,
     promptVariantsAvailable: Object.keys(PROMPT_VARIANTS),
@@ -81,10 +81,10 @@ app.get('/api/health', (req, res) => {
 
 app.post('/api/turn/start', async (req, res) => {
   try {
-    const { message, context, parentTurnId } = req.body;
+    const { message, context, parentTurnId, modelOverride } = req.body;
     if (!message) return res.status(400).json({ error: 'Messaggio richiesto' });
 
-    const turn = turns.startTurn(message, context, parentTurnId || null);
+    const turn = turns.startTurn(message, context, parentTurnId || null, { modelOverride });
     res.json({
       turnId: turn.id,
       status: turn.status

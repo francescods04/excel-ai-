@@ -64,6 +64,33 @@ const MAX_TOKENS = Number(process.env.MAX_TOKENS) || 16384;
 const CACHE_BREAKPOINT_ENABLED = process.env.CACHE_BREAKPOINT_ENABLED !== 'false';
 
 /**
+ * Track previous system-prompt hash per provider to detect cache-busting drift.
+ * DeepSeek auto-caches on identical prefix; if the system text changes between
+ * calls (e.g. timestamps, random IDs, hot-reload), the entire prefix invalidates
+ * silently. We log a warning so the regression is visible.
+ */
+const _lastSystemHash = new Map();
+function _hashSystem(text) {
+  if (!text) return '';
+  // Cheap rolling hash (FNV-1a 32-bit) — collision-safe enough to detect change.
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
+}
+function checkSystemPrefixStability(provider, systemText) {
+  const h = _hashSystem(systemText);
+  const prev = _lastSystemHash.get(provider);
+  _lastSystemHash.set(provider, h);
+  if (prev && prev !== h) {
+    logger.warn(`[Cache] ${provider} system prompt changed since last call (${prev} → ${h}). DeepSeek/Anthropic cache invalidated. Check for non-deterministic content (timestamps, random IDs, ENV vars).`);
+  }
+  return { hash: h, changed: !!prev && prev !== h };
+}
+
+/**
  * Anthropic-style 4-breakpoint cache optimization:
  * 1. system[0] (identity+workflow) → cache_control: ephemeral
  * 2. system[1] (skills+context) → cache_control: ephemeral
@@ -121,10 +148,12 @@ class CacheMessageBuilder {
    */
   build(messages, systemText, cachePrompt = false) {
     if (!CACHE_BREAKPOINT_ENABLED || !cachePrompt || !this.supportsCacheControl) {
-      // DeepSeek path: no cache_control, but log prefix size
+      // DeepSeek path: no cache_control field (DeepSeek auto-caches on identical
+      // prefix). Log prefix size + detect drift that would silently bust cache.
       if (this.provider === 'deepseek' && systemText) {
         const prefixLen = systemText.length;
-        logger.debug(`[Cache] DeepSeek prefix size: ${prefixLen} chars (${Math.round(prefixLen / 4)} tokens est.)`);
+        const drift = checkSystemPrefixStability(this.provider, systemText);
+        logger.debug(`[Cache] DeepSeek prefix size: ${prefixLen} chars (~${Math.round(prefixLen / 4)} tokens, hash=${drift.hash})`);
       }
       return messages;
     }
@@ -990,6 +1019,10 @@ async function callLLMStreaming({
     : msgs;
 
   if (provider === 'openrouter' || provider === 'openai' || provider === 'xiaomi' || provider === 'deepseek') {
+    // Cache stability check: warn if system prefix changed since last call (cache buster)
+    if (systemText && CACHE_BREAKPOINT_ENABLED) {
+      checkSystemPrefixStability(provider, systemText);
+    }
     logger.info(`[LLM] ${label} stream start → [${provider}] ${primaryModel}`);
     const start = Date.now();
     const maxStreamMs = Number(process.env.LLM_STREAM_MAX_MS) || 30000;

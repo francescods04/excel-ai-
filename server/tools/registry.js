@@ -2,6 +2,7 @@ const Ajv = require('ajv');
 const yahoo = require('../tools/yahoo');
 const { runLayoutAgent, runFormulaAgent, runFormatAgent } = require('../agents/specialists');
 const { searchTools } = require('../utils/toolSearch');
+const SHARED_SCHEMAS = require('./schemas');
 
 const ajv = new Ajv({ removeAdditional: 'failing', useDefaults: true, coerceTypes: 'array' });
 
@@ -623,28 +624,7 @@ registerTool('excel.setCellRange', async (params) => {
 }, {
   description: 'Scrive celle usando una mappa A1 -> {value, formula, note, cellStyles, borderStyles}. Supporta copyToRange e allow_overwrite.',
   inputs: ['sheet', 'cells'],
-  schema: {
-    type: 'object',
-    required: ['sheet', 'cells'],
-    properties: {
-      sheet: SCHEMA_SHEET_NAME,
-      cells: {
-        type: 'object',
-        additionalProperties: {
-          type: 'object',
-          properties: {
-            value: {},
-            formula: { type: 'string' },
-            note: { type: 'string' },
-            cellStyles: { type: 'object' },
-            borderStyles: { type: 'object' }
-          }
-        }
-      },
-      copyToRange: { type: 'string' },
-      allow_overwrite: { type: 'boolean' }
-    }
-  },
+  schema: SHARED_SCHEMAS.SET_CELL_RANGE,
   category: 'mutation',
   costHint: 'low',
   requiresApproval: 'always'

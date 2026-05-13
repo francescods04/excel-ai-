@@ -41,6 +41,16 @@ function isMutationAction(action) {
   return action && MUTATION_TYPES.has(action.type);
 }
 
+function isRunJavaScriptEnabled() {
+  if (typeof window === 'undefined') return false;
+  if (window.EXCEL_AI_ALLOW_RUN_JAVASCRIPT === true) return true;
+  try {
+    return window.localStorage?.getItem('excelAi.allowRunJavaScript') === 'true';
+  } catch (err) {
+    return false;
+  }
+}
+
 function extractSnapshotTargets(actions) {
   const targets = []; // { sheet, target, actionType }
   for (const action of actions) {
@@ -256,6 +266,12 @@ async function executeActions(actions, updateStepsPanel) {
           case 'runJavaScript':
             await execRunJavaScript(context, action);
             break;
+          case 'suspendCalculation':
+            await execSuspendCalculation(context);
+            break;
+          case 'resumeCalculation':
+            await execResumeCalculation(context);
+            break;
           case 'addConditionalFormat':
             await execAddConditionalFormat(context, sheetCache, defaultSheet, action);
             break;
@@ -344,6 +360,9 @@ async function execWriteRange(context, sheetCache, defaultSheet, action) {
 async function execRunJavaScript(context, action) {
   const code = action.code;
   if (!code || typeof code !== 'string') throw new Error('runJavaScript requires a "code" string');
+  if (!isRunJavaScriptEnabled()) {
+    throw new Error('runJavaScript is disabled. Enable localStorage excelAi.allowRunJavaScript=true only in dev mode.');
+  }
   // Use AsyncFunction to support await — new Function() creates synchronous functions
   const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
   const fn = new AsyncFunction('context', code);
@@ -405,7 +424,9 @@ async function execSetCellRange(context, sheetCache, defaultSheet, action) {
       if (fmt.fontColor) cell.format.font.color = fmt.fontColor;
       if (fmt.backgroundColor) cell.format.fill.color = fmt.backgroundColor;
       if (fmt.bold !== undefined) cell.format.font.bold = fmt.bold;
+      if (fmt.italic !== undefined) cell.format.font.italic = fmt.italic;
       if (fmt.numberFormat) cell.numberFormat = [[fmt.numberFormat]];
+      if (fmt.horizontalAlignment) cell.format.horizontalAlignment = fmt.horizontalAlignment;
     }
   }
 
@@ -485,6 +506,15 @@ async function execCreateNamedRange(context, sheetCache, action) {
   const refersTo = action.refersTo || `=${action.sheet}!${action.target}`;
   if (!name) throw new Error('createNamedRange requires a name');
   context.workbook.names.add(name, refersTo);
+}
+
+async function execSuspendCalculation(context) {
+  context.application.calculationMode = Excel.CalculationMode.manual;
+}
+
+async function execResumeCalculation(context) {
+  context.application.calculationMode = Excel.CalculationMode.automatic;
+  context.application.calculate(Excel.CalculationType.full);
 }
 
 async function execAddConditionalFormat(context, sheetCache, defaultSheet, action) {

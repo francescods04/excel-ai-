@@ -3,6 +3,7 @@ const path = require('path');
 const { callLLM, callLLMStreaming, getLLMConfig } = require('../tools/llm');
 const logger = require('../utils/logger');
 const { executeTool, registry } = require('../tools/registry');
+const SHARED_SCHEMAS = require('../tools/schemas');
 const { validateTaskOutput } = require('./critic');
 const streaming = require('./streaming');
 const { initializeTools } = require('../utils/toolSearch');
@@ -340,37 +341,8 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'set_cell_range',
       description: `Write cells using a map of A1 addresses to {value, formula, note, cellStyles, borderStyles}. Supports copyToRange for pattern fill. Supports allow_overwrite for overwrite protection. This is the PRIMARY write tool.\n\nExample:\n{\n  "sheet": "Sheet1",\n  "cells": {\n    "A1": { "value": "Revenue" },\n    "B1": { "value": 100, "cellStyles": { "fontColor": "#0000FF" } },\n    "B2": { "formula": "=B1*1.05" }\n  },\n  "copyToRange": "B2:B10",\n  "allow_overwrite": false\n}`,
-      parameters: {
-        type: 'object',
-        properties: {
-          sheet: { type: 'string', description: 'Sheet name' },
-          cells: {
-            type: 'object',
-            description: 'Map of A1 address to cell spec: {value, formula, note, cellStyles: {fontColor, backgroundColor, bold, numberFormat}, borderStyles}',
-            additionalProperties: {
-              type: 'object',
-              properties: {
-                value: {},
-                formula: { type: 'string' },
-                note: { type: 'string' },
-                cellStyles: {
-                  type: 'object',
-                  properties: {
-                    fontColor: { type: 'string' },
-                    backgroundColor: { type: 'string' },
-                    bold: { type: 'boolean' },
-                    numberFormat: { type: 'string' }
-                  }
-                },
-                borderStyles: { type: 'object' }
-              }
-            }
-          },
-          copyToRange: { type: 'string', description: 'Optional: copy the pattern to this range (e.g. "B2:B100")' },
-          allow_overwrite: { type: 'boolean', description: 'If false (default), fails if cells are non-empty. If true, overwrites without confirmation.' }
-        },
-        required: ['sheet', 'cells']
-      }
+      // Schema sourced from server/tools/schemas.js (single source of truth, also used by registry.js)
+      parameters: SHARED_SCHEMAS.SET_CELL_RANGE
     }
   },
   {
@@ -461,18 +433,24 @@ const TOOL_DEFINITIONS = [
         properties: {
           questions: {
             type: 'array',
+            minItems: 1,
+            maxItems: 4,
             items: {
               type: 'object',
+              required: ['question', 'options'],
               properties: {
-                header: { type: 'string' },
-                question: { type: 'string' },
+                header: { type: 'string', description: 'Short heading shown above the question' },
+                question: { type: 'string', description: 'The question text' },
                 options: {
                   type: 'array',
+                  minItems: 2,
+                  maxItems: 4,
                   items: {
                     type: 'object',
+                    required: ['label', 'description'],
                     properties: {
-                      label: { type: 'string' },
-                      description: { type: 'string' }
+                      label: { type: 'string', description: 'Tappable button label (short)' },
+                      description: { type: 'string', description: 'One-line context shown under label' }
                     }
                   }
                 },
@@ -489,7 +467,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'todo_write',
-      description: `Update the task list shown to the user. Use to track progress on multi-phase tasks.\n\nExample:\n{\n  "todos": [\n    { "content": "Set up assumptions", "status": "completed", "priority": "high" },\n    { "content": "Build revenue projections", "status": "in_progress", "priority": "high" }\n  ]\n}`,
+      description: `Update the task list shown to the user as a "Steps" panel. Wholesale replacement — pass the entire list every time.\n\nRULES:\n- Only ONE task in_progress at a time. Move to in_progress BEFORE starting work, completed IMMEDIATELY after.\n- Never mark completed if it failed or only partially done.\n- When all tasks completed, the panel auto-clears.\n- Skip for single-step or trivial tasks.\n\nFIELDS:\n- content: short imperative phrase (<10 words), e.g. "Build revenue projections"\n- activeForm: present-continuous shown as spinner text while in_progress, e.g. "Building revenue projections"\n- status: pending → in_progress → completed (or cancelled)\n\nExample:\n{\n  "todos": [\n    { "content": "Set up assumptions", "activeForm": "Setting up assumptions", "status": "completed" },\n    { "content": "Build revenue projections", "activeForm": "Building revenue projections", "status": "in_progress" }\n  ]\n}`,
       parameters: {
         type: 'object',
         properties: {
@@ -498,10 +476,12 @@ const TOOL_DEFINITIONS = [
             items: {
               type: 'object',
               properties: {
-                content: { type: 'string' },
+                content: { type: 'string', description: 'Short imperative phrase (<10 words)' },
+                activeForm: { type: 'string', description: 'Present-continuous form shown while in_progress' },
                 status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'cancelled'] },
                 priority: { type: 'string', enum: ['high', 'medium', 'low'] }
-              }
+              },
+              required: ['content', 'status']
             }
           }
         },

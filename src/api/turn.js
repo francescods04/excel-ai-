@@ -6,7 +6,7 @@ async function startTurn(message, context, modelOverride) {
   const res = await fetch(`${API_BASE}/api/turn/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, context })
+    body: JSON.stringify({ message, context, modelOverride })
   });
   if (!res.ok) {
     throw new Error(await getErrorMessageFromResponse(res, 'Errore avvio turn'));

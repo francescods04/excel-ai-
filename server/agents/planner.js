@@ -783,7 +783,7 @@ function normalizeAndValidatePlan(result) {
 
 let cacheAccessCount = 0;
 
-async function plan(objective, context, turnId) {
+async function plan(objective, context, turnId, options = {}) {
   // Lazy cleanup every ~20 accesses
   cacheAccessCount++;
   if (cacheAccessCount % 20 === 0) cleanupExpiredCache();
@@ -813,6 +813,7 @@ async function plan(objective, context, turnId) {
     ? `Fogli creati di recente: ${planningContext.recentSheets.join(', ')}\n`
     : '';
   const userPromptBase = `${conversationCtx}${recentSheets}Crea un piano di esecuzione per: "${objective}".\n\nContesto Excel attuale (compattato):\n${JSON.stringify(planningContext, null, 2)}`;
+  const plannerModel = options.modelOverride || PLANNER_MODEL || undefined;
   logger.info('[Planner] Chiamata LLM in corso...');
 
   // Attempt streaming first if turnId is provided (for progress UX)
@@ -822,7 +823,7 @@ async function plan(objective, context, turnId) {
       const accumulated = await callLLMStreaming({
         system: PLANNER_SYSTEM_PROMPT,
         userText: userPromptBase,
-        modelOverride: PLANNER_MODEL || undefined,
+        modelOverride: plannerModel,
         label: 'Planner LLM stream',
         onChunk: (delta, text, isDone) => {
           if (delta || isDone) {
@@ -854,7 +855,7 @@ async function plan(objective, context, turnId) {
         userText: userPromptBase + userExtra,
         timeoutMs: PLANNER_TIMEOUT_MS,
         fallbackTimeoutMs: PLANNER_FALLBACK_TIMEOUT_MS,
-        modelOverride: PLANNER_MODEL || undefined,
+        modelOverride: plannerModel,
         fallbackModel: PLANNER_FALLBACK_MODEL || undefined,
         label: 'Planner LLM',
         cachePrompt: true
