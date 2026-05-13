@@ -1,6 +1,7 @@
 'use strict';
 
 import state from './store/state.js';
+import { restoreTurnMemory, persistTurnStarted, persistTurnCompleted } from './store/turnMemory.js';
 import { escapeHtml, formatActionTarget, isRangeWriteAction, summarizeMatrix } from './utils/html.js';
 import { initTabs, switchTab, updateProgressBadge, API_BASE } from './ui/tabs.js';
 import { addMessage, removeMessage, showTypingIndicator, hideTypingIndicator, showQuestionOptionsInChat, getChatContainer } from './ui/chat.js';
@@ -87,6 +88,10 @@ async function init() {
   initExecutionLog();
   initApprovalModal();
   initUndoBadge(handleUndo);
+  const restoredTurnMemory = restoreTurnMemory(state);
+  if (restoredTurnMemory?.lastCompletedTurnId || restoredTurnMemory?.lastTurnId) {
+    addLog(`Continuità chat ripristinata: ${restoredTurnMemory.lastCompletedTurnId || restoredTurnMemory.lastTurnId}`, 'info');
+  }
 
   loadModelConfig().then(config => {
     if (config && config.current) {
@@ -502,6 +507,7 @@ async function runTurnMode(text) {
     const startData = await startTurn(text, context, modelSelect.value, parentTurnId);
     state.currentTurnId = startData.turnId;
     state.lastTurnId = startData.turnId;
+    persistTurnStarted(startData.turnId);
     addLog('Turn creato: ' + startData.turnId);
     if (parentTurnId) addLog('Continuità chat: uso il contesto del turn precedente ' + parentTurnId);
     openTurnEventStream(startData.turnId, planMsgId);
@@ -657,6 +663,7 @@ function openTurnEventStream(turnId, planMsgId) {
         if (!(data.status === 'error' || data.error)) {
           state.lastCompletedTurnId = data.turnId || turnId;
         }
+        persistTurnCompleted(data.turnId || turnId, !(data.status === 'error' || data.error));
         removeMessage(planMsgId);
         hideApproveBar();
         hideTypingIndicator();
