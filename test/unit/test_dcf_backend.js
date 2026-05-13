@@ -921,6 +921,45 @@ async function main() {
     assert.ok(!plan.actions.some(action => action.sheet === 'Sheet1'));
   });
 
+  await test('DCF format section uses adaptive workbook formatter instead of sparse title-only styling', () => {
+    const output = buildDcfSection({
+      section: 'format',
+      objective: 'formatta tutto il modello in verde professionale',
+      sheets: ['Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit'],
+      mode: 'institutional_finance'
+    }, {
+      results: {
+        t1: {
+          data: {
+            activeSheet: 'Assumptions',
+            sheets: [
+              { name: 'Assumptions', usedRange: 'Assumptions!A1:D56', rowCount: 56, columnCount: 4, preview: [['Model Assumptions'], [], ['Projection Assumptions'], ['Revenue Growth Y1 (%)', 0.05, 'Derived from historical trend', 'Local']] },
+              { name: 'DCF', usedRange: 'DCF!A1:H40', rowCount: 40, columnCount: 8, preview: [['DCF Model'], ['Metric', '2024A', '2025E']] },
+              { name: 'Sensitivity', usedRange: 'Sensitivity!A1:G18', rowCount: 18, columnCount: 7, preview: [['Sensitivity Analysis'], [], ['Implied Share Price Sensitivity']] }
+            ]
+          }
+        }
+      }
+    });
+
+    assert.ok(output.actions.length > 60, `expected rich format plan, got ${output.actions.length}`);
+    assert.ok(output.actions.some(action => action.sheet === 'Summary' && action.target === 'A1:C1' && action.options.backgroundColor === '#14532D'));
+    assert.ok(output.actions.some(action => action.sheet === 'Assumptions' && action.target === 'C1:C40' && action.options.wrapText === true));
+    assert.ok(output.actions.some(action => action.type === 'addConditionalFormat' && action.sheet === 'Sensitivity' && action.target === 'C5:G9'));
+  });
+
+  await test('DCF runtime labels format section as adaptive-format in execution logs', async () => {
+    const output = await buildDcfSectionAi({
+      section: 'format',
+      objective: 'formatta tutto il modello in verde professionale',
+      sheets: ['Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit'],
+      mode: 'ai_assisted'
+    }, { results: {} });
+
+    assert.strictEqual(output.data.builder, 'adaptive-format');
+    assert.ok(output.actions.length > 60);
+  });
+
   await test('format plan task is non-mutating and applyFormat applies planned actions once', async () => {
     const previousFormatFlag = process.env.FORMAT_LLM_ENABLED;
     process.env.FORMAT_LLM_ENABLED = 'false';

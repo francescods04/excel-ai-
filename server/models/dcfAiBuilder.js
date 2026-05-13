@@ -320,7 +320,10 @@ async function buildDcfSectionAi(params = {}, memory = {}) {
   const fallback = buildDcfSection(enrichedParams, enrichedMemory);
 
   if (!useAiSectionBuilder) {
-    return fallbackWithBuilder(fallback, params.mode === 'template' ? 'template-requested' : 'template');
+    const fallbackBuilder = section === 'format'
+      ? 'adaptive-format'
+      : (params.mode === 'template' ? 'template-requested' : 'template');
+    return fallbackWithBuilder(fallback, fallbackBuilder);
   }
 
   const inputs = inferDcfInputs(enrichedParams, enrichedMemory);

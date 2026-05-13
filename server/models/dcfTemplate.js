@@ -1,5 +1,6 @@
 const { analyzeWorkbookContext } = require('../utils/sheetParser');
 const { getAnalystDepth, getDcfModelAnalystWorkplan } = require('./analystDepth');
+const { buildProfessionalFormatPlan } = require('./formatTemplate');
 
 const DEFAULTS = {
   projectionYears: 5,
@@ -1373,36 +1374,19 @@ function buildAuditActions(inputs = {}) {
   return [makeSetCellRangeAction('Audit', cells)];
 }
 
-function buildFormatActions() {
-  const ranges = [
-    ['Summary', 'A1:C32', { horizontalAlignment: 'Left' }],
-    ['Sources', 'A1:D50', { horizontalAlignment: 'Left' }],
-    ['Assumptions', 'A1:D56', { horizontalAlignment: 'Left' }],
-    ['WACC', 'A1:A30', { horizontalAlignment: 'Left' }],
-    ['DCF', 'A1:A40', { horizontalAlignment: 'Left' }],
-    ['Sensitivity', 'A1:A18', { horizontalAlignment: 'Left' }],
-    ['Scenarios', 'A1:G18', { horizontalAlignment: 'Left' }],
-    ['Audit', 'A1:C32', { horizontalAlignment: 'Left' }],
-    ['Summary', 'B1:C32', { horizontalAlignment: 'Right' }],
-    ['Sources', 'B1:D50', { horizontalAlignment: 'Right' }],
-    ['Assumptions', 'B1:B56', { horizontalAlignment: 'Right' }],
-    ['Assumptions', 'C1:D56', { horizontalAlignment: 'Left', wrapText: true }],
-    ['WACC', 'B1:B30', { horizontalAlignment: 'Right' }],
-    ['DCF', 'B1:H40', { horizontalAlignment: 'Right' }],
-    ['Sensitivity', 'B1:G18', { horizontalAlignment: 'Right' }],
-    ['Scenarios', 'B1:G18', { horizontalAlignment: 'Right' }],
-    ['Audit', 'B1:C32', { horizontalAlignment: 'Right' }],
-    ['Summary', 'A1:C1', STYLE.title],
-    ['Sources', 'A1:D1', STYLE.title],
-    ['Assumptions', 'A1:D1', STYLE.title],
-    ['WACC', 'A1:B1', STYLE.title],
-    ['DCF', 'A1:H1', STYLE.title],
-    ['Sensitivity', 'A1:G1', STYLE.title],
-    ['Scenarios', 'A1:G1', STYLE.title],
-    ['Audit', 'A1:C1', STYLE.title]
-  ];
-
-  return ranges.map(([sheet, target, options]) => ({ type: 'setCellFormat', sheet, target, options }));
+function buildFormatActions(params = {}, memory = {}) {
+  const sheets = Array.isArray(params.sheets) && params.sheets.length > 0
+    ? params.sheets
+    : ['Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit'];
+  const plan = buildProfessionalFormatPlan({
+    ...params,
+    sheet: params.sheet || sheets[0],
+    sheets,
+    targetSheets: sheets,
+    scope: 'workbook',
+    mode: params.mode || 'institutional_finance'
+  }, memory);
+  return plan.actions;
 }
 
 function buildDcfSection(params = {}, memory = {}) {
@@ -1446,7 +1430,7 @@ function buildDcfSection(params = {}, memory = {}) {
       break;
     case 'format':
     case 'formatting':
-      actions = buildFormatActions();
+      actions = buildFormatActions(params, memory);
       break;
     case 'all':
       actions = [
@@ -1459,7 +1443,7 @@ function buildDcfSection(params = {}, memory = {}) {
         ...buildScenariosActions(inputs),
         ...buildSummaryActions(inputs),
         ...buildAuditActions(inputs),
-        ...buildFormatActions()
+        ...buildFormatActions(params, memory)
       ];
       break;
     default:
