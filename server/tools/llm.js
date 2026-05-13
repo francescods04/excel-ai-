@@ -526,9 +526,26 @@ async function callDeepSeekStream(messages, options = {}, onChunk) {
   const stream = response.data;
   let accumulated = '';
   let done = false;
+  const maxTotalMs = safeTimeoutMs(options.maxTotalMs, requestTimeoutMs);
 
   return new Promise((resolve, reject) => {
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    let settled = false;
+    let timeoutId = null;
+
+    function finish(error, value) {
+      if (settled) return;
+      settled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+      if (error) reject(error);
+      else resolve(value);
+    }
+
+    timeoutId = setTimeout(() => {
+      done = true;
+      try { stream.destroy(); } catch (_) {}
+      finish(new Error(`DeepSeek stream timeout after ${maxTotalMs}ms`));
+    }, maxTotalMs);
 
     rl.on('line', (line) => {
       if (done) return;
@@ -538,6 +555,7 @@ async function callDeepSeekStream(messages, options = {}, onChunk) {
       if (data === '[DONE]') {
         done = true;
         onChunk('', accumulated, true);
+        finish(null, accumulated);
         return;
       }
       try {
@@ -558,11 +576,11 @@ async function callDeepSeekStream(messages, options = {}, onChunk) {
       if (!done) {
         onChunk('', accumulated, true);
       }
-      resolve(accumulated);
+      finish(null, accumulated);
     });
 
     stream.on('error', (err) => {
-      reject(err);
+      finish(err);
     });
   });
 }

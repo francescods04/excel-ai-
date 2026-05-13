@@ -516,6 +516,8 @@ function openTurnEventStream(turnId, planMsgId) {
   let attempt = 0;
   const maxBackoff = 15000;
   let currentSource = null;
+  let lastPlanningProgressAt = 0;
+  let lastPlanningProgressChars = 0;
 
   function setupListeners(src) {
     let planReceived = false;
@@ -619,9 +621,20 @@ function openTurnEventStream(turnId, planMsgId) {
     src.addEventListener('llmProgress', (e) => {
       try {
         const data = JSON.parse(e.data);
-        if (data.text) {
-          if (!planReceived) {
-            addLog(`Generazione piano in corso...`);
+        if (data.text && !planReceived) {
+          const now = Date.now();
+          const chars = String(data.text).length;
+          const shouldLog = data.isDone
+            || lastPlanningProgressAt === 0
+            || now - lastPlanningProgressAt >= 5000
+            || chars - lastPlanningProgressChars >= 3000;
+
+          if (shouldLog) {
+            lastPlanningProgressAt = now;
+            lastPlanningProgressChars = chars;
+            addLog(data.isDone
+              ? 'Generazione piano LLM completata.'
+              : `Generazione piano LLM in corso (${chars} caratteri)...`);
           }
         }
       } catch (err) {}

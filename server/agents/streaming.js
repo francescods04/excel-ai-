@@ -2,8 +2,11 @@
 const clients = new Map(); // jobId -> Set<res>
 const history = new Map(); // jobId -> [{ eventType, data }]
 const heartbeats = new Map(); // jobId -> IntervalID
+const llmProgressState = new Map(); // jobId -> { lastAt, length }
 const MAX_HISTORY_EVENTS = 500;
 const HEARTBEAT_INTERVAL_MS = 15000; // 15 secondi
+const LLM_PROGRESS_MIN_INTERVAL_MS = 1200;
+const LLM_PROGRESS_MIN_CHARS = 900;
 
 // Eventi non utili in replay: log lines + chunk LLM streaming.
 // Volume alto e ricostruibili da turn JSON in altri eventi → escludi da history.
@@ -173,12 +176,23 @@ function sendLog(jobId, message, level = 'info') {
 }
 
 function sendLLMProgress(jobId, text, isDone) {
+  const now = Date.now();
+  const length = typeof text === 'string' ? text.length : 0;
+  const previous = llmProgressState.get(jobId);
+  const shouldSend = isDone
+    || !previous
+    || now - previous.lastAt >= LLM_PROGRESS_MIN_INTERVAL_MS
+    || length - previous.length >= LLM_PROGRESS_MIN_CHARS;
+
+  if (!shouldSend) return false;
+  llmProgressState.set(jobId, { lastAt: now, length });
   return sendEvent(jobId, 'llmProgress', { text, isDone, time: new Date().toISOString() });
 }
 
 function cleanupTurn(turnId) {
   history.delete(turnId);
   clients.delete(turnId);
+  llmProgressState.delete(turnId);
   stopHeartbeat(turnId);
 }
 

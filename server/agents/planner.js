@@ -1121,8 +1121,7 @@ function shouldUseDomainPlaybookFirst(turnId, options = {}) {
   if (options.forceLLMPlanner) return false;
   if (options.domainPlaybookFirst === true) return true;
   if (process.env.PLANNER_LLM_FIRST === 'true') return false;
-  if (process.env.PLANNER_LLM_FIRST === 'false') return true;
-  return !turnId;
+  return true;
 }
 
 function isWeakFinancePlan(normalized, domainPlan) {
@@ -1212,7 +1211,8 @@ async function plan(objective, context, turnId, options = {}) {
           if (delta || isDone) {
             streaming.sendLLMProgress(turnId, text, isDone);
           }
-        }
+        },
+        thinkingDisabled: true
       });
       const elapsed = Date.now() - start;
       logger.info(`[Planner] LLM stream done in ${elapsed}ms (${accumulated.length} chars)`);
@@ -1245,7 +1245,8 @@ async function plan(objective, context, turnId, options = {}) {
         modelOverride: plannerModel,
         fallbackModel: PLANNER_FALLBACK_MODEL || undefined,
         label: 'Planner LLM',
-        cachePrompt: true
+        cachePrompt: true,
+        thinkingDisabled: true
       });
       const elapsed = Date.now() - start;
 

@@ -131,6 +131,17 @@ async function main() {
     assert.deepStrictEqual(dcfSections, ['shell', 'sources', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'scenarios', 'summary', 'audit', 'format']);
   });
 
+  await test('planner uses domain playbook immediately for DCF turn runtime', async () => {
+    const plan = await planner.plan('crea un dcf per nvdia', {
+      activeSheet: 'Sheet1',
+      workbookSheets: ['Sheet1']
+    }, 'turn-test-dcf');
+
+    assert.ok(plan.tasks.some(task => task.tool === 'yahoo.quote' && task.params.ticker === 'NVDA'));
+    assert.ok(plan.tasks.some(task => task.tool === 'finance.dcf.buildSection' && task.params.section === 'audit'));
+    assert.ok(!plan.tasks.some(task => task.tool === 'llm.writeFormulas' && task.params.section === 'full_model_review'));
+  });
+
   await test('DCF template derives assumptions from market data', () => {
     const inputs = inferDcfInputs({ ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
     assert.strictEqual(inputs.ticker, 'AAPL');
