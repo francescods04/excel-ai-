@@ -559,6 +559,10 @@ function buildFinanceFallbackPlan(objective, context) {
     return buildDcfCompletionPlan(objective, context, equityIntent);
   }
 
+  if (isDcf && wantsCompletion && existingModelSheets.length === 0) {
+    return buildDeterministicDcfPlan(objective, context, equityIntent);
+  }
+
   if (isWacc) {
     return {
       objective,
@@ -688,6 +692,7 @@ function buildFinanceFallbackPlan(objective, context) {
 
   const shouldBuildFullDcf = isDcf && !isModification && (
     wantsNewModel ||
+    wantsCompletion ||
     equityIntent.isPublicCompanyTarget ||
     lowerObjective.includes('full') ||
     lowerObjective.includes('completo')

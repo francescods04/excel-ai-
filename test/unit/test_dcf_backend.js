@@ -53,6 +53,14 @@ async function main() {
     assert.strictEqual(intent.hasBuildIntent, true);
   });
 
+  await test('equity intent treats complete DCF typo nvdia as NVIDIA build', () => {
+    const intent = inferEquityIntent('completa un dcf su nvdia');
+    assert.strictEqual(intent.model, 'dcf');
+    assert.strictEqual(intent.ticker, 'NVDA');
+    assert.strictEqual(intent.companyName, 'NVIDIA Corporation');
+    assert.strictEqual(intent.hasBuildIntent, true);
+  });
+
   await test('planner turns Apple DCF into full AI-assisted backend pipeline', async () => {
     const plan = await planner.plan('voglio fare un dcf di apple', {
       activeSheet: 'Sheet1',
@@ -100,6 +108,24 @@ async function main() {
     const dcfTasks = plan.tasks.filter(task => task.tool === 'finance.dcf.buildSection');
     assert.deepStrictEqual(dcfTasks.map(task => task.params.section), ['assumptions', 'wacc', 'dcf', 'sensitivity', 'format']);
     dcfTasks.forEach(task => assert.strictEqual(task.params.mode, 'template'));
+  });
+
+  await test('planner builds full DCF for complete request on empty workbook', async () => {
+    const plan = await planner.plan('completa un dcf su nvdia', {
+      activeSheet: 'Sheet1',
+      workbookSheets: ['Sheet1'],
+      allSheetsData: {
+        Sheet1: { isActive: true, empty: true, preview: [] }
+      }
+    });
+
+    assert.ok(plan.tasks.some(task => task.tool === 'yahoo.quote' && task.params.ticker === 'NVDA'));
+    assert.ok(plan.tasks.some(task => task.tool === 'yahoo.fundamentals' && task.params.ticker === 'NVDA'));
+    assert.ok(!plan.tasks.some(task => task.tool === 'llm.writeFormulas' && task.params.section === 'full_model_review'));
+    const dcfSections = plan.tasks
+      .filter(task => task.tool === 'finance.dcf.buildSection')
+      .map(task => task.params.section);
+    assert.deepStrictEqual(dcfSections, ['shell', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'format']);
   });
 
   await test('DCF template derives assumptions from market data', () => {
