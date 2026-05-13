@@ -4,6 +4,7 @@ const { analyzeWorkbookContext, parseNumber } = require('../utils/sheetParser');
 
 const WORKBOOK_AI_SCHEMA_TIMEOUT_MS = Number(process.env.WORKBOOK_AI_SCHEMA_TIMEOUT_MS) || 300000;
 const WORKBOOK_AI_SCHEMA_FALLBACK_TIMEOUT_MS = Number(process.env.WORKBOOK_AI_SCHEMA_FALLBACK_TIMEOUT_MS) || 180000;
+const schemaPromiseCache = new WeakMap();
 
 const CANONICALS = new Set([
   'Revenue',
@@ -223,8 +224,9 @@ function normalizeAiSchema(result, cellLookup) {
   };
 }
 
-function shouldUseWorkbookAiSchema(memory = {}) {
-  if (process.env.WORKBOOK_AI_SCHEMA_ENABLED === 'false') return false;
+function shouldUseWorkbookAiSchema(params = {}, memory = {}) {
+  if (params.aiSchemaEnabled === false) return false;
+  if (process.env.WORKBOOK_AI_SCHEMA_ENABLED !== 'true' && params.aiSchemaEnabled !== true) return false;
   const { sheets } = compactWorkbookContext(memory);
   return sheets.length > 0 && sheets.some(sheet => sheet.rows.length > 2);
 }
@@ -232,7 +234,14 @@ function shouldUseWorkbookAiSchema(memory = {}) {
 async function inferWorkbookSchemaWithAi(params = {}, memory = {}) {
   if (memory.aiWorkbookSchema) return memory.aiWorkbookSchema;
   if (memory.__workbookAiSchemaPromise) return memory.__workbookAiSchemaPromise;
-  if (!shouldUseWorkbookAiSchema(memory)) return null;
+  if (!shouldUseWorkbookAiSchema(params, memory)) return null;
+
+  const cacheKey = memory.results && typeof memory.results === 'object'
+    ? memory.results
+    : (memory.context && typeof memory.context === 'object' ? memory.context : null);
+  if (cacheKey && schemaPromiseCache.has(cacheKey)) {
+    return schemaPromiseCache.get(cacheKey);
+  }
 
   const compact = compactWorkbookContext(memory);
   const userText = [
@@ -270,6 +279,7 @@ async function inferWorkbookSchemaWithAi(params = {}, memory = {}) {
       return null;
     });
 
+  if (cacheKey) schemaPromiseCache.set(cacheKey, memory.__workbookAiSchemaPromise);
   return memory.__workbookAiSchemaPromise;
 }
 

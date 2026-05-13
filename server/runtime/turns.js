@@ -26,6 +26,7 @@ if (!fs.existsSync(TURNS_DIR)) {
 
 const activeTurns = new Map();
 const pendingDiskWrites = new Map(); // turnId -> timeoutId
+const runningTaskPromises = new Map(); // `${turnId}:${taskId}` -> Promise
 
 const MAX_ACTIVE_TURNS = 20;
 const TURN_CLEANUP_DELAY_MS = 5 * 60 * 1000;
@@ -751,6 +752,18 @@ async function planTurn(turnId) {
 }
 
 async function executeSingleTask(turnId, task) {
+  const key = `${turnId}:${task.id}`;
+  if (runningTaskPromises.has(key)) {
+    appendLog(turnId, `[${task.id}] già in corso (prefetch), attendo completamento`, 'info', { taskId: task.id });
+    return runningTaskPromises.get(key);
+  }
+  const promise = executeSingleTaskInner(turnId, task)
+    .finally(() => runningTaskPromises.delete(key));
+  runningTaskPromises.set(key, promise);
+  return promise;
+}
+
+async function executeSingleTaskInner(turnId, task) {
   const itemId = taskItemId(task.id);
   logger.info(`[Turn ${turnId}][${task.id}] Start task: ${task.agent}/${task.tool}`);
   const runningItem = upsertItem(turnId, {

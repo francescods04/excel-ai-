@@ -313,12 +313,13 @@ function sheetForSection(section) {
 
 async function buildDcfSectionAi(params = {}, memory = {}) {
   const section = String(params.section || 'all').toLowerCase();
-  const aiSchema = await inferWorkbookSchemaWithAi(params, memory);
+  const useAiSectionBuilder = shouldUseAi(params);
+  const aiSchema = useAiSectionBuilder ? await inferWorkbookSchemaWithAi(params, memory) : null;
   const enrichedParams = aiSchema ? { ...params, aiSchema } : params;
   const enrichedMemory = aiSchema ? { ...memory, aiWorkbookSchema: aiSchema } : memory;
   const fallback = buildDcfSection(enrichedParams, enrichedMemory);
 
-  if (!shouldUseAi(params)) {
+  if (!useAiSectionBuilder) {
     return fallbackWithBuilder(fallback, params.mode === 'template' ? 'template-requested' : 'template');
   }
 
