@@ -68,6 +68,12 @@ const localItalianFinancialSheet = [
   wideFinancialRow('Totale Attività', 1877404039, 1392953646, 1124782656),
   wideFinancialRow('Patrimonio Netto', 796074921, 698199348, 608235999),
   wideFinancialRow('Posizione finanziaria netta', '##########', 278255159, 281083500),
+  wideFinancialRow('C.IV. TOT. DISPON. LIQUIDE', 123159144, 18924672, 65637177),
+  wideFinancialRow('C.IV.3. Denaro in cassa', 73677, 25641, 65121),
+  wideFinancialRow('RISULTATO PRIMA DELLE IMPOSTE', 124885000, 118500000, 94000000),
+  wideFinancialRow('20. Totale Imposte sul reddito correnti, differite e anticipate', 26225163, 25859375, 20547559),
+  wideFinancialRow('B.10. TOT Ammortamenti e svalut.', 13728388, 12810277, 13428874),
+  wideFinancialRow('Capitale circolante netto', -137278459, -312257541, -168743724),
   wideFinancialRow('EBITDA/Vendite (%)', 33.67, 34.66, 31.82),
   wideFinancialRow('Redditività delle vendite (ROS) (%)', 27.9, 28.1, 26.4),
   wideFinancialRow('Debt/Equity ratio', 0.8, 0.9, 1.0)
@@ -209,6 +215,10 @@ async function main() {
     const netIncome = parsed.inferredInputs.find(input => input.canonical === 'Net Income');
     const margin = parsed.inferredInputs.find(input => input.canonical === 'EBITDA Margin');
     const netDebt = parsed.inferredInputs.find(input => input.canonical === 'Net Debt');
+    const totalCash = parsed.inferredInputs.find(input => input.label.includes('TOT. DISPON'));
+    const cashLine = parsed.inferredInputs.find(input => input.label.includes('Denaro in cassa'));
+    const da = parsed.inferredInputs.find(input => input.canonical === 'D&A');
+    const taxes = parsed.inferredInputs.find(input => input.canonical === 'Income Taxes');
     const ros = parsed.inferredInputs.find(input => input.label.includes('ROS'));
 
     assert.strictEqual(revenue.value, 422084200);
@@ -217,6 +227,11 @@ async function main() {
     assert.strictEqual(netIncome.value, 98659837);
     assert.strictEqual(margin.value, 33.67);
     assert.strictEqual(netDebt.value, 278255159);
+    assert.strictEqual(totalCash.value, 123159144);
+    assert.strictEqual(cashLine.value, 73677);
+    assert.ok(totalCash.priority > cashLine.priority);
+    assert.strictEqual(da.value, 13728388);
+    assert.strictEqual(taxes.value, 26225163);
     assert.strictEqual(ros.canonical, 'EBIT Margin');
   });
 
@@ -232,7 +247,13 @@ async function main() {
     assert.strictEqual(inputs.sourceType, 'workbook');
     assert.ok(Math.abs(inputs.baseRevenueMillions - 422.0842) < 0.0001);
     assert.ok(Math.abs(inputs.ebitdaMargin - (144455481 / 422084200)) < 0.0001);
+    assert.ok(Math.abs(inputs.cashMillions - 123.159144) < 0.0001);
     assert.ok(Math.abs(inputs.debtMillions - 278.255159) < 0.0001);
+    assert.ok(Math.abs(inputs.daPercentRevenue - (12810277 / 384293950)) < 0.0001);
+    assert.ok(Math.abs(inputs.taxRate - (25859375 / 118500000)) < 0.0001);
+    assert.ok(inputs.revenueGrowth[0] > 0.08);
+    assert.strictEqual(inputs.privateOwnershipMode, true);
+    assert.strictEqual(inputs.hasShareCount, false);
     assert.strictEqual(inputs.sharesMillions, 1);
 
     const assumptions = buildDcfSection({ section: 'assumptions' }, {
@@ -244,7 +265,27 @@ async function main() {
     assert.ok(Math.abs(assumptions.actions[0].cells.B10.value - 422.0842) < 0.0001);
     assert.ok(assumptions.actions[0].cells.C10.value.includes('converted to millions'));
     assert.ok(assumptions.actions[0].cells.D10.value.includes('Local source: Sheet1!S4'));
+    assert.ok(Math.abs(assumptions.actions[0].cells.B33.value - 123.159144) < 0.0001);
+    assert.ok(assumptions.actions[0].cells.D33.value.includes('Local source'));
+    assert.strictEqual(assumptions.actions[0].cells.A35.value, 'Ownership Units (100%=1.0)');
     assert.ok(assumptions.actions[0].cells.C28.value.includes('cross-checked'));
+
+    const dcf = buildDcfSection({ section: 'dcf' }, {
+      context: localItalianContext,
+      results: mockMemory.results
+    });
+    assert.ok(dcf.actions[0].cells.A35.value.includes('100% Ownership'));
+    assert.ok(dcf.actions[0].cells.A37.value.includes('Reference Share Price'));
+    assert.strictEqual(dcf.actions[0].cells.H35.formula, '=H33/H34');
+    assert.strictEqual(dcf.actions[0].cells.H38.formula, '=IF(H37>0,H35/H37-1,"")');
+
+    const audit = buildDcfSection({ section: 'audit' }, {
+      context: localItalianContext,
+      results: mockMemory.results
+    });
+    assert.strictEqual(audit.actions[0].cells.A10.value, 'Cash / revenue sanity');
+    assert.strictEqual(audit.actions[0].cells.A11.value, 'Market input support');
+    assert.ok(audit.actions[0].cells.B17.formula.includes('$B$5:$B$14'));
   });
 
   await test('planner workbook-first guardrail removes invented external company data tasks', () => {

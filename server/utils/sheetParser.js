@@ -42,8 +42,15 @@ const FINANCE_KEYWORDS = new Map([
   ['fcf', 'FCF'],
   ['capex', 'CapEx'],
   ['capital expenditure', 'CapEx'],
+  ['ammortamenti e svalut', 'D&A'],
+  ['ammortamenti', 'D&A'],
   ['depreciation', 'D&A'],
   ['amortization', 'D&A'],
+  ['risultato prima delle imposte', 'Pre-Tax Income'],
+  ['utile prima delle imposte', 'Pre-Tax Income'],
+  ['totale imposte sul reddito', 'Income Taxes'],
+  ['imposte correnti', 'Income Taxes'],
+  ['imposte sul reddito', 'Income Taxes'],
   ['tax rate', 'Tax Rate'],
   ['tax', 'Tax Rate'],
   ['growth', 'Revenue Growth'],
@@ -69,8 +76,12 @@ const FINANCE_KEYWORDS = new Map([
   ['debiti v banche', 'Total Debt'],
   ['debiti finanziari', 'Total Debt'],
   ['debt', 'Total Debt'],
+  ['tot dispon liquide', 'Cash & Equivalents'],
+  ['dispon liquide', 'Cash & Equivalents'],
+  ['totale disponibilita liquide', 'Cash & Equivalents'],
   ['disponibilita liquide', 'Cash & Equivalents'],
   ['liquidita', 'Cash & Equivalents'],
+  ['denaro in cassa', 'Cash & Equivalents'],
   ['cassa', 'Cash & Equivalents'],
   ['cash', 'Cash & Equivalents'],
   ['shares', 'Shares Outstanding'],
@@ -111,6 +122,7 @@ const FINANCE_KEYWORDS = new Map([
   ['dso', 'DSO'],
   ['dio', 'DIO'],
   ['dpo', 'DPO'],
+  ['capitale circolante netto', 'Net Working Capital'],
   ['nwc', 'Net Working Capital'],
   ['working capital', 'Net Working Capital'],
 ]);
@@ -203,6 +215,27 @@ function classifyLabel(labelText) {
   return null;
 }
 
+function scoreCanonicalLabel(canonical, labelText) {
+  const label = normalizeLabel(labelText);
+  let score = 0;
+  if (/\btot\b|\btotale\b/.test(label)) score += 20;
+  if (/\bdi cui\b|\bsubtotale\b/.test(label)) score -= 8;
+
+  if (canonical === 'Cash & Equivalents') {
+    if (/tot.*dispon.*liquid|dispon.*liquid/.test(label)) score += 60;
+    if (/depositi bancari/.test(label)) score += 20;
+    if (/denaro in cassa/.test(label)) score -= 40;
+  }
+  if (canonical === 'Total Debt' && /totale debiti|tot debiti/.test(label)) score += 45;
+  if (canonical === 'Net Debt' && /posizione finanziaria netta|pfn/.test(label)) score += 45;
+  if (canonical === 'D&A' && /tot.*ammortamenti|ammortamenti e svalut/.test(label)) score += 45;
+  if (canonical === 'Income Taxes' && /totale imposte sul reddito/.test(label)) score += 45;
+  if (canonical === 'Pre-Tax Income' && /prima delle imposte/.test(label)) score += 45;
+  if (canonical === 'Revenue' && /ricavi delle vendite|total revenue|ricavi vendite/.test(label)) score += 30;
+  if (canonical === 'Shareholders Equity' && /totale patrimonio netto|patrimonio netto/.test(label)) score += 35;
+  return score;
+}
+
 function inferUnit(values) {
   // Stima se i numeri sono in milioni/miliardi/unità
   const nums = values.map(parseNumber).filter(n => n !== null);
@@ -249,6 +282,7 @@ function parseSheetMatrix(matrix, sheetName = 'Sheet1') {
       rawValue,
       cell: cellAddress(sheetName, row, col),
       confidence,
+      priority: scoreCanonicalLabel(canonical, label),
       row,
       col
     });
@@ -447,5 +481,6 @@ module.exports = {
   analyzeWorkbookContext,
   parseNumber,
   classifyLabel,
+  scoreCanonicalLabel,
   FINANCE_KEYWORDS
 };

@@ -95,10 +95,10 @@ const PALETTE_LIBRARY = {
 };
 
 const NUM_FORMATS = {
-  currency: '$#,##0.0;[Red]($#,##0.0);-',
+  currency: '#,##0.0;[Red](#,##0.0);-',
   percent: '0.00%;[Red](0.00%);-',
   multiple: '0.00x',
-  perShare: '$#,##0.00;[Red]($#,##0.00);-',
+  perShare: '#,##0.00;[Red](#,##0.00);-',
   number: '#,##0.0;[Red](#,##0.0);-',
   text: '@'
 };

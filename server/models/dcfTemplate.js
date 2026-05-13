@@ -34,11 +34,11 @@ const STYLE = {
 };
 
 const NUM_FORMATS = {
-  currency: '$#,##0.0',
+  currency: '#,##0.0',
   percent: '0.00%',
   multiple: '0.00x',
   shares: '#,##0.0',
-  perShare: '$#,##0.00',
+  perShare: '#,##0.00',
   number: '#,##0.0'
 };
 
@@ -61,6 +61,7 @@ function fmt(base, extra = {}) {
 }
 
 function finiteNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
@@ -250,7 +251,91 @@ function perShareLabel(inputs) {
 
 function pickWorkbookInput(inputs, canonicals) {
   const wanted = new Set(canonicals);
-  return inputs.find(input => wanted.has(input.canonical) && finiteNumber(input.value) != null) || null;
+  return inputs
+    .filter(input => wanted.has(input.canonical) && finiteNumber(input.value) != null)
+    .sort((a, b) => {
+      const priorityDelta = (b.priority || 0) - (a.priority || 0);
+      if (priorityDelta) return priorityDelta;
+      const rowDelta = (a.row ?? 999999) - (b.row ?? 999999);
+      if (rowDelta) return rowDelta;
+      return (a.col ?? 999999) - (b.col ?? 999999);
+    })[0] || null;
+}
+
+function pickWorkbookSeries(inputs, canonical) {
+  const groups = new Map();
+  inputs
+    .filter(input => input.canonical === canonical && finiteNumber(input.value) != null)
+    .forEach(input => {
+      const key = `${input.sheet || ''}:${input.row}:${input.label}`;
+      const group = groups.get(key) || {
+        label: input.label,
+        canonical,
+        row: input.row,
+        sheet: input.sheet,
+        priority: input.priority || 0,
+        values: []
+      };
+      group.priority = Math.max(group.priority, input.priority || 0);
+      group.values.push(input);
+      groups.set(key, group);
+    });
+
+  return [...groups.values()]
+    .filter(group => group.values.length > 0)
+    .sort((a, b) => {
+      const countDelta = b.values.length - a.values.length;
+      if (countDelta) return countDelta;
+      const priorityDelta = (b.priority || 0) - (a.priority || 0);
+      if (priorityDelta) return priorityDelta;
+      return (a.row ?? 999999) - (b.row ?? 999999);
+    })[0]?.values
+    ?.sort((a, b) => (a.col ?? 999999) - (b.col ?? 999999)) || [];
+}
+
+function average(values) {
+  const nums = values.map(finiteNumber).filter(n => n != null);
+  if (nums.length === 0) return null;
+  return nums.reduce((sum, n) => sum + n, 0) / nums.length;
+}
+
+function median(values) {
+  const nums = values.map(finiteNumber).filter(n => n != null).sort((a, b) => a - b);
+  if (nums.length === 0) return null;
+  const mid = Math.floor(nums.length / 2);
+  return nums.length % 2 ? nums[mid] : (nums[mid - 1] + nums[mid]) / 2;
+}
+
+function latestToOldestRatios(numeratorSeries, denominatorSeries) {
+  const count = Math.min(numeratorSeries.length, denominatorSeries.length);
+  const ratios = [];
+  for (let i = 0; i < count; i++) {
+    const numerator = finiteNumber(numeratorSeries[i]?.value);
+    const denominator = finiteNumber(denominatorSeries[i]?.value);
+    if (numerator != null && denominator && denominator !== 0) ratios.push(numerator / denominator);
+  }
+  return ratios;
+}
+
+function revenueGrowthPath(revenueSeries, terminalGrowthRate = DEFAULTS.terminalGrowthRate) {
+  const values = revenueSeries.map(input => finiteNumber(input.value)).filter(n => n != null && n > 0);
+  if (values.length < 2) return DEFAULTS.revenueGrowth;
+  const latest = values[0];
+  const previous = values[1];
+  const latestGrowth = previous > 0 ? latest / previous - 1 : null;
+  const oldest = values[Math.min(values.length, 5) - 1];
+  const periods = Math.min(values.length, 5) - 1;
+  const cagr = oldest > 0 && periods > 0 ? (latest / oldest) ** (1 / periods) - 1 : null;
+  const startingGrowth = clamp(average([latestGrowth, cagr]), -0.05, 0.15, DEFAULTS.revenueGrowth[0]);
+  const terminalAnchor = clamp(terminalGrowthRate + 0.015, -0.02, 0.08, 0.04);
+  return Array.from({ length: DEFAULTS.projectionYears }, (_, index) => {
+    const t = DEFAULTS.projectionYears === 1 ? 1 : index / (DEFAULTS.projectionYears - 1);
+    return startingGrowth + (terminalAnchor - startingGrowth) * t;
+  });
+}
+
+function sourceSummaryFor(series) {
+  return series.slice(0, 5).map(input => `${input.rawValue} at ${input.cell}`).join(' | ');
 }
 
 function inferWorkbookDcfInputs(memory = {}) {
@@ -263,12 +348,22 @@ function inferWorkbookDcfInputs(memory = {}) {
   const ebitdaInput = pickWorkbookInput(inputs, ['EBITDA']);
   const ebitdaMarginInput = pickWorkbookInput(inputs, ['EBITDA Margin']);
   const netIncomeInput = pickWorkbookInput(inputs, ['Net Income']);
+  const daInput = pickWorkbookInput(inputs, ['D&A']);
+  const preTaxInput = pickWorkbookInput(inputs, ['Pre-Tax Income']);
+  const taxInput = pickWorkbookInput(inputs, ['Income Taxes']);
   const cashInput = pickWorkbookInput(inputs, ['Cash & Equivalents']);
   const debtInput = pickWorkbookInput(inputs, ['Total Debt']);
   const netDebtInput = pickWorkbookInput(inputs, ['Net Debt']);
   const debtEquityInput = pickWorkbookInput(inputs, ['Debt / Equity']);
+  const nwcInput = pickWorkbookInput(inputs, ['Net Working Capital']);
   const sharesInput = pickWorkbookInput(inputs, ['Shares Outstanding', 'Diluted Shares']);
   const sharePriceInput = pickWorkbookInput(inputs, ['Share Price']);
+  const revenueSeries = pickWorkbookSeries(inputs, 'Revenue');
+  const ebitdaSeries = pickWorkbookSeries(inputs, 'EBITDA');
+  const daSeries = pickWorkbookSeries(inputs, 'D&A');
+  const preTaxSeries = pickWorkbookSeries(inputs, 'Pre-Tax Income');
+  const taxSeries = pickWorkbookSeries(inputs, 'Income Taxes');
+  const nwcSeries = pickWorkbookSeries(inputs, 'Net Working Capital');
 
   const sourceRefs = {};
   for (const input of [
@@ -276,10 +371,14 @@ function inferWorkbookDcfInputs(memory = {}) {
     ebitdaInput,
     ebitdaMarginInput,
     netIncomeInput,
+    daInput,
+    preTaxInput,
+    taxInput,
     cashInput,
     debtInput,
     netDebtInput,
     debtEquityInput,
+    nwcInput,
     sharesInput,
     sharePriceInput
   ]) {
@@ -301,12 +400,24 @@ function inferWorkbookDcfInputs(memory = {}) {
     ebitda: ebitdaInput?.value ?? null,
     ebitdaMargin: ebitdaMarginInput ? toRatio(ebitdaMarginInput.value) : null,
     netIncome: netIncomeInput?.value ?? null,
+    da: daInput?.value ?? null,
+    preTaxIncome: preTaxInput?.value ?? null,
+    incomeTaxes: taxInput?.value ?? null,
     cash: cashInput?.value ?? null,
     debt: debtInput?.value ?? null,
     netDebt: netDebtInput?.value ?? null,
     debtEquity: debtEquityInput ? toRatio(debtEquityInput.value) : null,
+    nwc: nwcInput?.value ?? null,
     shares: sharesInput?.value ?? null,
     sharePrice: sharePriceInput?.value ?? null,
+    series: {
+      revenue: revenueSeries,
+      ebitda: ebitdaSeries,
+      da: daSeries,
+      preTaxIncome: preTaxSeries,
+      incomeTaxes: taxSeries,
+      nwc: nwcSeries
+    },
     sourceRefs,
     sourceSummary: inputs.slice(0, 12).map(input => `${input.canonical}: ${input.rawValue} at ${input.cell}`)
   };
@@ -345,9 +456,26 @@ function inferDcfInputs(params = {}, memory = {}) {
     : workbookInputs.ebitdaMargin != null
       ? clamp(workbookInputs.ebitdaMargin, 0.05, 0.65, DEFAULTS.ebitdaMargin)
     : DEFAULTS.ebitdaMargin;
+  const daRatios = latestToOldestRatios(workbookInputs.series?.da || [], workbookInputs.series?.revenue || []);
+  const historicalDaPercentRevenue = median(daRatios);
+  const taxRatios = latestToOldestRatios(workbookInputs.series?.incomeTaxes || [], workbookInputs.series?.preTaxIncome || [])
+    .map(Math.abs)
+    .filter(ratio => ratio >= 0 && ratio <= 0.6);
+  const historicalTaxRate = median(taxRatios);
+  const latestNwc = finiteNumber(workbookInputs.nwc);
+  const historicalNwcPercentRevenue = latestNwc != null && baseRevenueMillions
+    ? toMillions(latestNwc) / baseRevenueMillions
+    : null;
+  const revenueGrowth = workbookInputs.series?.revenue?.length >= 2
+    ? revenueGrowthPath(workbookInputs.series.revenue, DEFAULTS.terminalGrowthRate)
+    : DEFAULTS.revenueGrowth;
   const cashMillions = Math.max(0, toMillions(totalCash) || DEFAULTS.cashMillions);
   const debtMillions = Math.max(0, toMillions(totalDebt) || DEFAULTS.debtMillions);
   const marketCapMillions = Math.max(0, toMillions(marketCap) || 0);
+  const hasLocalShareCount = finiteNumber(workbookInputs.shares) != null;
+  const hasMarketShareCount = finiteNumber(shares) != null;
+  const hasSharePrice = finiteNumber(workbookInputs.sharePrice) != null || finiteNumber(price) != null;
+  const privateOwnershipMode = !!(workbookInputs.hasWorkbookFinancials && workbookInputs.isPrivateCompany && !hasLocalShareCount && !hasMarketShareCount);
   const sharePrice = Math.max(0, finiteNumber(workbookInputs.sharePrice) ?? finiteNumber(price) ?? DEFAULTS.sharePrice);
   const localSharesMillions = toMillions(workbookInputs.shares);
   const sharesMillions = localSharesMillions ||
@@ -372,15 +500,15 @@ function inferDcfInputs(params = {}, memory = {}) {
     debtIsNetDebt: workbookInputs.debt == null && workbookInputs.netDebt != null,
     projectionYears: Number(params.projectionYears) || DEFAULTS.projectionYears,
     baseYear: new Date().getFullYear() - 1,
-    revenueGrowth: DEFAULTS.revenueGrowth,
+    revenueGrowth,
     ebitdaMargin,
-    taxRate: DEFAULTS.taxRate,
-    daPercentRevenue: DEFAULTS.daPercentRevenue,
-    capexPercentRevenue: DEFAULTS.capexPercentRevenue,
-    nwcPercentRevenue: DEFAULTS.nwcPercentRevenue,
+    taxRate: clamp(historicalTaxRate, 0.05, 0.40, DEFAULTS.taxRate),
+    daPercentRevenue: clamp(historicalDaPercentRevenue, 0.005, 0.15, DEFAULTS.daPercentRevenue),
+    capexPercentRevenue: clamp(historicalDaPercentRevenue, 0.005, 0.18, DEFAULTS.capexPercentRevenue),
+    nwcPercentRevenue: clamp(historicalNwcPercentRevenue, -0.20, 0.20, DEFAULTS.nwcPercentRevenue),
     riskFreeRate: DEFAULTS.riskFreeRate,
     marketRiskPremium: DEFAULTS.marketRiskPremium,
-    beta: clamp(beta, 0.4, 2.5, DEFAULTS.beta),
+    beta: clamp(beta, 0.4, 2.5, workbookInputs.isPrivateCompany ? 0.85 : DEFAULTS.beta),
     preTaxCostOfDebt: DEFAULTS.preTaxCostOfDebt,
     targetDebtToEquity,
     terminalGrowthRate: DEFAULTS.terminalGrowthRate,
@@ -389,7 +517,17 @@ function inferDcfInputs(params = {}, memory = {}) {
     debtMillions,
     sharesMillions,
     sharePrice,
-    marketCapMillions
+    marketCapMillions,
+    hasShareCount: hasLocalShareCount || hasMarketShareCount || !privateOwnershipMode,
+    hasSharePrice,
+    privateOwnershipMode,
+    historicalSourceSummary: {
+      revenue: sourceSummaryFor(workbookInputs.series?.revenue || []),
+      ebitda: sourceSummaryFor(workbookInputs.series?.ebitda || []),
+      da: sourceSummaryFor(workbookInputs.series?.da || []),
+      tax: sourceSummaryFor(workbookInputs.series?.incomeTaxes || []),
+      nwc: sourceSummaryFor(workbookInputs.series?.nwc || [])
+    }
   };
 }
 
@@ -462,16 +600,16 @@ function buildAssumptionsActions(inputs) {
   explain(11, 'Calculated as EBITDA / revenue when available; otherwise normalized fallback within plausible range.', sourceNote(refFor('EBITDA', 'EBITDA Margin'), 'EBITDA/margin not sourced'));
   set(cells, 'A12', cell('Tax Rate (%)', STYLE.label));
   set(cells, 'B12', cell(inputs.taxRate, pctInputStyle));
-  explain(12, 'Normalized effective tax assumption; replace with company effective tax or statutory rate support.', sourceNote(refFor('Tax Rate', 'Taxes'), 'tax rate requires analyst confirmation'));
+  explain(12, 'Calculated from income taxes / pre-tax income when available; otherwise normalized effective tax assumption.', sourceNote(refFor('Income Taxes', 'Tax Rate', 'Taxes'), 'tax rate requires analyst confirmation'));
   set(cells, 'A13', cell('D&A % of Revenue (%)', STYLE.label));
   set(cells, 'B13', cell(inputs.daPercentRevenue, pctInputStyle));
-  explain(13, 'Normalized depreciation and amortization intensity as a percent of revenue.', sourceNote(refFor('D&A', 'Depreciation'), 'D&A intensity requires historical support'));
+  explain(13, 'Derived from historical depreciation/amortization as a percent of revenue where available.', sourceNote(refFor('D&A', 'Depreciation'), 'D&A intensity requires historical support'));
   set(cells, 'A14', cell('CapEx % of Revenue (%)', STYLE.label));
   set(cells, 'B14', cell(inputs.capexPercentRevenue, pctInputStyle));
-  explain(14, 'Capital intensity assumption tied to revenue; should be calibrated to historical CapEx or management plan.', sourceNote(refFor('CapEx', 'Capital Expenditures'), 'CapEx intensity requires historical support'));
+  explain(14, 'Capital intensity assumption tied to revenue; uses CapEx history when available, otherwise D&A proxy / analyst fallback.', sourceNote(refFor('CapEx', 'Capital Expenditures', 'D&A'), 'CapEx intensity requires historical support'));
   set(cells, 'A15', cell('NWC % of Revenue (%)', STYLE.label));
   set(cells, 'B15', cell(inputs.nwcPercentRevenue, pctInputStyle));
-  explain(15, 'Working-capital investment modeled as percent of revenue to drive change in NWC.', sourceNote(refFor('Net Working Capital', 'Working Capital'), 'NWC intensity requires balance-sheet support'));
+  explain(15, 'Working-capital investment modeled from local NWC / revenue when available; negative values indicate cash-generative working capital.', sourceNote(refFor('Net Working Capital', 'Working Capital'), 'NWC intensity requires balance-sheet support'));
 
   set(cells, 'A17', cell('Projection Assumptions', STYLE.section));
   set(cells, 'B17', cell('Input', STYLE.header));
@@ -480,7 +618,7 @@ function buildAssumptionsActions(inputs) {
   inputs.revenueGrowth.forEach((growth, index) => {
     set(cells, `A${18 + index}`, cell(`Revenue Growth Y${index + 1} (%)`, STYLE.label));
     set(cells, `B${18 + index}`, cell(growth, pctInputStyle));
-    explain(18 + index, `Default explicit forecast fade path for year ${index + 1}; replace with guidance, consensus, or build-up analysis.`, 'Review: growth assumption');
+    explain(18 + index, `Explicit forecast fade path for year ${index + 1}, anchored to historical revenue trend when available.`, inputs.historicalSourceSummary?.revenue ? `Local trend: ${inputs.historicalSourceSummary.revenue}` : 'Review: growth assumption');
   });
   set(cells, 'A23', cell('Terminal Growth Rate (%)', STYLE.label));
   set(cells, 'B23', cell(inputs.terminalGrowthRate, pctInputStyle));
@@ -516,15 +654,15 @@ function buildAssumptionsActions(inputs) {
   set(cells, 'A34', cell(`${inputs.debtIsNetDebt ? 'Net Debt' : 'Total Debt'} (${amount})`, STYLE.label));
   set(cells, 'B34', cell(inputs.debtMillions, fmt(inputStyle, { numberFormat: NUM_FORMATS.currency })));
   explain(34, 'Debt or net debt used in the EV-to-equity bridge.', sourceNote(refFor('Total Debt', 'Net Debt'), 'debt not sourced; verify balance sheet'));
-  set(cells, 'A35', cell('Shares Outstanding (M)', STYLE.label));
+  set(cells, 'A35', cell(inputs.privateOwnershipMode ? 'Ownership Units (100%=1.0)' : 'Shares Outstanding (M)', STYLE.label));
   set(cells, 'B35', cell(inputs.sharesMillions, fmt(inputStyle, { numberFormat: NUM_FORMATS.shares })));
-  explain(35, 'Diluted shares from market data/workbook; fallback uses market cap divided by price where possible.', sourceNote(refFor('Shares Outstanding', 'Diluted Shares'), 'share count requires support'));
-  set(cells, 'A36', cell(`Current Share Price (${perShare})`, STYLE.label));
+  explain(35, inputs.privateOwnershipMode ? 'Private-company valuation uses one ownership unit equal to 100% of equity value.' : 'Diluted shares from market data/workbook; fallback uses market cap divided by price where possible.', inputs.privateOwnershipMode ? 'Private ownership basis; no invented share count' : sourceNote(refFor('Shares Outstanding', 'Diluted Shares'), 'share count requires support'));
+  set(cells, 'A36', cell(inputs.privateOwnershipMode ? `Reference Share Price (${perShare})` : `Current Share Price (${perShare})`, STYLE.label));
   set(cells, 'B36', cell(inputs.sharePrice, fmt(inputStyle, { numberFormat: NUM_FORMATS.perShare })));
   explain(36, 'Current share price for premium/discount; zero for private-company models unless provided.', sourceNote(refFor('Share Price'), inputs.isPrivateCompany ? 'private model: no public share price' : 'share price requires market quote'));
-  set(cells, 'A37', cell(`Current Market Cap (${amount})`, STYLE.label));
-  set(cells, 'B37', formula('=B35*B36', fmt(STYLE.formula, { numberFormat: NUM_FORMATS.currency })));
-  explain(37, 'Formula: shares outstanding multiplied by current share price.', 'Calculated from B35 and B36');
+  set(cells, 'A37', cell(inputs.privateOwnershipMode ? `Reference Equity Value (${amount})` : `Current Market Cap (${amount})`, STYLE.label));
+  set(cells, 'B37', formula('=IF(B36>0,B35*B36,0)', fmt(STYLE.formula, { numberFormat: NUM_FORMATS.currency })));
+  explain(37, inputs.privateOwnershipMode ? 'Formula: optional reference price times ownership units; remains zero when no market reference exists.' : 'Formula: shares outstanding multiplied by current share price.', 'Calculated from B35 and B36');
 
   return [makeSetCellRangeAction('Assumptions', cells)];
 }
@@ -598,6 +736,14 @@ function buildDcfActions(inputs) {
   const totalPct = fmt(STYLE.total, { numberFormat: NUM_FORMATS.percent });
   const amount = amountLabel(inputs);
   const perShare = perShareLabel(inputs);
+  const outputIsOwnership = !!inputs.privateOwnershipMode;
+  const valueOutputLabel = outputIsOwnership
+    ? `Equity Value / 100% Ownership (${amount})`
+    : `Implied Share Price (${perShare})`;
+  const valueOutputFormat = outputIsOwnership ? totalMoney : fmt(STYLE.total, { numberFormat: NUM_FORMATS.perShare });
+  const referencePriceLabel = outputIsOwnership
+    ? `Reference Share Price (${perShare})`
+    : `Current Share Price (${perShare})`;
 
   set(cells, 'A1', cell(`${inputs.companyName} (${inputs.ticker}) - Discounted Cash Flow`, STYLE.title));
   set(cells, 'A2', cell('Metric', STYLE.header));
@@ -633,10 +779,10 @@ function buildDcfActions(inputs) {
     [31, `(+) Cash & Equivalents (${amount})`],
     [32, `(-) ${inputs.debtIsNetDebt ? 'Net Debt' : 'Total Debt'} (${amount})`],
     [33, `Equity Value (${amount})`],
-    [34, 'Shares Outstanding (M)'],
-    [35, `Implied Share Price (${perShare})`],
-    [37, `Current Share Price (${perShare})`],
-    [38, 'Premium / (Discount) to Current (%)'],
+    [34, outputIsOwnership ? 'Ownership Units (100%=1.0)' : 'Shares Outstanding (M)'],
+    [35, valueOutputLabel],
+    [37, referencePriceLabel],
+    [38, outputIsOwnership ? 'Premium / (Discount) to Reference (%)' : 'Premium / (Discount) to Current (%)'],
     [40, `EV Bridge Check (${amount})`]
   ];
   labelRows.forEach(([row, label]) => set(cells, `A${row}`, cell(label, STYLE.label)));
@@ -693,22 +839,24 @@ function buildDcfActions(inputs) {
   set(cells, 'H32', formula('=Assumptions!$B$34', money));
   set(cells, 'H33', formula('=H30+H31-H32', totalMoney));
   set(cells, 'H34', formula('=Assumptions!$B$35', fmt(STYLE.formula, { numberFormat: NUM_FORMATS.shares })));
-  set(cells, 'H35', formula('=H33/H34', fmt(STYLE.total, { numberFormat: NUM_FORMATS.perShare })));
+  set(cells, 'H35', formula('=H33/H34', valueOutputFormat));
   set(cells, 'H37', formula('=Assumptions!$B$36', fmt(STYLE.formula, { numberFormat: NUM_FORMATS.perShare })));
-  set(cells, 'H38', formula('=IFERROR(H35/H37-1,0)', totalPct));
+  set(cells, 'H38', formula('=IF(H37>0,H35/H37-1,"")', totalPct));
   set(cells, 'H40', formula('=H33+H32-H31-H30', fmt(STYLE.check, { numberFormat: NUM_FORMATS.currency })));
 
   return [makeSetCellRangeAction('DCF', cells)];
 }
 
-function buildSensitivityActions() {
+function buildSensitivityActions(inputs = {}) {
   const cells = {};
   const money = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.currency });
   const pct = fmt(STYLE.input, { numberFormat: NUM_FORMATS.percent });
   const perShare = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.perShare });
+  const valueStyle = inputs.privateOwnershipMode ? money : perShare;
+  const valueLabel = inputs.privateOwnershipMode ? 'Equity Value Sensitivity' : 'Implied Share Price Sensitivity';
 
   set(cells, 'A1', cell('Sensitivity Analysis', STYLE.title));
-  set(cells, 'A3', cell('Implied Share Price Sensitivity', STYLE.section));
+  set(cells, 'A3', cell(valueLabel, STYLE.section));
   set(cells, 'B4', cell('WACC \\ g', STYLE.header));
   [0.015, 0.02, 0.025, 0.03, 0.035].forEach((growth, idx) => {
     set(cells, `${col(2 + idx)}4`, cell(growth, pct));
@@ -718,7 +866,7 @@ function buildSensitivityActions() {
     set(cells, `B${row}`, cell(wacc, pct));
     for (let idx = 0; idx < 5; idx++) {
       const c = col(2 + idx);
-      set(cells, `${c}${row}`, formula(`=IFERROR(((SUM(DCF!$C$24:$G$24)+DCF!$G$20*(1+${c}$4)/($B${row}-${c}$4)/(1+$B${row})^5)+DCF!$H$31-DCF!$H$32)/DCF!$H$34,0)`, perShare));
+      set(cells, `${c}${row}`, formula(`=IFERROR(((SUM(DCF!$C$24:$G$24)+DCF!$G$20*(1+${c}$4)/($B${row}-${c}$4)/(1+$B${row})^5)+DCF!$H$31-DCF!$H$32)/DCF!$H$34,0)`, valueStyle));
     }
   });
 
@@ -752,6 +900,7 @@ function buildSourcesActions(inputs) {
   const refs = inputs.sourceRefs || {};
   const historicalSource = local ? 'Workbook local financial data' : 'External fundamentals / workbook fallback';
   const marketSource = local && inputs.isPrivateCompany ? 'Not in workbook; analyst fallback' : 'External market data / workbook fallback';
+  const ownershipSource = inputs.privateOwnershipMode ? 'Private ownership basis; no public share count' : marketSource;
 
   set(cells, 'A1', cell(`${inputs.companyName} (${inputs.ticker}) - Source Book`, STYLE.title));
   set(cells, 'A3', cell('Model Scope', STYLE.section));
@@ -773,7 +922,7 @@ function buildSourcesActions(inputs) {
     ['Base Revenue', historicalSource, refs.Revenue || 'Assumptions!B10'],
     ['EBITDA Margin', local ? 'Workbook EBITDA / revenue' : 'External fundamentals / analyst fallback', refs.EBITDA || refs['EBITDA Margin'] || 'Assumptions!B11'],
     ['Cash & Debt', local ? 'Workbook balance sheet / net debt' : 'External balance-sheet fallback', refs['Cash & Equivalents'] || refs['Total Debt'] || refs['Net Debt'] || 'Assumptions!B33:B34'],
-    ['Shares & Share Price', marketSource, refs['Shares Outstanding'] || refs['Share Price'] || 'Assumptions!B35:B36'],
+    [inputs.privateOwnershipMode ? 'Ownership / Market Reference' : 'Shares & Share Price', ownershipSource, refs['Shares Outstanding'] || refs['Share Price'] || 'Assumptions!B35:B36'],
     ['Beta', marketSource, 'Assumptions!B28'],
     ['WACC Assumptions', 'Market data + visible analyst assumptions', 'Assumptions!B26:B30'],
     ['Terminal Growth', 'Long-term GDP / inflation sanity range', 'Assumptions!B23']
@@ -796,8 +945,8 @@ function buildSourcesActions(inputs) {
     ['Beta', '=Assumptions!$B$28', 'CAPM', multiple],
     [`Cash (${amount})`, '=Assumptions!$B$33', 'Equity bridge', money],
     [`${inputs.debtIsNetDebt ? 'Net Debt' : 'Debt'} (${amount})`, '=Assumptions!$B$34', 'Equity bridge', money],
-    ['Shares (M)', '=Assumptions!$B$35', 'Per-share value', number],
-    [`Current Share Price (${perShare})`, '=Assumptions!$B$36', 'Upside/downside', fmt(STYLE.formula, { numberFormat: NUM_FORMATS.perShare })]
+    [inputs.privateOwnershipMode ? 'Ownership Units' : 'Shares (M)', '=Assumptions!$B$35', inputs.privateOwnershipMode ? '100% equity value basis' : 'Per-share value', number],
+    [inputs.privateOwnershipMode ? `Reference Share Price (${perShare})` : `Current Share Price (${perShare})`, '=Assumptions!$B$36', inputs.privateOwnershipMode ? 'Optional market reference' : 'Upside/downside', fmt(STYLE.formula, { numberFormat: NUM_FORMATS.perShare })]
   ];
   extracts.forEach(([label, valueFormula, usedIn, style], index) => {
     const row = 24 + index;
@@ -812,7 +961,8 @@ function buildSourcesActions(inputs) {
   set(cells, 'C36', cell('Action', STYLE.header));
   const checks = [
     ['Revenue available', '=IF(Assumptions!$B$10>0,"OK","Review")', 'Confirm latest annual revenue'],
-    ['Shares available', '=IF(Assumptions!$B$35>0,"OK","Review")', 'Confirm diluted shares'],
+    [inputs.privateOwnershipMode ? 'Private ownership basis' : 'Shares available', inputs.privateOwnershipMode ? '=IF(Assumptions!$B$35=1,"OK","Review")' : '=IF(Assumptions!$B$35>0,"OK","Review")', inputs.privateOwnershipMode ? 'Do not invent public share count for private company' : 'Confirm diluted shares'],
+    ['Cash / revenue sane', '=IF(Assumptions!$B$33/Assumptions!$B$10<2,"OK","Review")', 'Reject line-item cash mistaken for full balance-sheet bridge'],
     ['WACC sane', '=IF(AND(WACC!$B$19>0.05,WACC!$B$19<0.20),"OK","Review")', 'Review capital costs'],
     ['Terminal spread positive', '=IF(WACC!$B$19>Assumptions!$B$23,"OK","Review")', 'WACC must exceed terminal growth']
   ];
@@ -847,10 +997,13 @@ function buildScenariosActions(inputs = {}) {
   const money = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.currency });
   const amount = amountLabel(inputs);
   const perShareCurrency = perShareLabel(inputs);
+  const valueStyle = inputs.privateOwnershipMode ? money : perShare;
+  const valueLabel = inputs.privateOwnershipMode ? `Equity Value / 100% Ownership (${amount})` : `Implied Share Price (${perShareCurrency})`;
+  const referenceLabel = inputs.privateOwnershipMode ? 'Upside / Downside vs Reference' : 'Upside / Downside';
 
   set(cells, 'A1', cell('Scenario Analysis', STYLE.title));
   set(cells, 'A3', cell('Operating Case Matrix', STYLE.section));
-  ['Scenario', 'Revenue Haircut / Uplift', 'EBITDA Margin Delta', 'WACC', 'Terminal Growth', 'Implied Share Price', 'Upside / Downside'].forEach((label, index) => {
+  ['Scenario', 'Revenue Haircut / Uplift', 'EBITDA Margin Delta', 'WACC', 'Terminal Growth', valueLabel, referenceLabel].forEach((label, index) => {
     set(cells, `${col(index)}4`, cell(label, STYLE.header));
   });
 
@@ -866,8 +1019,8 @@ function buildScenariosActions(inputs = {}) {
     set(cells, `C${row}`, cell(marginAdj, pctInput));
     set(cells, `D${row}`, cell(wacc, pctInput));
     set(cells, `E${row}`, cell(growth, pctInput));
-    set(cells, `F${row}`, formula(`=IFERROR(((SUM(DCF!$C$24:$G$24)*(1+B${row})+DCF!$G$20*(1+C${row})*(1+E${row})/(D${row}-E${row})/(1+D${row})^5)+DCF!$H$31-DCF!$H$32)/DCF!$H$34,0)`, perShare));
-    set(cells, `G${row}`, formula(`=IFERROR(F${row}/DCF!$H$37-1,0)`, pctFormula));
+    set(cells, `F${row}`, formula(`=IFERROR(((SUM(DCF!$C$24:$G$24)*(1+B${row})+DCF!$G$20*(1+C${row})*(1+E${row})/(D${row}-E${row})/(1+D${row})^5)+DCF!$H$31-DCF!$H$32)/DCF!$H$34,0)`, valueStyle));
+    set(cells, `G${row}`, formula(`=IF(DCF!$H$37>0,F${row}/DCF!$H$37-1,"")`, pctFormula));
   });
 
   set(cells, 'A11', cell('Valuation Bridge by Case', STYLE.section));
@@ -877,14 +1030,14 @@ function buildScenariosActions(inputs = {}) {
   const bridgeRows = [
     [`Enterprise Value (${amount})`, '=IFERROR(SUM(DCF!$C$24:$G$24)*(1+B5)+DCF!$G$20*(1+C5)*(1+E5)/(D5-E5)/(1+D5)^5,0)', '=DCF!$H$30', '=IFERROR(SUM(DCF!$C$24:$G$24)*(1+B7)+DCF!$G$20*(1+C7)*(1+E7)/(D7-E7)/(1+D7)^5,0)'],
     [`Equity Value (${amount})`, '=B13+DCF!$H$31-DCF!$H$32', '=DCF!$H$33', '=D13+DCF!$H$31-DCF!$H$32'],
-    [`Implied Share Price (${perShareCurrency})`, '=B14/DCF!$H$34', '=DCF!$H$35', '=D14/DCF!$H$34'],
-    [`Current Share Price (${perShareCurrency})`, '=DCF!$H$37', '=DCF!$H$37', '=DCF!$H$37'],
-    ['Premium / (Discount) (%)', '=IFERROR(B15/B16-1,0)', '=IFERROR(C15/C16-1,0)', '=IFERROR(D15/D16-1,0)']
+    [valueLabel, '=B14/DCF!$H$34', '=DCF!$H$35', '=D14/DCF!$H$34'],
+    [inputs.privateOwnershipMode ? `Reference Share Price (${perShareCurrency})` : `Current Share Price (${perShareCurrency})`, '=DCF!$H$37', '=DCF!$H$37', '=DCF!$H$37'],
+    [inputs.privateOwnershipMode ? 'Premium / (Discount) vs Reference (%)' : 'Premium / (Discount) (%)', '=IF(B16>0,B15/B16-1,"")', '=IF(C16>0,C15/C16-1,"")', '=IF(D16>0,D15/D16-1,"")']
   ];
   bridgeRows.forEach(([label, downside, base, upside], index) => {
     const row = 13 + index;
     set(cells, `A${row}`, cell(label, STYLE.label));
-    const style = row <= 14 ? money : (row <= 16 ? fmt(STYLE.formula, { numberFormat: NUM_FORMATS.perShare }) : pctFormula);
+    const style = row <= 14 ? money : (row === 15 ? valueStyle : (row === 16 ? fmt(STYLE.formula, { numberFormat: NUM_FORMATS.perShare }) : pctFormula));
     set(cells, `B${row}`, formula(downside, style));
     set(cells, `C${row}`, formula(base, style));
     set(cells, `D${row}`, formula(upside, style));
@@ -900,6 +1053,9 @@ function buildSummaryActions(inputs) {
   const perShare = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.perShare });
   const amount = amountLabel(inputs);
   const perShareCurrency = perShareLabel(inputs);
+  const valueStyle = inputs.privateOwnershipMode ? money : perShare;
+  const valueLabel = inputs.privateOwnershipMode ? `Equity Value / 100% Ownership (${amount})` : `Implied Share Price (${perShareCurrency})`;
+  const referenceLabel = inputs.privateOwnershipMode ? `Reference Share Price (${perShareCurrency})` : `Current Share Price (${perShareCurrency})`;
 
   set(cells, 'A1', cell(`${inputs.companyName} (${inputs.ticker}) - Valuation Summary`, STYLE.title));
   set(cells, 'A3', cell('Executive Valuation Output', STYLE.section));
@@ -909,28 +1065,30 @@ function buildSummaryActions(inputs) {
   const outputs = [
     [`Enterprise Value (${amount})`, '=DCF!$H$30', 'DCF!H30', money],
     [`Equity Value (${amount})`, '=DCF!$H$33', 'DCF!H33', money],
-    [`Implied Share Price (${perShareCurrency})`, '=DCF!$H$35', 'DCF!H35', perShare],
-    [`Current Share Price (${perShareCurrency})`, '=DCF!$H$37', 'DCF!H37', perShare],
-    ['Premium / (Discount) (%)', '=DCF!$H$38', 'DCF!H38', pct],
+    [valueLabel, '=DCF!$H$35', 'DCF!H35', valueStyle],
+    [referenceLabel, '=DCF!$H$37', 'DCF!H37', perShare],
+    [inputs.privateOwnershipMode ? 'Premium / (Discount) vs Reference (%)' : 'Premium / (Discount) (%)', '=DCF!$H$38', 'DCF!H38', pct],
     ['WACC (%)', '=WACC!$B$19', 'WACC!B19', pct],
     ['Terminal Growth (%)', '=Assumptions!$B$23', 'Assumptions!B23', pct]
   ];
   outputs.forEach(([label, valueFormula, source, style], index) => {
     const row = 5 + index;
     set(cells, `A${row}`, cell(label, row === 7 ? STYLE.total : STYLE.label));
-    set(cells, `B${row}`, formula(valueFormula, row === 7 ? fmt(STYLE.total, { numberFormat: NUM_FORMATS.perShare }) : style));
+    set(cells, `B${row}`, formula(valueFormula, row === 7
+      ? fmt(STYLE.total, { numberFormat: inputs.privateOwnershipMode ? NUM_FORMATS.currency : NUM_FORMATS.perShare })
+      : style));
     set(cells, `C${row}`, cell(source, STYLE.check));
   });
 
   set(cells, 'A15', cell('Scenario Snapshot', STYLE.section));
-  ['Scenario', 'Implied Share Price', 'Upside / Downside'].forEach((label, index) => {
+  ['Scenario', valueLabel, inputs.privateOwnershipMode ? 'Upside / Downside vs Reference' : 'Upside / Downside'].forEach((label, index) => {
     set(cells, `${col(index)}16`, cell(label, STYLE.header));
   });
   ['Downside', 'Base', 'Upside'].forEach((label, index) => {
     const row = 17 + index;
     const scenarioRow = 5 + index;
     set(cells, `A${row}`, cell(label, STYLE.label));
-    set(cells, `B${row}`, formula(`=Scenarios!$F$${scenarioRow}`, perShare));
+    set(cells, `B${row}`, formula(`=Scenarios!$F$${scenarioRow}`, valueStyle));
     set(cells, `C${row}`, formula(`=Scenarios!$G$${scenarioRow}`, pct));
   });
 
@@ -943,7 +1101,7 @@ function buildSummaryActions(inputs) {
     ['EBITDA Margin (%)', '=Assumptions!$B$11', 'Assumptions!B11', pct],
     ['Tax Rate (%)', '=Assumptions!$B$12', 'Assumptions!B12', pct],
     ['CapEx % Revenue (%)', '=Assumptions!$B$14', 'Assumptions!B14', pct],
-    ['Shares Outstanding (M)', '=Assumptions!$B$35', 'Assumptions!B35', fmt(STYLE.formula, { numberFormat: NUM_FORMATS.shares })]
+    [inputs.privateOwnershipMode ? 'Ownership Units (100%=1.0)' : 'Shares Outstanding (M)', '=Assumptions!$B$35', 'Assumptions!B35', fmt(STYLE.formula, { numberFormat: NUM_FORMATS.shares })]
   ];
   assumptions.forEach(([label, valueFormula, source, style], index) => {
     const row = 25 + index;
@@ -955,7 +1113,7 @@ function buildSummaryActions(inputs) {
   return [makeSetCellRangeAction('Summary', cells)];
 }
 
-function buildAuditActions() {
+function buildAuditActions(inputs = {}) {
   const cells = {};
 
   set(cells, 'A1', cell('Model Audit & QA', STYLE.title));
@@ -964,11 +1122,13 @@ function buildAuditActions() {
   set(cells, 'B4', cell('Result', STYLE.header));
   set(cells, 'C4', cell('Why It Matters', STYLE.header));
   const checks = [
-    ['Assumptions populated', '=IF(COUNTA(Assumptions!$A$1:$B$37)>=45,"OK","Review")', 'DCF needs a complete assumption spine'],
+    ['Assumptions populated', '=IF(COUNTA(Assumptions!$A$1:$D$37)>=85,"OK","Review")', 'DCF needs a complete assumption spine with visible method and source'],
     ['WACC calculated', '=IF(AND(WACC!$B$19>0,WACC!$B$19<0.30),"OK","Review")', 'Valuation cannot discount cash flows without WACC'],
     ['Terminal spread positive', '=IF(WACC!$B$19>Assumptions!$B$23,"OK","Review")', 'Terminal value breaks if WACC is below growth'],
     ['Enterprise value positive', '=IF(DCF!$H$30>0,"OK","Review")', 'DCF output should produce positive enterprise value'],
-    ['Share count positive', '=IF(DCF!$H$34>0,"OK","Review")', 'Per-share value needs diluted shares'],
+    [inputs.privateOwnershipMode ? 'Private ownership basis' : 'Share count positive', inputs.privateOwnershipMode ? '=IF(DCF!$H$34=1,"OK","Review")' : '=IF(DCF!$H$34>0,"OK","Review")', inputs.privateOwnershipMode ? 'Private valuation should show 100% equity basis rather than fake per-share output' : 'Per-share value needs diluted shares'],
+    ['Cash / revenue sanity', '=IF(Assumptions!$B$33/Assumptions!$B$10<2,"OK","Review")', 'Cash bridge must not dwarf operating scale unless explicitly supported'],
+    ['Market input support', '=IF(COUNTIF(Assumptions!$D$26:$D$30,"Review*")=0,"OK","Review")', 'WACC inputs need market/peer support before presentation'],
     ['Bridge check clean', '=IF(ABS(DCF!$H$40)<1,"OK","Review")', 'EV to equity bridge should tie'],
     ['Sensitivity grid populated', '=IF(COUNTA(Sensitivity!$C$5:$G$9)>=25,"OK","Review")', 'Investment committee needs range, not point estimate'],
     ['Scenario cases populated', '=IF(COUNTA(Scenarios!$F$5:$G$7)>=6,"OK","Review")', 'Downside/base/upside cases should be visible']
@@ -982,7 +1142,7 @@ function buildAuditActions() {
 
   set(cells, 'A16', cell('Overall Status', STYLE.section));
   set(cells, 'A17', cell('Model Status', STYLE.total));
-  set(cells, 'B17', formula('=IF(COUNTIF($B$5:$B$12,"Review")=0,"Ready for review","Needs analyst review")', STYLE.total));
+  set(cells, 'B17', formula('=IF(COUNTIF($B$5:$B$14,"Review")=0,"Ready for analyst review","Needs analyst review")', STYLE.total));
   set(cells, 'A19', cell('Recommended Next Analyst Steps', STYLE.section));
   [
     'Validate latest fiscal-year statements against the company filing.',
@@ -999,7 +1159,7 @@ function buildAuditActions() {
   set(cells, 'C27', cell('Analyst Standard', STYLE.header));
   [
     ['Sources', '=IF(COUNTA(Sources!$A$11:$D$50)>=35,"OK","Review")', 'Source register plus analyst workplan must be populated'],
-    ['Assumptions', '=IF(COUNTA(Assumptions!$A$1:$B$37)>=45,"OK","Review")', 'Input spine must cover operating, WACC and equity bridge drivers'],
+    ['Assumptions', '=IF(COUNTA(Assumptions!$A$1:$D$37)>=85,"OK","Review")', 'Input spine must cover operating, WACC and equity bridge drivers with method/source'],
     ['WACC', '=IF(COUNTA(WACC!$A$21:$B$30)>=18,"OK","Review")', 'Discount rate must include beta evidence and cross-checks'],
     ['DCF', '=IF(COUNTA(DCF!$A$5:$H$40)>=120,"OK","Review")', 'Operating forecast, FCF, terminal value and bridge must be explicit'],
     ['Sensitivity / Scenarios', '=IF(AND(COUNTA(Sensitivity!$C$5:$G$18)>=50,COUNTA(Scenarios!$F$5:$G$7)>=6),"OK","Review")', 'Valuation must show range of outcomes']
@@ -1120,8 +1280,16 @@ function buildDcfSection(params = {}, memory = {}) {
         ebitdaMargin: inputs.ebitdaMargin,
         taxRate: inputs.taxRate,
         terminalGrowthRate: inputs.terminalGrowthRate,
-        beta: inputs.beta
-      }
+        beta: inputs.beta,
+        cashMillions: inputs.cashMillions,
+        debtMillions: inputs.debtMillions,
+        privateOwnershipMode: inputs.privateOwnershipMode
+      },
+      qualityFlags: [
+        inputs.cashMillions > inputs.baseRevenueMillions * 2 ? 'cash_exceeds_2x_revenue' : null,
+        inputs.privateOwnershipMode ? 'private_ownership_output' : null,
+        inputs.sourceType === 'workbook' ? 'workbook_first' : null
+      ].filter(Boolean)
     },
     actions
   };

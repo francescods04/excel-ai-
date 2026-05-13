@@ -16,6 +16,8 @@ The model must not only create a DCF layout. Each section must show the reasonin
 - **Summary** — link every committee-facing number back to the model.
 - **Audit** — check source coverage, formula integrity, valuation mechanics, range analysis, and remaining analyst work.
 
+Audit status must be earned, not assumed. The model should flag cash/revenue scale problems, unsupported WACC inputs, missing sources, and private-company outputs that pretend to have a public share price.
+
 ### 1. Assumptions Sheet
 Contains all inputs that drive the model. Organized in sections:
 
@@ -27,6 +29,8 @@ Contains all inputs that drive the model. Organized in sections:
 Every assumption row must have side-by-side explanation columns:
 - **How Derived** — method used, such as workbook mapping, ratio calculation, forecast fade path, market-data pull, or analyst fallback.
 - **Source / Review** — source reference or review flag, such as workbook cell, market-data source, filing support, or "Review" when the value is a fallback.
+
+Workbook-first extraction must prefer complete statement totals over line items. For example, cash should use total cash / liquid assets before petty cash, and private-company models must show equity value on a 100% ownership basis unless a real share count and reference price are available.
 
 **Tax & Capital**
 - Tax Rate (%) — marginal effective tax rate
