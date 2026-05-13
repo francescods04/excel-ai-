@@ -466,6 +466,33 @@ async function main() {
     }
   });
 
+  await test('workbook.understand accepts readWorkbook snapshots that also include selected range data', async () => {
+    const previous = process.env.WORKBOOK_UNDERSTANDING_ENABLED;
+    process.env.WORKBOOK_UNDERSTANDING_ENABLED = 'false';
+    try {
+      const output = await executeTool('workbook.understand', { objective: 'formatta tutto', fromResult: 't1' }, {
+        results: {
+          t1: {
+            data: {
+              activeSheet: 'Sales',
+              workbookSheets: ['Sales', 'Summary'],
+              selectedValues: [['Revenue']],
+              sheets: [
+                { name: 'Sales', usedRange: 'Sales!A1:D4', rowCount: 4, columnCount: 4, preview: genericSalesContext.allSheetsData.Sales.preview },
+                { name: 'Summary', usedRange: 'Summary!A1:B3', rowCount: 3, columnCount: 2, preview: [['Summary'], ['Revenue', '=SUM(Sales!C:C)']], formulas: [[''], ['', '=SUM(Sales!C:C)']] }
+              ]
+            }
+          }
+        }
+      });
+      assert.strictEqual(output.data.builder, 'deterministic-fallback');
+      assert.deepStrictEqual(output.data.sheets.map(sheet => sheet.name), ['Sales', 'Summary']);
+    } finally {
+      if (previous === undefined) delete process.env.WORKBOOK_UNDERSTANDING_ENABLED;
+      else process.env.WORKBOOK_UNDERSTANDING_ENABLED = previous;
+    }
+  });
+
   await test('DCF template prefers local workbook financials over external/default data', () => {
     const inputs = inferDcfInputs({}, {
       context: localItalianContext,
@@ -796,6 +823,68 @@ async function main() {
     assert.ok(!formatTask.params.sheets.includes('Sheet1'));
     assert.strictEqual(formatTask.params.analysisDepth, 'institutional');
     assert.strictEqual(formatTask.params.analystDepth.section, 'format');
+  });
+
+  await test('planner formats the whole existing model when the user asks for all of it, even after a narrow prior turn', async () => {
+    const plan = await planner.plan('formatta tutto il modello con colori da investment banker', {
+      activeSheet: 'Scenarios',
+      workbookSheets: ['Sheet1', 'Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit'],
+      lastModelState: {
+        modelType: 'custom',
+        sheets: ['Scenarios', 'WACC'],
+        turnId: 'turn-narrow-followup'
+      }
+    });
+    const formatTask = plan.tasks.find(task => task.tool === 'llm.planFormat');
+    assert.ok(formatTask);
+    assert.strictEqual(formatTask.params.scope, 'workbook');
+    assert.deepStrictEqual(formatTask.params.sheets, ['Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit']);
+    assert.strictEqual(formatTask.params.sheet, 'Scenarios');
+    assert.ok(!formatTask.params.sheets.includes('Sheet1'));
+  });
+
+  await test('formatter applies semantic colors for inputs, formulas and workbook links', () => {
+    const memory = {
+      results: {
+        t1: {
+          data: {
+            activeSheet: 'Assumptions',
+            sheets: [
+              {
+                name: 'Assumptions',
+                usedRange: 'Assumptions!A1:C5',
+                rowCount: 5,
+                columnCount: 3,
+                preview: [
+                  ['Assumptions'],
+                  ['Metric', 'Value', 'Source'],
+                  ['Revenue Growth', 0.08, 'Analyst input'],
+                  ['Revenue', 100, 'Workbook'],
+                  ['Linked Revenue', 100, 'Sheet1']
+                ],
+                formulas: [
+                  ['', '', ''],
+                  ['', '', ''],
+                  ['', '', ''],
+                  ['', '=B3*1.1', ''],
+                  ['', '=Sheet1!B2', '']
+                ]
+              }
+            ]
+          }
+        }
+      }
+    };
+    const plan = buildProfessionalFormatPlan({
+      sheet: 'Assumptions',
+      objective: 'formatta input formule e link',
+      scope: 'sheet',
+      usesResults: ['t1']
+    }, memory);
+
+    assert.ok(plan.actions.some(action => action.sheet === 'Assumptions' && action.target === 'B3:C3' && action.options.fontColor));
+    assert.ok(plan.actions.some(action => action.sheet === 'Assumptions' && action.target === 'B4' && action.options.fontColor === '#000000'));
+    assert.ok(plan.actions.some(action => action.sheet === 'Assumptions' && action.target === 'B5' && action.options.fontColor === '#008000'));
   });
 
   await test('formatter targets explicit model sheets without blanket-formatting source data', () => {

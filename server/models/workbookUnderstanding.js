@@ -99,7 +99,7 @@ function parseA1(ref, defaultSheet = null) {
 
 function resultDataAsWorkbookContext(data) {
   if (!data || typeof data !== 'object') return null;
-  if (data.allSheetsData || data.usedRangeData || data.selectedValues) return data;
+  if (data.allSheetsData || data.usedRangeData) return data;
   if (data.sheet && Array.isArray(data.values)) {
     return {
       activeSheet: data.sheet,
@@ -116,22 +116,26 @@ function resultDataAsWorkbookContext(data) {
       }
     };
   }
-  if (!Array.isArray(data.sheets)) return null;
-  const allSheetsData = {};
-  for (const sheet of data.sheets) {
-    if (!sheet?.name || !Array.isArray(sheet.preview)) continue;
-    allSheetsData[sheet.name] = {
-      isActive: sheet.name === data.activeSheet,
-      usedRange: sheet.usedRange || null,
-      rowCount: sheet.rowCount,
-      columnCount: sheet.columnCount,
-      preview: sheet.preview,
-      formulas: sheet.formulas
-    };
+  if (Array.isArray(data.sheets)) {
+    const allSheetsData = {};
+    for (const sheet of data.sheets) {
+      if (!sheet?.name || !Array.isArray(sheet.preview)) continue;
+      allSheetsData[sheet.name] = {
+        isActive: sheet.name === data.activeSheet,
+        usedRange: sheet.usedRange || null,
+        rowCount: sheet.rowCount,
+        columnCount: sheet.columnCount,
+        preview: sheet.preview,
+        formulas: sheet.formulas,
+        numberFormat: sheet.numberFormat
+      };
+    }
+    return Object.keys(allSheetsData).length > 0
+      ? { activeSheet: data.activeSheet, workbookSheets: data.workbookSheets, allSheetsData }
+      : null;
   }
-  return Object.keys(allSheetsData).length > 0
-    ? { activeSheet: data.activeSheet, workbookSheets: data.workbookSheets, allSheetsData }
-    : null;
+  if (data.selectedValues) return data;
+  return null;
 }
 
 function resolveWorkbookInput(params = {}, memory = {}) {

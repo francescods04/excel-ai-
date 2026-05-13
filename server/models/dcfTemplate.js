@@ -169,7 +169,7 @@ function walkText(value, out = [], depth = 0, seen = new Set()) {
 
 function resultDataAsWorkbookContext(data) {
   if (!data || typeof data !== 'object') return null;
-  if (data.allSheetsData || data.usedRangeData || data.selectedValues) return data;
+  if (data.allSheetsData || data.usedRangeData) return data;
   if (!Array.isArray(data.sheets)) return null;
   const allSheetsData = {};
   for (const sheet of data.sheets) {
@@ -177,12 +177,16 @@ function resultDataAsWorkbookContext(data) {
     allSheetsData[sheet.name] = {
       isActive: sheet.name === data.activeSheet,
       usedRange: sheet.usedRange || null,
-      preview: sheet.preview
+      rowCount: sheet.rowCount,
+      columnCount: sheet.columnCount,
+      preview: sheet.preview,
+      formulas: sheet.formulas,
+      numberFormat: sheet.numberFormat
     };
   }
   return Object.keys(allSheetsData).length > 0
     ? { activeSheet: data.activeSheet, workbookSheets: data.workbookSheets, allSheetsData }
-    : null;
+    : (data.selectedValues ? data : null);
 }
 
 function collectWorkbookAnalyses(memory = {}) {

@@ -270,9 +270,12 @@ function collectWorkbookSheets(params = {}, memory = {}) {
   const resultFilter = Array.isArray(params.usesResults) && params.usesResults.length > 0
     ? new Set(params.usesResults)
     : null;
-  const explicitSheets = Array.isArray(params.sheets)
-    ? params.sheets.filter(Boolean).map(String)
-    : [];
+  const requestedSheets = Array.isArray(params.sheets)
+    ? params.sheets
+    : (Array.isArray(params.targetSheets) ? params.targetSheets : []);
+  const explicitSheets = requestedSheets
+    .filter(Boolean)
+    .map(String);
   const seedSheets = [
     ...explicitSheets,
     ...(params.sheet ? [String(params.sheet)] : [])
@@ -285,10 +288,13 @@ function collectWorkbookSheets(params = {}, memory = {}) {
     const existing = byName.get(name) || {};
     byName.set(name, {
       name,
+      role: sheet.role || existing.role || null,
       usedRange: sheet.usedRange || existing.usedRange || null,
       rowCount: Number(sheet.rowCount) || existing.rowCount || 0,
       columnCount: Number(sheet.columnCount) || existing.columnCount || 0,
-      preview: Array.isArray(sheet.preview) ? sheet.preview : (existing.preview || [])
+      preview: Array.isArray(sheet.preview) ? sheet.preview : (Array.isArray(sheet.values) ? sheet.values : (existing.preview || [])),
+      formulas: Array.isArray(sheet.formulas) ? sheet.formulas : (existing.formulas || []),
+      numberFormat: Array.isArray(sheet.numberFormat) ? sheet.numberFormat : (existing.numberFormat || [])
     });
   }
 
@@ -375,6 +381,91 @@ function applyDetectedRows(actions, sheet, info, range, palette) {
   }
 }
 
+function isFormula(value) {
+  return typeof value === 'string' && value.trim().startsWith('=');
+}
+
+function isNonEmpty(value) {
+  return value !== '' && value !== null && value !== undefined;
+}
+
+function isSourceLikeSheet(info = {}) {
+  const key = normalizeText(`${info.name || ''} ${info.role || ''}`);
+  return /(source|sources|raw|data|sheet1|input data|source_data)/.test(key) &&
+    !/(assumption|scenario|sensitivity|wacc|dcf|summary|audit)/.test(key);
+}
+
+function isAssumptionLikeCell(info = {}, row = [], colIndex = 0, value = null) {
+  if (colIndex === 0 || !isNonEmpty(value) || isSourceLikeSheet(info)) return false;
+  const sheetText = normalizeText(info.name || '');
+  const rowText = normalizeText(row.join(' '));
+  if (/(assumption|input|scenario|sensitivity|wacc)/.test(sheetText)) return true;
+  return /(assumption|input|driver|growth|margin|tax|rate|wacc|beta|capex|debt|cash|terminal|scenario|haircut|uplift)/.test(rowText);
+}
+
+function semanticKind(info, row, colIndex, formula, value) {
+  if (isFormula(formula)) {
+    if (/\[[^\]]+\]/.test(formula)) return 'external_link';
+    if (/!/.test(formula)) return 'internal_link';
+    return 'formula';
+  }
+  if (isAssumptionLikeCell(info, row, colIndex, value)) return 'input';
+  return null;
+}
+
+function semanticOptions(kind, palette) {
+  switch (kind) {
+    case 'input':
+      return { backgroundColor: palette.inputFill, fontColor: palette.inputFont || '#0000FF' };
+    case 'internal_link':
+      return { backgroundColor: palette.white, fontColor: '#008000' };
+    case 'external_link':
+      return { backgroundColor: palette.white, fontColor: '#FF0000' };
+    case 'formula':
+      return { backgroundColor: palette.white, fontColor: '#000000' };
+    default:
+      return null;
+  }
+}
+
+function addSemanticCellFormatting(actions, sheet, info, range, palette) {
+  const preview = Array.isArray(info.preview) ? info.preview : [];
+  const formulas = Array.isArray(info.formulas) ? info.formulas : [];
+  const maxRows = Math.min(Math.max(preview.length, formulas.length), 80);
+  const maxCols = Math.min(range.endCol - range.startCol + 1, 40);
+
+  for (let rowIdx = 0; rowIdx < maxRows; rowIdx++) {
+    const row = Array.isArray(preview[rowIdx]) ? preview[rowIdx] : [];
+    const formulaRow = Array.isArray(formulas[rowIdx]) ? formulas[rowIdx] : [];
+    let currentKind = null;
+    let runStart = null;
+
+    function flushRun(endColOffset) {
+      if (!currentKind || runStart === null) return;
+      const options = semanticOptions(currentKind, palette);
+      if (options) {
+        actions.push(fmt(
+          sheet,
+          a1(range.startCol + runStart, range.startRow + rowIdx, range.startCol + endColOffset, range.startRow + rowIdx),
+          options
+        ));
+      }
+      currentKind = null;
+      runStart = null;
+    }
+
+    for (let colIdx = 0; colIdx < maxCols; colIdx++) {
+      const kind = semanticKind(info, row, colIdx, formulaRow[colIdx], row[colIdx]);
+      if (kind !== currentKind) {
+        flushRun(colIdx - 1);
+        currentKind = kind;
+        runStart = kind ? colIdx : null;
+      }
+    }
+    flushRun(maxCols - 1);
+  }
+}
+
 function addBaseSheetFormatting(actions, sheet, info, palette, intent = {}) {
   const range = parseRange(info.usedRange, info.rowCount || 40, info.columnCount || 8);
   if (range.endRow < range.startRow) range.endRow = range.startRow + Math.max(1, info.rowCount || 1) - 1;
@@ -399,6 +490,7 @@ function addBaseSheetFormatting(actions, sheet, info, palette, intent = {}) {
   }
 
   applyDetectedRows(actions, sheet, info, range, palette);
+  addSemanticCellFormatting(actions, sheet, info, range, palette);
   return range;
 }
 

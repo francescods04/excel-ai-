@@ -477,10 +477,18 @@ function pickExistingModelSheets(context = {}) {
   return modelSheets.length >= 2 ? modelSheets : [];
 }
 
-function getContinuityTargetSheets(context = {}, fallbackSheet = null) {
+function hasWholeWorkbookIntent(objective = '') {
+  const text = String(objective || '').toLowerCase();
+  return /\b(all|every|entire|whole|workbook|model)\b/.test(text) ||
+    /(tutto|tutta|tutti|tutte|intero|intera|modello|cartella|workbook)/.test(text);
+}
+
+function getContinuityTargetSheets(context = {}, fallbackSheet = null, options = {}) {
+  const existingModelSheets = pickExistingModelSheets(context);
+  if (options.preferExistingModel && existingModelSheets.length > 0) return existingModelSheets;
+
   const lastSheets = normalizeSheetSet(context.lastModelState?.sheets || []);
   if (lastSheets.length > 0) return lastSheets;
-  const existingModelSheets = pickExistingModelSheets(context);
   if (existingModelSheets.length > 0) return existingModelSheets;
   const recentSheets = normalizeSheetSet(context.recentSheets || []);
   if (recentSheets.length > 0) return recentSheets;
@@ -958,12 +966,14 @@ function buildFinanceFallbackPlan(objective, context) {
   }
 
   if (isFormat) {
-    const targetSheets = getContinuityTargetSheets(context, activeSheet);
+    const targetSheets = getContinuityTargetSheets(context, activeSheet, {
+      preferExistingModel: hasWholeWorkbookIntent(objective)
+    });
     const targetSheet = targetSheets.includes(activeSheet) ? activeSheet : (targetSheets[0] || activeSheet);
     return {
       objective,
       tasks: [
-        { id: 't1', agent: 'data', tool: 'workbook.readWorkbook', description: 'Leggi struttura, formule e used range del workbook corrente', params: { maxRows: 120, maxCols: 40, includeFormulas: true }, deps: [], requiresApproval: false },
+        { id: 't1', agent: 'data', tool: 'workbook.readWorkbook', description: 'Leggi struttura, formule e used range del workbook corrente', params: { maxRows: 120, maxCols: 40, includeFormulas: true, includeNumberFormats: true }, deps: [], requiresApproval: false },
         { id: 't2', agent: 'data', tool: 'workbook.buildGraph', description: 'Mappa fogli, tabelle e aree da formattare con WorkbookGraph', params: { fromResult: 't1', source: 'planner.format' }, deps: ['t1'], requiresApproval: false },
         {
           id: 't3',

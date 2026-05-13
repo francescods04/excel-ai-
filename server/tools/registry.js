@@ -374,6 +374,8 @@ registerTool('llm.planFormat', async (params, memory) => {
     required: ['sheet'],
     properties: {
       sheet: SCHEMA_SHEET_NAME,
+      sheets: { type: 'array', items: SCHEMA_SHEET_NAME },
+      targetSheets: { type: 'array', items: SCHEMA_SHEET_NAME },
       formatType: { type: 'string', 'enum': ['headers', 'conditional', 'full', 'numbers', 'percents', 'currency'] },
       section: { type: 'string' },
       model: { type: 'string', 'enum': ['dcf', 'lbo', 'comps', 'ddm', 'wacc', 'three_statement', 'custom'] },
@@ -381,7 +383,11 @@ registerTool('llm.planFormat', async (params, memory) => {
       mode: { type: 'string' },
       scope: { type: 'string', enum: ['sheet', 'workbook'] },
       theme: { type: 'string' },
-      usesResults: { type: 'array', items: { type: 'string' } }
+      usesResults: { type: 'array', items: { type: 'string' } },
+      workbookUnderstanding: { type: 'string' },
+      analysisDepth: { type: 'string' },
+      analystDepth: { type: 'object' },
+      sourcePriority: { type: 'string' }
     }
   },
   category: 'analysis',
@@ -496,11 +502,11 @@ registerTool('excel.applyFormat', async (params, memory) => {
   inputs: ['sheet', 'fromResult'],
   schema: {
     type: 'object',
-    required: ['sheet'],
     properties: {
       sheet: SCHEMA_SHEET_NAME,
       fromResult: { type: 'string', description: 'ID del task planFormat precedente' },
-      planRef: { type: 'string', description: 'Riferimento alternativo al piano' }
+      planRef: { type: 'string', description: 'Riferimento alternativo al piano' },
+      actions: { type: 'array', items: { type: 'object' } }
     }
   },
   category: 'mutation',
