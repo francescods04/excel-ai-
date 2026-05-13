@@ -1,4 +1,5 @@
 const { analyzeWorkbookContext } = require('../utils/sheetParser');
+const { getAnalystDepth, getDcfModelAnalystWorkplan } = require('./analystDepth');
 
 const DEFAULTS = {
   projectionYears: 5,
@@ -776,6 +777,19 @@ function buildSourcesActions(inputs) {
     set(cells, `C${row}`, cell(action, STYLE.label));
   });
 
+  set(cells, 'A43', cell('Analyst Depth Workplan', STYLE.section));
+  set(cells, 'A44', cell('Area', STYLE.header));
+  set(cells, 'B44', cell('Method', STYLE.header));
+  set(cells, 'C44', cell('Required Analysis', STYLE.header));
+  set(cells, 'D44', cell('Visible Output', STYLE.header));
+  getDcfModelAnalystWorkplan().slice(1, 7).forEach((depth, index) => {
+    const row = 45 + index;
+    set(cells, `A${row}`, cell(depth.section, STYLE.label));
+    set(cells, `B${row}`, cell(depth.method, STYLE.label));
+    set(cells, `C${row}`, cell(depth.requiredAnalyses.slice(0, 2).join(' | '), STYLE.label));
+    set(cells, `D${row}`, cell(depth.visibleOutputs.join(' | '), STYLE.check));
+  });
+
   return [makeSetCellRangeAction('Sources', cells)];
 }
 
@@ -933,27 +947,44 @@ function buildAuditActions() {
     set(cells, `A${20 + index}`, cell(`${index + 1}. ${text}`, STYLE.label));
   });
 
+  set(cells, 'A26', cell('Depth Coverage Checks', STYLE.section));
+  set(cells, 'A27', cell('Area', STYLE.header));
+  set(cells, 'B27', cell('Result', STYLE.header));
+  set(cells, 'C27', cell('Analyst Standard', STYLE.header));
+  [
+    ['Sources', '=IF(COUNTA(Sources!$A$11:$D$50)>=35,"OK","Review")', 'Source register plus analyst workplan must be populated'],
+    ['Assumptions', '=IF(COUNTA(Assumptions!$A$1:$B$37)>=45,"OK","Review")', 'Input spine must cover operating, WACC and equity bridge drivers'],
+    ['WACC', '=IF(COUNTA(WACC!$A$21:$B$30)>=18,"OK","Review")', 'Discount rate must include beta evidence and cross-checks'],
+    ['DCF', '=IF(COUNTA(DCF!$A$5:$H$40)>=120,"OK","Review")', 'Operating forecast, FCF, terminal value and bridge must be explicit'],
+    ['Sensitivity / Scenarios', '=IF(AND(COUNTA(Sensitivity!$C$5:$G$18)>=50,COUNTA(Scenarios!$F$5:$G$7)>=6),"OK","Review")', 'Valuation must show range of outcomes']
+  ].forEach(([area, resultFormula, standard], index) => {
+    const row = 28 + index;
+    set(cells, `A${row}`, cell(area, STYLE.label));
+    set(cells, `B${row}`, formula(resultFormula, STYLE.check));
+    set(cells, `C${row}`, cell(standard, STYLE.label));
+  });
+
   return [makeSetCellRangeAction('Audit', cells)];
 }
 
 function buildFormatActions() {
   const ranges = [
     ['Summary', 'A1:C32', { horizontalAlignment: 'Left' }],
-    ['Sources', 'A1:D42', { horizontalAlignment: 'Left' }],
+    ['Sources', 'A1:D50', { horizontalAlignment: 'Left' }],
     ['Assumptions', 'A1:A40', { horizontalAlignment: 'Left' }],
     ['WACC', 'A1:A30', { horizontalAlignment: 'Left' }],
     ['DCF', 'A1:A40', { horizontalAlignment: 'Left' }],
     ['Sensitivity', 'A1:A18', { horizontalAlignment: 'Left' }],
     ['Scenarios', 'A1:G18', { horizontalAlignment: 'Left' }],
-    ['Audit', 'A1:C24', { horizontalAlignment: 'Left' }],
+    ['Audit', 'A1:C32', { horizontalAlignment: 'Left' }],
     ['Summary', 'B1:C32', { horizontalAlignment: 'Right' }],
-    ['Sources', 'B1:D42', { horizontalAlignment: 'Right' }],
+    ['Sources', 'B1:D50', { horizontalAlignment: 'Right' }],
     ['Assumptions', 'B1:B40', { horizontalAlignment: 'Right' }],
     ['WACC', 'B1:B30', { horizontalAlignment: 'Right' }],
     ['DCF', 'B1:H40', { horizontalAlignment: 'Right' }],
     ['Sensitivity', 'B1:G18', { horizontalAlignment: 'Right' }],
     ['Scenarios', 'B1:G18', { horizontalAlignment: 'Right' }],
-    ['Audit', 'B1:C24', { horizontalAlignment: 'Right' }],
+    ['Audit', 'B1:C32', { horizontalAlignment: 'Right' }],
     ['Summary', 'A1:C1', STYLE.title],
     ['Sources', 'A1:D1', STYLE.title],
     ['Assumptions', 'A1:B1', STYLE.title],
@@ -1036,6 +1067,7 @@ function buildDcfSection(params = {}, memory = {}) {
       companyName: inputs.companyName,
       projectionYears: inputs.projectionYears,
       actionCount: actions.length,
+      analystDepth: getAnalystDepth(section === 'all' ? 'audit' : section),
       assumptions: {
         baseRevenueMillions: inputs.baseRevenueMillions,
         ebitdaMargin: inputs.ebitdaMargin,

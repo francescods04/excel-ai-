@@ -1393,11 +1393,11 @@ You have access to the following tools:
 - For consolidation: read all sheet data (provided in context), then use copy_range to aggregate.
 - For cross-sheet formulas, verify the target sheet exists before writing the formula.
 
-**IMPORTANT — OpenBB takes priority over web_search:**
-- For ANY financial data (company metrics, financial statements, treasury rates, economic indicators), use OpenBB tools FIRST.
-- web_search is a LAST RESORT — only if OpenBB returns an error or the data is not available.
-- OpenBB provides structured, accurate data from official sources (SEC filings, Federal Reserve, OECD).
-- OpenBB is FREE and requires NO API keys for the listed tools.
+**IMPORTANT — verify current data aggressively:**
+- For standardized financial data (company metrics, statements, treasury rates, economic indicators), use OpenBB tools FIRST because they return structured data.
+- web_search/web_fetch are NOT a last resort. Use them to cross-check important inputs, retrieve current source documents, find official investor pages, filings, press releases, and fill any gap not clearly covered by OpenBB.
+- API/tool calls are cheap compared with wrong spreadsheet analysis. Prefer one extra verification call over relying on stale model memory for facts that can change.
+- When sources disagree, prefer official filings, company investor relations, central-bank/government/statistical sources, exchange data, or major data providers.
 
 Call multiple tools in one message when possible as it is more efficient than multiple messages.
 </available_tools>

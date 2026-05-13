@@ -5,6 +5,17 @@ The Discounted Cash Flow (DCF) model values a company by projecting its future c
 
 ## Structure
 
+## Analyst Depth Standard
+
+The model must not only create a DCF layout. Each section must show the reasoning path an analyst would use:
+- **Sources** — map every major input to workbook data, filings, market data, or an explicit analyst fallback.
+- **Assumptions** — derive operating drivers from local evidence when possible and expose fallback assumptions for review.
+- **WACC** — triangulate discount rate from risk-free rate, ERP, cost of debt, capital structure, and beta evidence.
+- **DCF** — build operating forecasts step-by-step before terminal value and equity bridge.
+- **Sensitivity / Scenarios** — show range of outcomes and driver interaction, not just a single implied price.
+- **Summary** — link every committee-facing number back to the model.
+- **Audit** — check source coverage, formula integrity, valuation mechanics, range analysis, and remaining analyst work.
+
 ### 1. Assumptions Sheet
 Contains all inputs that drive the model. Organized in sections:
 

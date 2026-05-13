@@ -4,6 +4,7 @@ const logger = require('../utils/logger');
 const streaming = require('./streaming');
 const { analyzeWorkbookContext } = require('../utils/sheetParser');
 const { inferEquityIntent } = require('../utils/equityIntent');
+const { getAnalystDepth } = require('../models/analystDepth');
 
 const PLANNER_TIMEOUT_MS = Number(process.env.PLANNER_TIMEOUT_MS) || 150000;
 const PLANNER_FALLBACK_TIMEOUT_MS = Number(process.env.PLANNER_FALLBACK_TIMEOUT_MS) || 60000;
@@ -123,6 +124,7 @@ For multi-sheet analysis, audits, repair, formatting or model completion, build 
 CRITICAL RULES:
 - EVERY data row MUST have a descriptive label in Column A. Never output naked numbers.
 - Formulas must reference other sheets (e.g., =Assumptions!B3) — never hardcode constants.
+- DEPTH POLICY: beta is only one example. Every finance section must include the underlying analyst method, required evidence, visible assumptions, sanity checks and review flags. Revenue, margins, taxes, CapEx, NWC, WACC, terminal value, sensitivity, scenarios, summary and audit all need the same level of professional reasoning.
 - If the user already has financial data in the active sheet (EBITDA, Revenue, etc.), USE IT. Do NOT ask for input. The system automatically extracts known financial labels and values from the workbook.
 - WORKBOOK-FIRST DATA POLICY: if inferredData.highConfidenceInputs contains Revenue plus EBITDA/EBITDA Margin/Net Income, treat workbook data as the primary source. Do not invent a ticker, Yahoo task, or OpenBB equity task for that company unless the user explicitly named a public ticker/company. External data is only supplemental for missing macro/market assumptions.
 - For private/unlisted/local-company contexts, build the model from workbook.scanDeep/workbook.buildGraph + finance.dcf.buildSection with sourcePriority:"workbook_first"; mark missing market assumptions as analyst-review items instead of forcing external data.
@@ -577,6 +579,7 @@ function buildAgenticDcfPlan(objective, context, equityIntent = {}) {
     objective,
     projectionYears: 5,
     mode: 'ai_assisted',
+    analysisDepth: 'institutional',
     usesResults: dataDeps
   };
   if (companyName) baseParams.companyName = companyName;
@@ -653,7 +656,7 @@ function buildAgenticDcfPlan(objective, context, equityIntent = {}) {
       agent: entry.agent,
       tool: 'finance.dcf.buildSection',
       description: entry.description,
-      params: { ...baseParams, section: entry.section },
+      params: { ...baseParams, section: entry.section, analystDepth: getAnalystDepth(entry.section) },
       deps: entry.deps,
       requiresApproval: false
     });
@@ -728,6 +731,7 @@ function buildDcfCompletionPlan(objective, context, equityIntent = {}) {
     objective,
     projectionYears: 5,
     mode: 'template',
+    analysisDepth: 'institutional',
     usesResults: dataDeps
   };
   if (companyName) baseParams.companyName = companyName;
@@ -742,7 +746,7 @@ function buildDcfCompletionPlan(objective, context, equityIntent = {}) {
       agent: 'layout',
       tool: 'finance.dcf.buildSection',
       description: 'Ensure DCF workbook shell exists',
-      params: { ...baseParams, section: 'shell' },
+      params: { ...baseParams, section: 'shell', analystDepth: getAnalystDepth('sources') },
       deps: dataDeps,
       requiresApproval: false
     });
@@ -768,7 +772,7 @@ function buildDcfCompletionPlan(objective, context, equityIntent = {}) {
       agent: entry.agent,
       tool: 'finance.dcf.buildSection',
       description: entry.description,
-      params: { ...baseParams, section: entry.section },
+      params: { ...baseParams, section: entry.section, analystDepth: getAnalystDepth(entry.section) },
       deps: previousDeps,
       requiresApproval: false
     });
@@ -1289,6 +1293,27 @@ function normalizeToolName(toolName) {
   return fuzzyMap[key] || toolName;
 }
 
+function taskAnalystDepthSection(task, planObjective = '') {
+  const params = task.params || {};
+  const haystack = `${planObjective} ${task.description || ''} ${params.objective || ''} ${params.model || ''} ${params.mode || ''} ${params.section || ''}`.toLowerCase();
+  if (task.tool === 'finance.dcf.buildSection') return params.section || 'dcf';
+  if (task.tool === 'llm.planFormat') return 'format';
+  if (task.tool === 'llm.planLayout' && /(dcf|valuation|valutazione|finance|financial|wacc|modello)/.test(haystack)) return 'shell';
+  if (task.tool === 'llm.writeFormulas' && /(dcf|valuation|valutazione|finance|financial|wacc|sensitivity|scenario|modello|model|repair|audit|review|formula)/.test(haystack)) {
+    return params.section || params.mode || 'audit';
+  }
+  return null;
+}
+
+function applyAnalystDepthDefaults(task, planObjective = '') {
+  const section = taskAnalystDepthSection(task, planObjective);
+  if (!section) return task;
+  const params = task.params && typeof task.params === 'object' ? { ...task.params } : {};
+  if (!params.analysisDepth) params.analysisDepth = 'institutional';
+  if (!params.analystDepth) params.analystDepth = getAnalystDepth(section);
+  return { ...task, params };
+}
+
 function normalizeAndValidatePlan(result) {
   if (!result || !Array.isArray(result.tasks) || result.tasks.length === 0) {
     throw new Error('Planner non ha restituito un task graph valido');
@@ -1307,16 +1332,17 @@ function normalizeAndValidatePlan(result) {
       requiresApproval: !!task.requiresApproval,
       status: 'pending'
     };
+    const withDepth = applyAnalystDepthDefaults(normalized, result.objective || '');
 
-    if (taskMap.has(normalized.id)) {
-      throw new Error(`Planner ha restituito task duplicato: ${normalized.id}`);
+    if (taskMap.has(withDepth.id)) {
+      throw new Error(`Planner ha restituito task duplicato: ${withDepth.id}`);
     }
-    if (!normalized.tool || !KNOWN_TOOLS.has(normalized.tool)) {
-      throw new Error(`Tool non valido nel piano: ${normalized.tool || '(mancante)'}`);
+    if (!withDepth.tool || !KNOWN_TOOLS.has(withDepth.tool)) {
+      throw new Error(`Tool non valido nel piano: ${withDepth.tool || '(mancante)'}`);
     }
 
-    taskMap.set(normalized.id, normalized);
-    return normalized;
+    taskMap.set(withDepth.id, withDepth);
+    return withDepth;
   });
 
   for (const task of normalizedTasks) {

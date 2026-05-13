@@ -408,13 +408,13 @@ function addDcfSheetFormatting(actions, sheet, palette) {
   const key = sheet.toLowerCase();
   const geometry = {
     summary: { used: 'A1:C32', label: 'A1:A32', values: 'B1:C32', labelWidth: 220, valueWidth: 118 },
-    sources: { used: 'A1:D42', label: 'A1:A42', values: 'B1:D42', labelWidth: 190, valueWidth: 150 },
+    sources: { used: 'A1:D50', label: 'A1:A50', values: 'B1:D50', labelWidth: 190, valueWidth: 150 },
     assumptions: { used: 'A1:B40', label: 'A1:A40', values: 'B1:B40', labelWidth: 245, valueWidth: 125 },
     wacc: { used: 'A1:B30', label: 'A1:A30', values: 'B1:B30', labelWidth: 255, valueWidth: 125 },
     dcf: { used: 'A1:H40', label: 'A1:A40', values: 'B1:H40', labelWidth: 230, valueWidth: 92 },
     sensitivity: { used: 'A1:G18', label: 'A1:A18', values: 'B1:G18', labelWidth: 155, valueWidth: 94 },
     scenarios: { used: 'A1:G18', label: 'A1:A18', values: 'B1:G18', labelWidth: 170, valueWidth: 94 },
-    audit: { used: 'A1:C24', label: 'A1:A24', values: 'B1:C24', labelWidth: 230, valueWidth: 140 }
+    audit: { used: 'A1:C32', label: 'A1:A32', values: 'B1:C32', labelWidth: 230, valueWidth: 140 }
   }[key];
   if (geometry) {
     actions.push(fmt(sheet, geometry.used, baseFontOptions({
@@ -440,9 +440,10 @@ function addDcfSheetFormatting(actions, sheet, palette) {
       break;
     case 'sources':
       actions.push(fmt(sheet, 'A1:D1', { backgroundColor: p.titleFill, fontColor: p.white, bold: true }));
-      ['A3:D3', 'A10:D10', 'A22:C22', 'A35:C35'].forEach(target => actions.push(fmt(sheet, target, { backgroundColor: p.sectionFill, fontColor: p.sectionFont, bold: true })));
-      ['A11:D11', 'A23:C23', 'A36:C36'].forEach(target => actions.push(fmt(sheet, target, { backgroundColor: p.headerFill, fontColor: p.white, bold: true, horizontalAlignment: 'Center' })));
+      ['A3:D3', 'A10:D10', 'A22:C22', 'A35:C35', 'A43:D43'].forEach(target => actions.push(fmt(sheet, target, { backgroundColor: p.sectionFill, fontColor: p.sectionFont, bold: true })));
+      ['A11:D11', 'A23:C23', 'A36:C36', 'A44:D44'].forEach(target => actions.push(fmt(sheet, target, { backgroundColor: p.headerFill, fontColor: p.white, bold: true, horizontalAlignment: 'Center' })));
       actions.push(fmt(sheet, 'D12:D18', { backgroundColor: p.checkFill, fontColor: p.bodyFont, italic: true }));
+      actions.push(fmt(sheet, 'D45:D50', { backgroundColor: p.checkFill, fontColor: p.bodyFont, italic: true }));
       break;
     case 'assumptions':
       actions.push(fmt(sheet, 'A1:B1', { backgroundColor: p.titleFill, fontColor: p.white, bold: true }));
@@ -497,9 +498,10 @@ function addDcfSheetFormatting(actions, sheet, palette) {
       break;
     case 'audit':
       actions.push(fmt(sheet, 'A1:C1', { backgroundColor: p.titleFill, fontColor: p.white, bold: true }));
-      ['A3:C3', 'A16:B16', 'A19:A19'].forEach(target => actions.push(fmt(sheet, target, { backgroundColor: p.sectionFill, fontColor: p.sectionFont, bold: true })));
-      actions.push(fmt(sheet, 'A4:C4', { backgroundColor: p.headerFill, fontColor: p.white, bold: true, horizontalAlignment: 'Center' }));
+      ['A3:C3', 'A16:B16', 'A19:A19', 'A26:C26'].forEach(target => actions.push(fmt(sheet, target, { backgroundColor: p.sectionFill, fontColor: p.sectionFont, bold: true })));
+      ['A4:C4', 'A27:C27'].forEach(target => actions.push(fmt(sheet, target, { backgroundColor: p.headerFill, fontColor: p.white, bold: true, horizontalAlignment: 'Center' })));
       actions.push(fmt(sheet, 'B5:B12', { backgroundColor: p.checkFill, fontColor: p.bodyFont, italic: true }));
+      actions.push(fmt(sheet, 'B28:B32', { backgroundColor: p.checkFill, fontColor: p.bodyFont, italic: true }));
       actions.push(fmt(sheet, 'A17:B17', { backgroundColor: p.totalFill, fontColor: p.bodyFont, bold: true }));
       break;
     default:

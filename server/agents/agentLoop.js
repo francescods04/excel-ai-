@@ -134,6 +134,12 @@ INDUSTRY ADD-IN FORMULAS (use when user mentions Bloomberg, CapIQ, Refinitiv):
 - CapIQ CIQ: =CIQ("AAPL","IQ_TOTAL_REV")
 - Refinitiv TR: =TR("AAPL.O","TR.Revenue")
 
+LIVE DATA POLICY:
+- API/tool calls are cheap compared with wrong spreadsheet analysis. When a requested fact, market input, company figure, regulation, management detail, pricing, filing, rate, benchmark, or news item could have changed, verify it with external tools before writing assumptions or formulas.
+- Prefer structured finance tools for standardized market and statement data, and use web_search/web_fetch to cross-check, find source documents, current news, investor pages, filings, and any data point the finance tools do not clearly cover.
+- Use training memory only for stable concepts, formulas, and modeling methodology. Do not use it as the source for current facts.
+- If sources disagree, prefer official filings, company investor relations, central-bank/government/statistical sources, exchange data, or major data providers, and note the chosen source in the workbook when possible.
+
 SKILLS RULES:
 - <available_skills> are listed at the top of this prompt.
 - BEFORE starting a complex task (DCF, LBO, comps, 3-statement, audit), call read_skill to load the relevant skill instructions.
@@ -1046,7 +1052,7 @@ async function runAgentLoop(objective, context, options = {}) {
   onEvent('agentStarted', { objective, iteration });
 
   let webSearchCount = 0;
-  const MAX_WEB_SEARCH = 2;
+  const MAX_WEB_SEARCH = Number(process.env.AGENT_MAX_WEB_SEARCH) || 8;
   let consecutiveErrors = 0;
   let lastErrorMessage = '';
   let aborted = false;
@@ -1131,7 +1137,7 @@ async function runAgentLoop(objective, context, options = {}) {
       if (toolName === 'web_search' || toolName === 'web_fetch') {
         webSearchCount++;
         if (webSearchCount > MAX_WEB_SEARCH) {
-          const blockMsg = `Maximum web search attempts (${MAX_WEB_SEARCH}) reached. Proceed with your knowledge of publicly known figures and BUILD the model. Do NOT search again.`;
+          const blockMsg = `Maximum web search attempts (${MAX_WEB_SEARCH}) reached. Use the sourced information already gathered, label any remaining uncertain inputs as assumptions, and continue the model. Do NOT search again.`;
           logger.info(`[AgentLoop] ${blockMsg}`);
           messages.push(makeUserMessage(blockMsg));
           results.push({ type: 'error', error: blockMsg });

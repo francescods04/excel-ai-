@@ -3,6 +3,7 @@ const logger = require('../utils/logger');
 const { validateTaskOutput } = require('../agents/critic');
 const { getWikiContextForPrompt } = require('../wiki/loader');
 const { buildDcfSection, inferDcfInputs } = require('./dcfTemplate');
+const { formatAnalystDepthForPrompt, getAnalystDepth } = require('./analystDepth');
 
 const DCF_AI_TIMEOUT_MS = Number(process.env.DCF_AI_TIMEOUT_MS) || 90000;
 const DCF_AI_FALLBACK_TIMEOUT_MS = Number(process.env.DCF_AI_FALLBACK_TIMEOUT_MS) || 45000;
@@ -84,7 +85,8 @@ Operational rules:
 7. Sensitivity tables must use direct formulas and an odd-sized grid around the base case.
 8. If prior critic feedback is supplied, fix those exact issues while preserving the schema.
 9. Use only supported action types: setCellRange, setCellValue, runFormula, setCellFormat, addConditionalFormat, createSheet.
-10. Excel formulas must start with "=" and use valid A1 references.`;
+10. Excel formulas must start with "=" and use valid A1 references.
+11. Apply the analyst-depth playbook for the section. Do not collapse methodology into one or two generic rows.`;
 
 const SECTION_CONTRACTS = {
   assumptions: `Build only the Assumptions sheet. Include company/source, historical market inputs, projection assumptions, WACC inputs, and equity bridge inputs. Use values for inputs and formulas only where a calculation is required, such as current market cap.`,
@@ -312,6 +314,9 @@ async function buildDcfSectionAi(params = {}, memory = {}) {
   }
 
   const inputs = inferDcfInputs(params, memory);
+  const analystDepth = params.analystDepth && typeof params.analystDepth === 'object'
+    ? params.analystDepth
+    : getAnalystDepth(section);
   const templateGuide = compactTemplateActions(fallback.actions);
   const context = compactResultsForDcf(memory, params.usesResults);
   const wikiContext = getWikiContextForPrompt(`dcf ${section} excel formulas`, ['finance', 'excel'], 2500);
@@ -323,6 +328,7 @@ async function buildDcfSectionAi(params = {}, memory = {}) {
     `Build DCF section: ${section}`,
     `Objective: ${params.objective || 'Build a complete DCF model'}`,
     `Section contract: ${SECTION_CONTRACTS[section] || SECTION_CONTRACTS.projection}`,
+    `Analyst-depth playbook for this section:\n${formatAnalystDepthForPrompt(analystDepth.section || section)}`,
     `Company inputs inferred from data:\n${JSON.stringify(inputs, null, 2)}`,
     `Previous task results, compacted:\n${JSON.stringify(context, null, 2)}`,
     `Executable template guide. This is the minimum correct structure; improve source notes, labels, and formulas only if you keep the same auditability:\n${JSON.stringify(templateGuide, null, 2)}`,
@@ -366,6 +372,7 @@ async function buildDcfSectionAi(params = {}, memory = {}) {
       data: {
         ...(fallback.data || {}),
         builder: 'ai-assisted',
+        analystDepth,
         fallbackActionCount: fallback.actions.length,
         actionCount: actions.length,
         warnings: critic.warnings || []

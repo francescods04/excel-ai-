@@ -7,6 +7,7 @@ const { validateFormula, validateTaskOutput } = require('../../server/agents/cri
 const { inferEquityIntent } = require('../../server/utils/equityIntent');
 const { parseSheetMatrix } = require('../../server/utils/sheetParser');
 const { executeTool } = require('../../server/tools/registry');
+const { getAnalystDepth } = require('../../server/models/analystDepth');
 
 async function test(name, fn) {
   try {
@@ -122,7 +123,13 @@ async function main() {
     assert.deepStrictEqual(dcfSections, ['shell', 'sources', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'scenarios', 'summary', 'audit', 'format']);
     plan.tasks
       .filter(task => task.tool === 'finance.dcf.buildSection')
-      .forEach(task => assert.strictEqual(task.params.mode, 'ai_assisted'));
+      .forEach(task => {
+        assert.strictEqual(task.params.mode, 'ai_assisted');
+        assert.strictEqual(task.params.analysisDepth, 'institutional');
+        assert.ok(task.params.analystDepth);
+        assert.ok(task.params.analystDepth.requiredAnalyses.length >= 3);
+        assert.ok(task.params.analystDepth.visibleOutputs.length >= 2);
+      });
 
     const shellTask = plan.tasks.find(task => task.params.section === 'shell');
     assert.strictEqual(shellTask.params.ticker, 'AAPL');
@@ -297,6 +304,18 @@ async function main() {
     });
   });
 
+  await test('planner annotates generic finance formula tasks with analyst depth', async () => {
+    const plan = await planner.plan('calcola un WACC completo con tutti i controlli necessari', {
+      activeSheet: 'Sheet1',
+      workbookSheets: ['Sheet1']
+    });
+    const formulaTask = plan.tasks.find(task => task.tool === 'llm.writeFormulas');
+    assert.ok(formulaTask);
+    assert.strictEqual(formulaTask.params.analysisDepth, 'institutional');
+    assert.strictEqual(formulaTask.params.analystDepth.section, 'wacc');
+    assert.ok(formulaTask.params.analystDepth.requiredAnalyses.some(item => item.includes('peer/sector beta')));
+  });
+
   await test('runtime planner lets AI decide complex valuation plans before playbook fallback', async () => {
     const domainPlan = await planner.plan(
       'analizza questa azienda e fammi una full valuation completa',
@@ -379,10 +398,14 @@ async function main() {
     const sources = buildDcfSection({ section: 'sources', ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
     assert.strictEqual(sources.actions[0].sheet, 'Sources');
     assert.strictEqual(sources.actions[0].cells.B24.formula, '=Assumptions!$B$10');
+    assert.strictEqual(sources.actions[0].cells.A43.value, 'Analyst Depth Workplan');
+    assert.ok(sources.actions[0].cells.C46.value.includes('peer/sector beta'));
+    assert.strictEqual(sources.data.analystDepth.section, 'sources');
 
     const scenarios = buildDcfSection({ section: 'scenarios', ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
     assert.strictEqual(scenarios.actions[0].sheet, 'Scenarios');
     assert.ok(scenarios.actions[0].cells.F5.formula.includes('DCF!$G$20'));
+    assert.strictEqual(scenarios.data.analystDepth.section, 'scenarios');
 
     const summary = buildDcfSection({ section: 'summary', ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
     assert.strictEqual(summary.actions[0].sheet, 'Summary');
@@ -391,6 +414,25 @@ async function main() {
     const audit = buildDcfSection({ section: 'audit', ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
     assert.strictEqual(audit.actions[0].sheet, 'Audit');
     assert.ok(audit.actions[0].cells.B17.formula.includes('COUNTIF'));
+    assert.strictEqual(audit.actions[0].cells.A26.value, 'Depth Coverage Checks');
+    assert.ok(audit.actions[0].cells.C31.value.includes('Operating forecast'));
+  });
+
+  await test('analyst depth playbook covers all major valuation sections', () => {
+    for (const section of ['sources', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'scenarios', 'summary', 'audit', 'format']) {
+      const depth = getAnalystDepth(section);
+      assert.strictEqual(depth.depthLevel, 'institutional');
+      assert.ok(depth.method.length > 20);
+      assert.ok(depth.requiredAnalyses.length >= 3);
+      assert.ok(depth.sanityChecks.length >= 1);
+      assert.ok(depth.visibleOutputs.length >= 1);
+    }
+    assert.ok(getAnalystDepth('dcf').requiredAnalyses.some(item => item.includes('terminal value')));
+    assert.ok(getAnalystDepth('sensitivity').method.includes('single point estimate'));
+    assert.ok(getAnalystDepth('assumptions').requiredAnalyses.some(item => item.includes('fallback assumption')));
+    assert.strictEqual(getAnalystDepth('wacc.cost_of_equity').section, 'wacc');
+    assert.strictEqual(getAnalystDepth('full_model_review').section, 'audit');
+    assert.strictEqual(getAnalystDepth('sensitivity.data_table').section, 'sensitivity');
   });
 
   await test('professional formatter builds adaptive red restyle without blanket reset', () => {
@@ -470,6 +512,8 @@ async function main() {
     assert.strictEqual(formatTask.params.scope, 'workbook');
     assert.deepStrictEqual(formatTask.params.sheets, ['Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit']);
     assert.ok(!formatTask.params.sheets.includes('Sheet1'));
+    assert.strictEqual(formatTask.params.analysisDepth, 'institutional');
+    assert.strictEqual(formatTask.params.analystDepth.section, 'format');
   });
 
   await test('formatter targets explicit model sheets without blanket-formatting source data', () => {

@@ -2,6 +2,7 @@ const { callLLM } = require('../tools/llm');
 const logger = require('../utils/logger');
 const { getWikiContextForPrompt } = require('../wiki/loader');
 const { buildProfessionalFormatPlan, classifyFormatIntent } = require('../models/formatTemplate');
+const { getAnalystDepth } = require('../models/analystDepth');
 
 const LAYOUT_TIMEOUT_MS = Number(process.env.LAYOUT_TIMEOUT_MS) || 60000;
 const LAYOUT_FALLBACK_TIMEOUT_MS = Number(process.env.LAYOUT_FALLBACK_TIMEOUT_MS) || 35000;
@@ -52,6 +53,18 @@ function compactResultsForPrompt(results, usesResults) {
       ];
     })
   );
+}
+
+function formatDepthForPrompt(depth) {
+  const entry = depth && typeof depth === 'object' ? depth : getAnalystDepth(depth || 'dcf');
+  return [
+    `Depth level: ${entry.depthLevel || 'institutional'}`,
+    `Section: ${entry.section || 'dcf'}`,
+    `Method: ${entry.method || ''}`,
+    `Required analyses:\n- ${(entry.requiredAnalyses || []).join('\n- ')}`,
+    `Sanity checks:\n- ${(entry.sanityChecks || []).join('\n- ')}`,
+    `Visible outputs:\n- ${(entry.visibleOutputs || []).join('\n- ')}`
+  ].join('\n');
 }
 
 /* ---------- Investment Banking Grade System Prompts ---------- */
@@ -318,11 +331,15 @@ async function runFormulaAgent(params, memory) {
   // Inject relevant wiki knowledge for formulas
   const sectionQuery = params.section ? params.section.replace(/\./g, ' ') : (params.mode || 'finance model');
   const wikiContext = getWikiContextForPrompt(sectionQuery + ' formulas', ['finance', 'excel'], 3000);
+  const analystDepth = params.analystDepth && typeof params.analystDepth === 'object'
+    ? params.analystDepth
+    : getAnalystDepth(params.section || params.mode || 'audit');
+  const depthBlock = `\n\nANALYST DEPTH PLAYBOOK (mandatory, not optional):\n${formatDepthForPrompt(analystDepth)}\n\nApply this depth to the visible Excel output. If an input is missing, create a reviewable assumption/source flag instead of hiding the gap.`;
 
-  const user = `Generate ${isSection ? `formulas for section "${params.section}"` : `formulas for full model`}: ${JSON.stringify(params)}\n\nLayout and previous results:\n${context}${inferredBlock}${criticBlock}\n\n${wikiContext}`;
+  const user = `Generate ${isSection ? `formulas for section "${params.section}"` : `formulas for full model`}: ${JSON.stringify(params)}\n\nLayout and previous results:\n${context}${inferredBlock}${criticBlock}${depthBlock}\n\n${wikiContext}`;
   const start = Date.now();
   const result = await callLLM({
-    system: systemPrompt + (wikiContext ? '\n\nUse the WIKI KNOWLEDGE BASE provided above for correct formulas, conventions, and best practices.' : ''),
+    system: systemPrompt + '\n\nANALYST DEPTH RULE: beta is only one example. Every finance section must expose method, evidence, assumptions, checks and review flags in the workbook, not just formulas.' + (wikiContext ? '\n\nUse the WIKI KNOWLEDGE BASE provided above for correct formulas, conventions, and best practices.' : ''),
     userText: user,
     timeoutMs,
     fallbackTimeoutMs,
@@ -351,11 +368,17 @@ async function runFormatAgent(params, memory) {
   // Inject relevant wiki knowledge for formatting
   const wikiContext = getWikiContextForPrompt('formatting ' + (params.mode || 'institutional'), ['finance', 'excel'], 2000);
   const intent = classifyFormatIntent(params);
+  const analystDepth = params.analystDepth && typeof params.analystDepth === 'object'
+    ? params.analystDepth
+    : getAnalystDepth('format');
 
   const user = `Generate formatting for: ${JSON.stringify(params)}
 
 Interpreted style intent:
 ${JSON.stringify(intent, null, 2)}
+
+Analyst-depth playbook:
+${formatDepthForPrompt(analystDepth)}
 
 Deterministic fallback plan summary:
 ${JSON.stringify({ data: fallback.data, sampleActions: fallback.actions.slice(0, 24) }, null, 2)}
