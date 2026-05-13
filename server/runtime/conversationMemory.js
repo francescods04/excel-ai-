@@ -102,20 +102,44 @@ function getConversationContext() {
   return summaryBlock + recentBlock;
 }
 
-function getLastModelState() {
-  // Search backwards for the most recent turn that created a finance model
-  for (let i = memory.length - 1; i >= 0; i--) {
-    const entry = memory[i];
+function isDurableModelEntry(entry) {
+  if (!entry || !entry.modelType || !Array.isArray(entry.sheetsCreated) || entry.sheetsCreated.length === 0) {
+    return false;
+  }
+  const modelType = String(entry.modelType || '').toLowerCase();
+  return modelType !== 'custom';
+}
+
+function toModelState(entry) {
+  return {
+    modelType: entry.modelType,
+    sheets: entry.sheetsCreated,
+    turnId: entry.turnId,
+    keyCells: entry.keyCells || {}
+  };
+}
+
+function selectLastModelState(turns = []) {
+  const entries = Array.isArray(turns) ? turns : [];
+
+  // Prefer the latest durable model state over a later partial styling/edit turn.
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (isDurableModelEntry(entry)) return toModelState(entry);
+  }
+
+  // Fallback for non-finance/custom workbooks: keep the latest touched workbook area.
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
     if (entry.modelType && entry.sheetsCreated.length > 0) {
-      return {
-        modelType: entry.modelType,
-        sheets: entry.sheetsCreated,
-        turnId: entry.turnId,
-        keyCells: entry.keyCells || {}
-      };
+      return toModelState(entry);
     }
   }
   return null;
+}
+
+function getLastModelState() {
+  return selectLastModelState(memory);
 }
 
 function getRecentSheets() {
@@ -149,6 +173,7 @@ module.exports = {
   getConversationContext,
   getRecentSheets,
   getLastModelState,
+  selectLastModelState,
   clearMemory,
   _flush: flush // testing
 };

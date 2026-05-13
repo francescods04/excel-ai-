@@ -10,6 +10,7 @@ const { executeTool } = require('../../server/tools/registry');
 const { getAnalystDepth } = require('../../server/models/analystDepth');
 const { normalizeAiSchema } = require('../../server/models/workbookAiSchema');
 const { normalizeUnderstanding } = require('../../server/models/workbookUnderstanding');
+const { selectLastModelState } = require('../../server/runtime/conversationMemory');
 
 async function test(name, fn) {
   try {
@@ -841,6 +842,45 @@ async function main() {
     assert.deepStrictEqual(formatTask.params.sheets, ['Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit']);
     assert.strictEqual(formatTask.params.sheet, 'Scenarios');
     assert.ok(!formatTask.params.sheets.includes('Sheet1'));
+  });
+
+  await test('conversation memory keeps durable DCF model state after partial edit turns', () => {
+    const state = selectLastModelState([
+      {
+        turnId: 'turn-dcf',
+        objective: 'analizza questa azienda e crea valuation',
+        planSummary: 'Piano con 13/13 task completati',
+        modelType: 'DCF',
+        sheetsCreated: ['Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit'],
+        keyCells: { valuation: 'DCF!H30:H40' }
+      },
+      {
+        turnId: 'turn-format-partial',
+        objective: 'sistema la formattazione di scenarios',
+        planSummary: 'Piano con 3/3 task completati',
+        modelType: 'custom',
+        sheetsCreated: ['Scenarios', 'WACC']
+      }
+    ]);
+
+    assert.strictEqual(state.modelType, 'DCF');
+    assert.strictEqual(state.turnId, 'turn-dcf');
+    assert.deepStrictEqual(state.sheets, ['Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit']);
+  });
+
+  await test('conversation memory still supports custom workbook continuity when no durable model exists', () => {
+    const state = selectLastModelState([
+      {
+        turnId: 'turn-sales',
+        objective: 'crea un summary vendite',
+        planSummary: 'Piano con 2/2 task completati',
+        modelType: 'custom',
+        sheetsCreated: ['Sales Summary']
+      }
+    ]);
+
+    assert.strictEqual(state.modelType, 'custom');
+    assert.deepStrictEqual(state.sheets, ['Sales Summary']);
   });
 
   await test('formatter applies semantic colors for inputs, formulas and workbook links', () => {
