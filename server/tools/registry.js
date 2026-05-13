@@ -1,5 +1,6 @@
 const Ajv = require('ajv');
 const yahoo = require('../tools/yahoo');
+const { buildDcfSection } = require('../models/dcfTemplate');
 const { runLayoutAgent, runFormulaAgent, runFormatAgent } = require('../agents/specialists');
 const { searchTools } = require('../utils/toolSearch');
 const SHARED_SCHEMAS = require('./schemas');
@@ -256,6 +257,31 @@ registerTool('yahoo.fundamentals', async (params) => {
   },
   category: 'read',
   costHint: 'low'
+});
+
+registerTool('finance.dcf.buildSection', async (params, memory) => {
+  return buildDcfSection(params, memory);
+}, {
+  description: 'Costruisce una sezione deterministica di un DCF completo (shell, assumptions, WACC, DCF, sensitivity, format) con formule Excel istituzionali.',
+  inputs: ['section', 'ticker', 'companyName'],
+  schema: {
+    type: 'object',
+    required: ['section'],
+    properties: {
+      section: {
+        type: 'string',
+        enum: ['shell', 'assumptions', 'wacc', 'dcf', 'projection', 'sensitivity', 'format', 'formatting', 'all']
+      },
+      ticker: { type: 'string', minLength: 1, maxLength: 12 },
+      companyName: { type: 'string' },
+      objective: { type: 'string' },
+      projectionYears: { type: 'integer', minimum: 5, maximum: 5 },
+      usesResults: { type: 'array', items: { type: 'string' } }
+    }
+  },
+  category: 'mutation',
+  costHint: 'low',
+  requiresApproval: 'always'
 });
 
 registerTool('llm.planLayout', async (params, memory) => {
