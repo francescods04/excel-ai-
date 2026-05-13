@@ -409,7 +409,7 @@ function addDcfSheetFormatting(actions, sheet, palette) {
   const geometry = {
     summary: { used: 'A1:C32', label: 'A1:A32', values: 'B1:C32', labelWidth: 220, valueWidth: 118 },
     sources: { used: 'A1:D50', label: 'A1:A50', values: 'B1:D50', labelWidth: 190, valueWidth: 150 },
-    assumptions: { used: 'A1:B40', label: 'A1:A40', values: 'B1:B40', labelWidth: 245, valueWidth: 125 },
+    assumptions: { used: 'A1:D40', label: 'A1:A40', values: 'B1:D40', labelWidth: 245, valueWidth: 155 },
     wacc: { used: 'A1:B30', label: 'A1:A30', values: 'B1:B30', labelWidth: 255, valueWidth: 125 },
     dcf: { used: 'A1:H40', label: 'A1:A40', values: 'B1:H40', labelWidth: 230, valueWidth: 92 },
     sensitivity: { used: 'A1:G18', label: 'A1:A18', values: 'B1:G18', labelWidth: 155, valueWidth: 94 },
@@ -446,9 +446,13 @@ function addDcfSheetFormatting(actions, sheet, palette) {
       actions.push(fmt(sheet, 'D45:D50', { backgroundColor: p.checkFill, fontColor: p.bodyFont, italic: true }));
       break;
     case 'assumptions':
-      actions.push(fmt(sheet, 'A1:B1', { backgroundColor: p.titleFill, fontColor: p.white, bold: true }));
-      ['A3:B3', 'A9:B9', 'A17:B17', 'A25:B25', 'A32:B32'].forEach(target => actions.push(fmt(sheet, target, { backgroundColor: p.sectionFill, fontColor: p.sectionFont, bold: true })));
+      actions.push(fmt(sheet, 'A1:D1', { backgroundColor: p.titleFill, fontColor: p.white, bold: true }));
+      ['A3:D3', 'A9:D9', 'A17:D17', 'A25:D25', 'A32:D32'].forEach(target => actions.push(fmt(sheet, target, { backgroundColor: p.sectionFill, fontColor: p.sectionFont, bold: true })));
       ['B4:B7', 'B10:B15', 'B18:B23', 'B26:B30', 'B33:B36'].forEach(target => actions.push(fmt(sheet, target, { backgroundColor: p.inputFill, fontColor: p.inputFont })));
+      actions.push(fmt(sheet, 'C1:C40', { columnWidth: 260, horizontalAlignment: 'Left', wrapText: true }));
+      actions.push(fmt(sheet, 'D1:D40', { columnWidth: 170, horizontalAlignment: 'Left', wrapText: true }));
+      ['C4:C8', 'C10:C15', 'C18:C23', 'C26:C30', 'C33:C37'].forEach(target => actions.push(fmt(sheet, target, { fontColor: p.mutedFont, wrapText: true })));
+      ['D4:D8', 'D10:D15', 'D18:D23', 'D26:D30', 'D33:D37'].forEach(target => actions.push(fmt(sheet, target, { backgroundColor: p.checkFill, fontColor: p.bodyFont, italic: true, wrapText: true })));
       actions.push(fmt(sheet, 'B11:B15', { numberFormat: NUM_FORMATS.percent }));
       actions.push(fmt(sheet, 'B18:B27', { numberFormat: NUM_FORMATS.percent }));
       actions.push(fmt(sheet, 'B29:B30', { numberFormat: NUM_FORMATS.percent }));

@@ -420,65 +420,111 @@ function buildAssumptionsActions(inputs) {
   const amount = amountLabel(inputs);
   const perShare = perShareLabel(inputs);
   const sourceLabel = inputs.sourceType === 'workbook' ? 'Workbook local data' : 'External market data';
+  const refs = inputs.sourceRefs || {};
+  const refFor = (...keys) => keys.map(key => refs[key]).find(Boolean);
+  const sourceNote = (ref, fallback = 'Analyst assumption; replace with sourced value when available') =>
+    ref ? `Local source: ${ref}` : (inputs.sourceType === 'workbook' ? `Review: ${fallback}` : fallback);
+  const explain = (row, method, source) => {
+    set(cells, `C${row}`, cell(method, STYLE.label));
+    set(cells, `D${row}`, cell(source, STYLE.check));
+  };
 
   set(cells, 'A1', cell(`${inputs.companyName} (${inputs.ticker}) - DCF Assumptions`, STYLE.title));
   set(cells, 'A3', cell('Company & Source', STYLE.section));
+  set(cells, 'B3', cell('Input', STYLE.header));
+  set(cells, 'C3', cell('How Derived', STYLE.header));
+  set(cells, 'D3', cell('Source / Review', STYLE.header));
   set(cells, 'A4', cell('Company', STYLE.label));
   set(cells, 'B4', cell(inputs.companyName, STYLE.input));
+  explain(4, 'Detected from user request, workbook identity, or market-data profile.', sourceNote(null, 'confirm legal entity / reporting perimeter'));
   set(cells, 'A5', cell('Ticker', STYLE.label));
   set(cells, 'B5', cell(inputs.ticker, STYLE.input));
+  explain(5, 'Resolved from user request or equity-intent parser; PRIVATE used for local private-company workbooks.', inputs.ticker === 'PRIVATE' ? 'Local private-company context' : 'Ticker / symbol to verify');
   set(cells, 'A6', cell('Currency', STYLE.label));
   set(cells, 'B6', cell(currency, STYLE.input));
+  explain(6, 'Detected from workbook currency markers; otherwise defaulted to USD.', inputs.currency ? 'Workbook / request currency' : 'Review currency');
   set(cells, 'A7', cell('Units', STYLE.label));
   set(cells, 'B7', cell(inputs.unitLabel || currencyUnitLabel(currency), STYLE.input));
+  explain(7, 'Model normalizes monetary values to millions and keeps per-share data separate.', 'Model convention');
   set(cells, 'A8', cell('Primary Data Source', STYLE.label));
   set(cells, 'B8', cell(sourceLabel, STYLE.input));
+  explain(8, 'Workbook-first when local financials are high-confidence; external tools only supplement missing inputs.', inputs.sourceType === 'workbook' ? 'Workbook-first' : 'External data / fallback');
 
   set(cells, 'A9', cell('Historical / Market Inputs', STYLE.section));
+  set(cells, 'B9', cell('Input', STYLE.header));
+  set(cells, 'C9', cell('How Derived', STYLE.header));
+  set(cells, 'D9', cell('Source / Review', STYLE.header));
   set(cells, 'A10', cell(`Base Revenue (${amount})`, STYLE.label));
   set(cells, 'B10', cell(inputs.baseRevenueMillions, fmt(inputStyle, { numberFormat: NUM_FORMATS.currency })));
+  explain(10, 'Mapped latest high-confidence revenue figure and converted to millions.', sourceNote(refFor('Revenue'), 'revenue not sourced; using fallback base revenue'));
   set(cells, 'A11', cell('EBITDA Margin (%)', STYLE.label));
   set(cells, 'B11', cell(inputs.ebitdaMargin, pctInputStyle));
+  explain(11, 'Calculated as EBITDA / revenue when available; otherwise normalized fallback within plausible range.', sourceNote(refFor('EBITDA', 'EBITDA Margin'), 'EBITDA/margin not sourced'));
   set(cells, 'A12', cell('Tax Rate (%)', STYLE.label));
   set(cells, 'B12', cell(inputs.taxRate, pctInputStyle));
+  explain(12, 'Normalized effective tax assumption; replace with company effective tax or statutory rate support.', sourceNote(refFor('Tax Rate', 'Taxes'), 'tax rate requires analyst confirmation'));
   set(cells, 'A13', cell('D&A % of Revenue (%)', STYLE.label));
   set(cells, 'B13', cell(inputs.daPercentRevenue, pctInputStyle));
+  explain(13, 'Normalized depreciation and amortization intensity as a percent of revenue.', sourceNote(refFor('D&A', 'Depreciation'), 'D&A intensity requires historical support'));
   set(cells, 'A14', cell('CapEx % of Revenue (%)', STYLE.label));
   set(cells, 'B14', cell(inputs.capexPercentRevenue, pctInputStyle));
+  explain(14, 'Capital intensity assumption tied to revenue; should be calibrated to historical CapEx or management plan.', sourceNote(refFor('CapEx', 'Capital Expenditures'), 'CapEx intensity requires historical support'));
   set(cells, 'A15', cell('NWC % of Revenue (%)', STYLE.label));
   set(cells, 'B15', cell(inputs.nwcPercentRevenue, pctInputStyle));
+  explain(15, 'Working-capital investment modeled as percent of revenue to drive change in NWC.', sourceNote(refFor('Net Working Capital', 'Working Capital'), 'NWC intensity requires balance-sheet support'));
 
   set(cells, 'A17', cell('Projection Assumptions', STYLE.section));
+  set(cells, 'B17', cell('Input', STYLE.header));
+  set(cells, 'C17', cell('How Derived', STYLE.header));
+  set(cells, 'D17', cell('Source / Review', STYLE.header));
   inputs.revenueGrowth.forEach((growth, index) => {
     set(cells, `A${18 + index}`, cell(`Revenue Growth Y${index + 1} (%)`, STYLE.label));
     set(cells, `B${18 + index}`, cell(growth, pctInputStyle));
+    explain(18 + index, `Default explicit forecast fade path for year ${index + 1}; replace with guidance, consensus, or build-up analysis.`, 'Review: growth assumption');
   });
   set(cells, 'A23', cell('Terminal Growth Rate (%)', STYLE.label));
   set(cells, 'B23', cell(inputs.terminalGrowthRate, pctInputStyle));
+  explain(23, 'Long-term growth assumption kept below WACC and sanity-checked against GDP/inflation range.', 'Review: terminal growth support');
 
   set(cells, 'A25', cell('WACC Inputs', STYLE.section));
+  set(cells, 'B25', cell('Input', STYLE.header));
+  set(cells, 'C25', cell('How Derived', STYLE.header));
+  set(cells, 'D25', cell('Source / Review', STYLE.header));
   set(cells, 'A26', cell('Risk-Free Rate (%)', STYLE.label));
   set(cells, 'B26', cell(inputs.riskFreeRate, pctInputStyle));
+  explain(26, 'Current long-dated sovereign yield proxy for valuation currency / market.', 'Review: update from treasury / BTP curve');
   set(cells, 'A27', cell('Market Risk Premium (%)', STYLE.label));
   set(cells, 'B27', cell(inputs.marketRiskPremium, pctInputStyle));
+  explain(27, 'Equity risk premium input for CAPM cost of equity.', 'Review: ERP source / country risk');
   set(cells, 'A28', cell('Beta', STYLE.label));
   set(cells, 'B28', cell(inputs.beta, fmt(inputStyle, { numberFormat: '0.00x' })));
+  explain(28, 'Observed beta when public; otherwise sector/peer beta selected and cross-checked in WACC.', sourceNote(refFor('Beta'), 'beta must be supported by peer/sector evidence'));
   set(cells, 'A29', cell('Pre-Tax Cost of Debt (%)', STYLE.label));
   set(cells, 'B29', cell(inputs.preTaxCostOfDebt, pctInputStyle));
+  explain(29, 'Pre-tax borrowing cost before tax shield; should reflect current credit spread or debt yield.', 'Review: debt cost support');
   set(cells, 'A30', cell('Target Debt / Equity', STYLE.label));
   set(cells, 'B30', cell(inputs.targetDebtToEquity, fmt(inputStyle, { numberFormat: '0.00x' })));
+  explain(30, 'Derived from local debt/equity if available; otherwise debt divided by market value of equity.', sourceNote(refFor('Debt / Equity'), 'capital structure requires support'));
 
   set(cells, 'A32', cell('Equity Bridge', STYLE.section));
+  set(cells, 'B32', cell('Input', STYLE.header));
+  set(cells, 'C32', cell('How Derived', STYLE.header));
+  set(cells, 'D32', cell('Source / Review', STYLE.header));
   set(cells, 'A33', cell(`Cash & Equivalents (${amount})`, STYLE.label));
   set(cells, 'B33', cell(inputs.cashMillions, fmt(inputStyle, { numberFormat: NUM_FORMATS.currency })));
+  explain(33, 'Cash and equivalents used to bridge enterprise value to equity value.', sourceNote(refFor('Cash & Equivalents'), 'cash not sourced; verify balance sheet'));
   set(cells, 'A34', cell(`${inputs.debtIsNetDebt ? 'Net Debt' : 'Total Debt'} (${amount})`, STYLE.label));
   set(cells, 'B34', cell(inputs.debtMillions, fmt(inputStyle, { numberFormat: NUM_FORMATS.currency })));
+  explain(34, 'Debt or net debt used in the EV-to-equity bridge.', sourceNote(refFor('Total Debt', 'Net Debt'), 'debt not sourced; verify balance sheet'));
   set(cells, 'A35', cell('Shares Outstanding (M)', STYLE.label));
   set(cells, 'B35', cell(inputs.sharesMillions, fmt(inputStyle, { numberFormat: NUM_FORMATS.shares })));
+  explain(35, 'Diluted shares from market data/workbook; fallback uses market cap divided by price where possible.', sourceNote(refFor('Shares Outstanding', 'Diluted Shares'), 'share count requires support'));
   set(cells, 'A36', cell(`Current Share Price (${perShare})`, STYLE.label));
   set(cells, 'B36', cell(inputs.sharePrice, fmt(inputStyle, { numberFormat: NUM_FORMATS.perShare })));
+  explain(36, 'Current share price for premium/discount; zero for private-company models unless provided.', sourceNote(refFor('Share Price'), inputs.isPrivateCompany ? 'private model: no public share price' : 'share price requires market quote'));
   set(cells, 'A37', cell(`Current Market Cap (${amount})`, STYLE.label));
   set(cells, 'B37', formula('=B35*B36', fmt(STYLE.formula, { numberFormat: NUM_FORMATS.currency })));
+  explain(37, 'Formula: shares outstanding multiplied by current share price.', 'Calculated from B35 and B36');
 
   return [makeSetCellRangeAction('Assumptions', cells)];
 }
@@ -971,7 +1017,7 @@ function buildFormatActions() {
   const ranges = [
     ['Summary', 'A1:C32', { horizontalAlignment: 'Left' }],
     ['Sources', 'A1:D50', { horizontalAlignment: 'Left' }],
-    ['Assumptions', 'A1:A40', { horizontalAlignment: 'Left' }],
+    ['Assumptions', 'A1:D40', { horizontalAlignment: 'Left' }],
     ['WACC', 'A1:A30', { horizontalAlignment: 'Left' }],
     ['DCF', 'A1:A40', { horizontalAlignment: 'Left' }],
     ['Sensitivity', 'A1:A18', { horizontalAlignment: 'Left' }],
@@ -980,6 +1026,7 @@ function buildFormatActions() {
     ['Summary', 'B1:C32', { horizontalAlignment: 'Right' }],
     ['Sources', 'B1:D50', { horizontalAlignment: 'Right' }],
     ['Assumptions', 'B1:B40', { horizontalAlignment: 'Right' }],
+    ['Assumptions', 'C1:D40', { horizontalAlignment: 'Left', wrapText: true }],
     ['WACC', 'B1:B30', { horizontalAlignment: 'Right' }],
     ['DCF', 'B1:H40', { horizontalAlignment: 'Right' }],
     ['Sensitivity', 'B1:G18', { horizontalAlignment: 'Right' }],
@@ -987,7 +1034,7 @@ function buildFormatActions() {
     ['Audit', 'B1:C32', { horizontalAlignment: 'Right' }],
     ['Summary', 'A1:C1', STYLE.title],
     ['Sources', 'A1:D1', STYLE.title],
-    ['Assumptions', 'A1:B1', STYLE.title],
+    ['Assumptions', 'A1:D1', STYLE.title],
     ['WACC', 'A1:B1', STYLE.title],
     ['DCF', 'A1:H1', STYLE.title],
     ['Sensitivity', 'A1:G1', STYLE.title],

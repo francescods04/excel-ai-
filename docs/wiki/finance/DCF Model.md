@@ -24,6 +24,10 @@ Contains all inputs that drive the model. Organized in sections:
 - Revenue Growth (%) — year-over-year growth rate
 - EBITDA Margin (%) — EBITDA / Revenue
 
+Every assumption row must have side-by-side explanation columns:
+- **How Derived** — method used, such as workbook mapping, ratio calculation, forecast fade path, market-data pull, or analyst fallback.
+- **Source / Review** — source reference or review flag, such as workbook cell, market-data source, filing support, or "Review" when the value is a fallback.
+
 **Tax & Capital**
 - Tax Rate (%) — marginal effective tax rate
 - D&A % of Revenue (%) — depreciation & amortization

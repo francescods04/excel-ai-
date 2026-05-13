@@ -13,12 +13,14 @@ const AI_SECTIONS = new Set(['assumptions', 'wacc', 'dcf', 'projection', 'sensit
 const SECTION_REQUIREMENTS = {
   assumptions: {
     sheet: 'Assumptions',
-    minCells: 50,
+    minCells: 85,
     required: [
       'B10', 'B11', 'B12', 'B13', 'B14', 'B15',
       'B18', 'B19', 'B20', 'B21', 'B22', 'B23',
       'B26', 'B27', 'B28', 'B29', 'B30',
-      'B33', 'B34', 'B35', 'B36', 'B37'
+      'B33', 'B34', 'B35', 'B36', 'B37',
+      'C10', 'C11', 'C12', 'C14', 'C23', 'C26', 'C28', 'C33', 'C37',
+      'D10', 'D11', 'D12', 'D14', 'D23', 'D26', 'D28', 'D33', 'D37'
     ],
     mustMatchTemplate: [
       'B10', 'B11', 'B12', 'B13', 'B14', 'B15',
@@ -86,10 +88,11 @@ Operational rules:
 8. If prior critic feedback is supplied, fix those exact issues while preserving the schema.
 9. Use only supported action types: setCellRange, setCellValue, runFormula, setCellFormat, addConditionalFormat, createSheet.
 10. Excel formulas must start with "=" and use valid A1 references.
-11. Apply the analyst-depth playbook for the section. Do not collapse methodology into one or two generic rows.`;
+11. Apply the analyst-depth playbook for the section. Do not collapse methodology into one or two generic rows.
+12. On the Assumptions sheet, every key input row must include side-by-side methodology: Column C = how the value was derived, Column D = source/review status.`;
 
 const SECTION_CONTRACTS = {
-  assumptions: `Build only the Assumptions sheet. Include company/source, historical market inputs, projection assumptions, WACC inputs, and equity bridge inputs. Use values for inputs and formulas only where a calculation is required, such as current market cap.`,
+  assumptions: `Build only the Assumptions sheet. Include company/source, historical market inputs, projection assumptions, WACC inputs, and equity bridge inputs. Use values for inputs and formulas only where a calculation is required, such as current market cap. For every assumption row, add Column C "How Derived" and Column D "Source / Review" explaining the method, source priority, fallback logic and analyst-review status.`,
   wacc: `Build only the WACC sheet. Pull inputs from Assumptions. Include CAPM cost of equity, after-tax cost of debt, debt/equity weights, final WACC, and a beta evidence section that compares observed beta with peer/sector beta, unlevering and relevering peer beta to target D/E before selecting beta.`,
   dcf: `Build only the DCF sheet. Include five forecast years, terminal value, enterprise value, equity bridge, implied share price, current price, premium/discount, and a bridge check.`,
   projection: `Build only the DCF projection sheet content. Include five forecast years, terminal value, enterprise value, equity bridge, implied share price, current price, premium/discount, and a bridge check.`,

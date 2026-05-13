@@ -242,6 +242,9 @@ async function main() {
     assert.strictEqual(assumptions.actions[0].cells.B6.value, 'EUR');
     assert.strictEqual(assumptions.actions[0].cells.B8.value, 'Workbook local data');
     assert.ok(Math.abs(assumptions.actions[0].cells.B10.value - 422.0842) < 0.0001);
+    assert.ok(assumptions.actions[0].cells.C10.value.includes('converted to millions'));
+    assert.ok(assumptions.actions[0].cells.D10.value.includes('Local source: Sheet1!S4'));
+    assert.ok(assumptions.actions[0].cells.C28.value.includes('cross-checked'));
   });
 
   await test('planner workbook-first guardrail removes invented external company data tasks', () => {
@@ -401,6 +404,13 @@ async function main() {
     assert.strictEqual(sources.actions[0].cells.A43.value, 'Analyst Depth Workplan');
     assert.ok(sources.actions[0].cells.C46.value.includes('peer/sector beta'));
     assert.strictEqual(sources.data.analystDepth.section, 'sources');
+
+    const assumptions = buildDcfSection({ section: 'assumptions', ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
+    assert.strictEqual(assumptions.actions[0].sheet, 'Assumptions');
+    assert.strictEqual(assumptions.actions[0].cells.C3.value, 'How Derived');
+    assert.strictEqual(assumptions.actions[0].cells.D3.value, 'Source / Review');
+    assert.ok(assumptions.actions[0].cells.C14.value.includes('Capital intensity'));
+    assert.ok(assumptions.actions[0].cells.D23.value.includes('terminal growth'));
 
     const scenarios = buildDcfSection({ section: 'scenarios', ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
     assert.strictEqual(scenarios.actions[0].sheet, 'Scenarios');
