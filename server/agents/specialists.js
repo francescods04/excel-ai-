@@ -1,7 +1,7 @@
 const { callLLM } = require('../tools/llm');
 const logger = require('../utils/logger');
 const { getWikiContextForPrompt } = require('../wiki/loader');
-const { buildProfessionalFormatPlan } = require('../models/formatTemplate');
+const { buildProfessionalFormatPlan, classifyFormatIntent } = require('../models/formatTemplate');
 
 const LAYOUT_TIMEOUT_MS = Number(process.env.LAYOUT_TIMEOUT_MS) || 60000;
 const LAYOUT_FALLBACK_TIMEOUT_MS = Number(process.env.LAYOUT_FALLBACK_TIMEOUT_MS) || 35000;
@@ -208,6 +208,18 @@ const FORMAT_SYSTEM_PROMPT = `You are a Senior IB Associate applying final forma
 RESPOND ONLY with valid JSON:
 { "actions": [{ "type": "setCellFormat", "sheet": "...", "target": "...", "options": { ... } }] }
 
+You are not a mechanical template engine. Read the user objective and workbook context, then choose the smallest professional formatting plan that accomplishes it.
+
+If the user asks to change colors/theme/palette/style:
+- Preserve the existing workbook structure, formulas and layout.
+- Recolor semantic surfaces only: title rows, section bands, table headers, input cells, total rows, checks, and sensitivity heatmaps.
+- Do not blanket-reset the whole used range unless the user asks for a full cleanup.
+- Use the exact requested color family or brand color when provided.
+
+Supported actions only:
+- setCellFormat with options: backgroundColor, fontColor, bold, italic, numberFormat, horizontalAlignment
+- addConditionalFormat with options: colorScale, dataBar, iconSet, cellValue
+
 INSTITUTIONAL FORMATTING STANDARDS (Goldman/JPMorgan style):
 
 1. TITLE ROW (Row 1):
@@ -328,39 +340,128 @@ async function runFormulaAgent(params, memory) {
 
 async function runFormatAgent(params, memory) {
   logger.info('[FormatAgent] Avvio formattazione');
-  if (process.env.FORMAT_LLM_ENABLED !== 'true') {
-    const result = buildProfessionalFormatPlan(params, memory);
-    logger.info(`[FormatAgent] Piano deterministico: ${result.actions.length} azioni su ${result.data.sheetCount} fogli`);
-    return result;
+  const fallback = buildProfessionalFormatPlan(params, memory);
+  if (!shouldUseFormatLLM(params)) {
+    logger.info(`[FormatAgent] Piano adattivo: ${fallback.actions.length} azioni su ${fallback.data.sheetCount} fogli (${fallback.data.strategy})`);
+    return fallback;
   }
 
   const context = JSON.stringify(compactResultsForPrompt(memory.results, params.usesResults), null, 2);
 
   // Inject relevant wiki knowledge for formatting
   const wikiContext = getWikiContextForPrompt('formatting ' + (params.mode || 'institutional'), ['finance', 'excel'], 2000);
+  const intent = classifyFormatIntent(params);
 
-  const user = `Generate formatting for: ${JSON.stringify(params)}\n\nPrevious task results:\n${context}\n\n${wikiContext}`;
+  const user = `Generate formatting for: ${JSON.stringify(params)}
+
+Interpreted style intent:
+${JSON.stringify(intent, null, 2)}
+
+Deterministic fallback plan summary:
+${JSON.stringify({ data: fallback.data, sampleActions: fallback.actions.slice(0, 24) }, null, 2)}
+
+Previous task results:
+${context}
+
+${wikiContext}`;
   const start = Date.now();
-  const result = await callLLM({
-    system: FORMAT_SYSTEM_PROMPT + (wikiContext ? '\n\nUse the WIKI KNOWLEDGE BASE provided above for formatting standards and conventions.' : ''),
-    userText: user,
-    timeoutMs: FORMAT_TIMEOUT_MS,
-    fallbackTimeoutMs: FORMAT_FALLBACK_TIMEOUT_MS,
-    label: 'FormatAgent LLM'
-  });
-  logger.info(`[FormatAgent] Completato in ${Date.now() - start}ms`);
-  if (result.actions && Array.isArray(result.actions)) {
-    return result;
+  try {
+    const result = await callLLM({
+      system: FORMAT_SYSTEM_PROMPT + (wikiContext ? '\n\nUse the WIKI KNOWLEDGE BASE provided above for formatting standards and conventions.' : ''),
+      userText: user,
+      timeoutMs: FORMAT_TIMEOUT_MS,
+      fallbackTimeoutMs: FORMAT_FALLBACK_TIMEOUT_MS,
+      label: 'FormatAgent LLM',
+      thinkingDisabled: true
+    });
+    logger.info(`[FormatAgent] LLM completato in ${Date.now() - start}ms`);
+    const rawActions = result?.actions && Array.isArray(result.actions)
+      ? result.actions
+      : (Array.isArray(result) ? result : []);
+    const actions = normalizeFormatActions(rawActions, params.sheet);
+    if (actions.length < 3) {
+      throw new Error(`AI format plan too small (${actions.length} actions)`);
+    }
+    return {
+      data: {
+        ...fallback.data,
+        builder: 'ai-assisted-format',
+        actionCount: actions.length,
+        fallbackActionCount: fallback.actions.length
+      },
+      actions
+    };
+  } catch (error) {
+    logger.warn(`[FormatAgent] LLM fallback to adaptive format: ${error.message}`);
+    return {
+      ...fallback,
+      data: {
+        ...(fallback.data || {}),
+        aiError: error.message
+      }
+    };
   }
-  if (Array.isArray(result)) {
-    return { actions: result };
+}
+
+function shouldUseFormatLLM(params = {}) {
+  const flag = process.env.FORMAT_LLM_ENABLED;
+  if (flag === 'true') return true;
+  if (flag === 'false') return false;
+  const text = `${params.objective || ''} ${params.mode || ''} ${params.theme || ''}`.toLowerCase();
+  return /(colou?r|colori|colore|palette|tema|theme|stile|style|look|brand|elegante|luxury|minimal|minimalista|creative|design|#[0-9a-f]{6})/i.test(text);
+}
+
+const FORMAT_OPTION_KEYS = new Set([
+  'backgroundColor',
+  'fontColor',
+  'bold',
+  'italic',
+  'numberFormat',
+  'horizontalAlignment'
+]);
+
+function normalizeFormatActions(rawActions, defaultSheet) {
+  if (!Array.isArray(rawActions)) return [];
+  const actions = [];
+  for (const action of rawActions) {
+    if (!action || typeof action !== 'object') continue;
+    const type = normalizeFormatActionType(action.type);
+    const sheet = action.sheet || action.sheetName || defaultSheet;
+    const target = action.target || action.range || action.address;
+    if (!sheet || !target) continue;
+    if (type === 'setCellFormat') {
+      const rawOptions = action.options || action.format || action.style || {};
+      const options = {};
+      for (const [key, value] of Object.entries(rawOptions)) {
+        if (FORMAT_OPTION_KEYS.has(key) && value !== undefined && value !== null) options[key] = value;
+      }
+      if (Object.keys(options).length > 0) {
+        actions.push({ type, sheet, target, options });
+      }
+      continue;
+    }
+    if (type === 'addConditionalFormat') {
+      const options = action.options || action.rule || {};
+      if (options && typeof options === 'object' && Object.keys(options).length > 0) {
+        actions.push({ type, sheet, target, options });
+      }
+    }
   }
-  return { actions: [] };
+  return actions;
+}
+
+function normalizeFormatActionType(type) {
+  const key = String(type || '').toLowerCase().replace(/[^a-z]/g, '');
+  if (['setcellformat', 'setformat', 'formatrange', 'formatcells'].includes(key)) return 'setCellFormat';
+  if (['addconditionalformat', 'setconditionalformat', 'conditionalformat'].includes(key)) return 'addConditionalFormat';
+  return type;
 }
 
 module.exports = {
   runLayoutAgent,
   runFormulaAgent,
   runFormatAgent,
+  normalizeFormatActions,
+  shouldUseFormatLLM,
   FORMULA_SECTION_SYSTEM_PROMPT
 };

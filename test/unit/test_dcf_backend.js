@@ -311,7 +311,7 @@ async function main() {
     assert.ok(audit.actions[0].cells.B17.formula.includes('COUNTIF'));
   });
 
-  await test('professional formatter builds workbook-wide red finance styling without LLM', () => {
+  await test('professional formatter builds adaptive red restyle without blanket reset', () => {
     const memory = {
       results: {
         t1: {
@@ -336,14 +336,43 @@ async function main() {
       scope: 'workbook'
     }, memory);
 
-    assert.strictEqual(plan.data.builder, 'deterministic-format');
+    assert.strictEqual(plan.data.builder, 'adaptive-format');
     assert.strictEqual(plan.data.theme, 'red');
+    assert.strictEqual(plan.data.strategy, 'semantic_restyle');
     assert.ok(plan.actions.length > 45);
     assert.ok(plan.actions.some(action => action.sheet === 'Summary' && action.target === 'A1:C1' && action.options.backgroundColor === '#7F1D1D'));
     assert.ok(plan.actions.some(action => action.sheet === 'Sensitivity' && action.type === 'addConditionalFormat' && action.target === 'C5:G9'));
+    assert.ok(!plan.actions.some(action => action.sheet === 'Summary' && action.target === 'A1:C29' && action.options.backgroundColor === '#FFFFFF'));
+  });
+
+  await test('formatter interprets non-red color themes from objective', () => {
+    const memory = {
+      results: {
+        t1: {
+          data: {
+            activeSheet: 'Sheet1',
+            sheets: [
+              { name: 'Sheet1', usedRange: 'Sheet1!A1:D8', rowCount: 8, columnCount: 4, preview: [['Revenue model'], [], ['Operating inputs'], ['Metric', 'Value', 'Source'], ['Revenue', 100, 'Workbook']] }
+            ]
+          }
+        }
+      }
+    };
+    const plan = buildProfessionalFormatPlan({
+      sheet: 'Sheet1',
+      objective: 'cambia solo i colori in verde professionale',
+      scope: 'sheet'
+    }, memory);
+
+    assert.strictEqual(plan.data.theme, 'green');
+    assert.strictEqual(plan.data.strategy, 'semantic_restyle');
+    assert.ok(plan.actions.some(action => action.sheet === 'Sheet1' && action.target === 'A1:D1' && action.options.backgroundColor === '#14532D'));
+    assert.ok(plan.actions.some(action => action.sheet === 'Sheet1' && action.target === 'A3:D3' && action.options.backgroundColor === '#D9EAD3'));
   });
 
   await test('format plan task is non-mutating and applyFormat applies planned actions once', async () => {
+    const previousFormatFlag = process.env.FORMAT_LLM_ENABLED;
+    process.env.FORMAT_LLM_ENABLED = 'false';
     const memory = {
       results: {
         t1: {
@@ -356,18 +385,23 @@ async function main() {
         }
       }
     };
-    const planned = await executeTool('llm.planFormat', {
-      sheet: 'Sensitivity',
-      objective: 'formatta in rosso professionale',
-      scope: 'workbook',
-      usesResults: ['t1']
-    }, memory);
-    assert.strictEqual(planned.actions.length, 0);
-    assert.ok(planned.data.actions.length > 10);
+    try {
+      const planned = await executeTool('llm.planFormat', {
+        sheet: 'Sensitivity',
+        objective: 'formatta in rosso professionale',
+        scope: 'workbook',
+        usesResults: ['t1']
+      }, memory);
+      assert.strictEqual(planned.actions.length, 0);
+      assert.ok(planned.data.actions.length > 10);
 
-    memory.results.t2 = planned;
-    const applied = await executeTool('excel.applyFormat', { fromResult: 't2', sheet: 'Sensitivity' }, memory);
-    assert.strictEqual(applied.actions.length, planned.data.actions.length);
+      memory.results.t2 = planned;
+      const applied = await executeTool('excel.applyFormat', { fromResult: 't2', sheet: 'Sensitivity' }, memory);
+      assert.strictEqual(applied.actions.length, planned.data.actions.length);
+    } finally {
+      if (previousFormatFlag === undefined) delete process.env.FORMAT_LLM_ENABLED;
+      else process.env.FORMAT_LLM_ENABLED = previousFormatFlag;
+    }
   });
 
   await test('critic validates DCF cross-sheet formulas without regex crash', () => {

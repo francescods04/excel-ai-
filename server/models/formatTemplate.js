@@ -28,6 +28,62 @@ const RED_PALETTE = {
   white: '#FFFFFF'
 };
 
+const PALETTE_LIBRARY = {
+  blue: DEFAULT_PALETTE,
+  red: RED_PALETTE,
+  green: {
+    name: 'green',
+    titleFill: '#14532D',
+    headerFill: '#263238',
+    sectionFill: '#D9EAD3',
+    sectionFont: '#14532D',
+    inputFill: '#E2F0D9',
+    inputFont: '#107C41',
+    totalFill: '#EEF7EE',
+    checkFill: '#FFF2CC',
+    bodyFont: '#111827',
+    mutedFont: '#404040',
+    white: '#FFFFFF',
+    heatLow: '#F4CCCC',
+    heatMid: '#FFFFFF',
+    heatHigh: '#D9EAD3'
+  },
+  charcoal: {
+    name: 'charcoal',
+    titleFill: '#111827',
+    headerFill: '#374151',
+    sectionFill: '#E5E7EB',
+    sectionFont: '#111827',
+    inputFill: '#E0F2FE',
+    inputFont: '#075985',
+    totalFill: '#F3F4F6',
+    checkFill: '#FEF3C7',
+    bodyFont: '#111827',
+    mutedFont: '#4B5563',
+    white: '#FFFFFF',
+    heatLow: '#FEE2E2',
+    heatMid: '#FFFFFF',
+    heatHigh: '#DCFCE7'
+  },
+  amber: {
+    name: 'amber',
+    titleFill: '#92400E',
+    headerFill: '#292524',
+    sectionFill: '#FEF3C7',
+    sectionFont: '#78350F',
+    inputFill: '#FFFBEB',
+    inputFont: '#B45309',
+    totalFill: '#F5F5F4',
+    checkFill: '#E0F2FE',
+    bodyFont: '#111827',
+    mutedFont: '#57534E',
+    white: '#FFFFFF',
+    heatLow: '#FECACA',
+    heatMid: '#FFFFFF',
+    heatHigh: '#BBF7D0'
+  }
+};
+
 const NUM_FORMATS = {
   currency: '$#,##0.0;[Red]($#,##0.0);-',
   percent: '0.00%;[Red](0.00%);-',
@@ -91,10 +147,85 @@ function cond(sheet, target, options) {
   return { type: 'addConditionalFormat', sheet, target, options };
 }
 
+function normalizeText(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function hexToRgb(hex) {
+  const cleaned = String(hex || '').replace('#', '').trim();
+  if (!/^[0-9a-f]{6}$/i.test(cleaned)) return null;
+  return {
+    r: parseInt(cleaned.slice(0, 2), 16),
+    g: parseInt(cleaned.slice(2, 4), 16),
+    b: parseInt(cleaned.slice(4, 6), 16)
+  };
+}
+
+function rgbToHex({ r, g, b }) {
+  return `#${[r, g, b]
+    .map(v => Math.max(0, Math.min(255, Math.round(v))))
+    .map(v => v.toString(16).padStart(2, '0'))
+    .join('')
+    .toUpperCase()}`;
+}
+
+function mix(hexA, hexB, weight = 0.5) {
+  const a = hexToRgb(hexA);
+  const b = hexToRgb(hexB);
+  if (!a || !b) return hexA;
+  return rgbToHex({
+    r: a.r * (1 - weight) + b.r * weight,
+    g: a.g * (1 - weight) + b.g * weight,
+    b: a.b * (1 - weight) + b.b * weight
+  });
+}
+
+function derivePaletteFromAccent(name, accentHex) {
+  return {
+    name,
+    titleFill: mix(accentHex, '#000000', 0.35),
+    headerFill: mix(accentHex, '#111827', 0.70),
+    sectionFill: mix(accentHex, '#FFFFFF', 0.82),
+    sectionFont: mix(accentHex, '#000000', 0.30),
+    inputFill: mix(accentHex, '#FFFFFF', 0.90),
+    inputFont: mix(accentHex, '#000000', 0.18),
+    totalFill: '#F3F4F6',
+    checkFill: '#FFF2CC',
+    bodyFont: '#111827',
+    mutedFont: '#404040',
+    white: '#FFFFFF',
+    heatLow: '#F4CCCC',
+    heatMid: '#FFFFFF',
+    heatHigh: mix(accentHex, '#FFFFFF', 0.76)
+  };
+}
+
 function choosePalette(params = {}) {
-  const text = `${params.objective || ''} ${params.theme || ''}`.toLowerCase();
-  if (/(rosso|rossa|red|burgundy|maroon|crimson)/.test(text)) return RED_PALETTE;
+  const text = normalizeText(`${params.objective || ''} ${params.theme || ''}`);
+  const hexMatch = text.match(/#([0-9a-f]{6})\b/i);
+  if (hexMatch) return derivePaletteFromAccent(hexMatch[0], hexMatch[0]);
+  if (/(rosso|rossa|red|burgundy|maroon|crimson|bordeaux)/.test(text)) return RED_PALETTE;
+  if (/(verde|green|emerald|smeraldo)/.test(text)) return PALETTE_LIBRARY.green;
+  if (/(nero|black|charcoal|antracite|slate|grigio scuro)/.test(text)) return PALETTE_LIBRARY.charcoal;
+  if (/(oro|gold|amber|giallo|yellow)/.test(text)) return PALETTE_LIBRARY.amber;
   return DEFAULT_PALETTE;
+}
+
+function classifyFormatIntent(params = {}) {
+  const text = normalizeText(`${params.objective || ''} ${params.mode || ''} ${params.theme || ''} ${params.formatType || ''}`);
+  const hasStyleDirective = /(colou?r|colori|colore|palette|tema|theme|stile|look|brand|rosso|verde|blu|nero|oro|amber|charcoal|bordeaux|#[0-9a-f]{6})/.test(text);
+  const wantsFullCleanup = /(completo|full|pulizia|cleanup|professionale|professional|investment banking|ib|istituzionale)/.test(text);
+  const colorOnly = hasStyleDirective && /(solo|soltanto|cambia|change|restyle|restyle|rendi|fammi|usa)/.test(text) && !/(modello|formula|crea|build|costruisci)/.test(text);
+  const scope = params.scope === 'workbook' ? 'workbook' : (params.scope === 'sheet' ? 'sheet' : (hasStyleDirective ? 'workbook' : 'sheet'));
+  return {
+    strategy: colorOnly ? 'semantic_restyle' : (wantsFullCleanup ? 'full_cleanup' : 'semantic_restyle'),
+    scope,
+    hasStyleDirective,
+    preserveExistingLayout: colorOnly || hasStyleDirective
+  };
 }
 
 function collectWorkbookSheets(params = {}, memory = {}) {
@@ -171,20 +302,22 @@ function applyDetectedRows(actions, sheet, info, range, palette) {
   }
 }
 
-function addBaseSheetFormatting(actions, sheet, info, palette) {
+function addBaseSheetFormatting(actions, sheet, info, palette, intent = {}) {
   const range = parseRange(info.usedRange, info.rowCount || 40, info.columnCount || 8);
   if (range.endRow < range.startRow) range.endRow = range.startRow + Math.max(1, info.rowCount || 1) - 1;
   if (range.endCol < range.startCol) range.endCol = range.startCol + Math.max(1, info.columnCount || 1) - 1;
 
   const used = a1(range.startCol, range.startRow, range.endCol, range.endRow);
-  actions.push(fmt(sheet, used, { backgroundColor: palette.white, fontColor: palette.bodyFont }));
+  if (intent.strategy !== 'semantic_restyle') {
+    actions.push(fmt(sheet, used, { backgroundColor: palette.white, fontColor: palette.bodyFont }));
+  }
   actions.push(fmt(sheet, a1(range.startCol, range.startRow, range.startCol, range.endRow), { horizontalAlignment: 'Left', fontColor: palette.bodyFont }));
   if (range.endCol > range.startCol) {
     actions.push(fmt(sheet, a1(range.startCol + 1, range.startRow, range.endCol, range.endRow), { horizontalAlignment: 'Right' }));
   }
   actions.push(fmt(sheet, a1(range.startCol, range.startRow, range.endCol, range.startRow), { backgroundColor: palette.titleFill, fontColor: palette.white, bold: true, horizontalAlignment: 'Left' }));
 
-  if (range.endRow > range.startRow) {
+  if (range.endRow > range.startRow && intent.strategy !== 'semantic_restyle') {
     actions.push(fmt(sheet, a1(range.startCol, range.startRow + 1, range.endCol, range.startRow + 1), { backgroundColor: palette.headerFill, fontColor: palette.white, bold: true, horizontalAlignment: 'Center' }));
   }
 
@@ -194,6 +327,7 @@ function addBaseSheetFormatting(actions, sheet, info, palette) {
 
 function addDcfSheetFormatting(actions, sheet, palette) {
   const p = palette;
+  const heat = { minColor: p.heatLow || '#F4CCCC', midColor: p.heatMid || '#FFFFFF', maxColor: p.heatHigh || '#D9EAD3' };
   switch (sheet.toLowerCase()) {
     case 'summary':
       actions.push(fmt(sheet, 'A1:C1', { backgroundColor: p.titleFill, fontColor: p.white, bold: true }));
@@ -249,8 +383,8 @@ function addDcfSheetFormatting(actions, sheet, palette) {
       actions.push(fmt(sheet, 'B14:B18', { backgroundColor: p.inputFill, fontColor: p.inputFont, numberFormat: NUM_FORMATS.percent }));
       actions.push(fmt(sheet, 'C5:G9', { numberFormat: NUM_FORMATS.perShare }));
       actions.push(fmt(sheet, 'C14:G18', { numberFormat: NUM_FORMATS.currency }));
-      actions.push(cond(sheet, 'C5:G9', { colorScale: { minColor: '#F4CCCC', midColor: '#FFFFFF', maxColor: '#D9EAD3' } }));
-      actions.push(cond(sheet, 'C14:G18', { colorScale: { minColor: '#F4CCCC', midColor: '#FFFFFF', maxColor: '#D9EAD3' } }));
+      actions.push(cond(sheet, 'C5:G9', { colorScale: heat }));
+      actions.push(cond(sheet, 'C14:G18', { colorScale: heat }));
       break;
     case 'scenarios':
       actions.push(fmt(sheet, 'A1:G1', { backgroundColor: p.titleFill, fontColor: p.white, bold: true }));
@@ -259,7 +393,7 @@ function addDcfSheetFormatting(actions, sheet, palette) {
       actions.push(fmt(sheet, 'B5:E7', { backgroundColor: p.inputFill, fontColor: p.inputFont, numberFormat: NUM_FORMATS.percent }));
       actions.push(fmt(sheet, 'F5:F7', { numberFormat: NUM_FORMATS.perShare }));
       actions.push(fmt(sheet, 'G5:G7', { numberFormat: NUM_FORMATS.percent }));
-      actions.push(cond(sheet, 'F5:G7', { colorScale: { minColor: '#F4CCCC', midColor: '#FFFFFF', maxColor: '#D9EAD3' } }));
+      actions.push(cond(sheet, 'F5:G7', { colorScale: heat }));
       break;
     case 'audit':
       actions.push(fmt(sheet, 'A1:C1', { backgroundColor: p.titleFill, fontColor: p.white, bold: true }));
@@ -287,22 +421,26 @@ function dedupeActions(actions) {
 
 function buildProfessionalFormatPlan(params = {}, memory = {}) {
   const palette = choosePalette(params);
+  const intent = classifyFormatIntent(params);
   const sheets = collectWorkbookSheets(params, memory);
   const actions = [];
 
   for (const info of sheets) {
-    addBaseSheetFormatting(actions, info.name, info, palette);
+    addBaseSheetFormatting(actions, info.name, info, palette, intent);
     addDcfSheetFormatting(actions, info.name, palette);
   }
 
+  const planned = dedupeActions(actions);
   return {
     data: {
-      builder: 'deterministic-format',
+      builder: 'adaptive-format',
       theme: palette.name,
+      strategy: intent.strategy,
+      scope: intent.scope,
       sheetCount: sheets.length,
-      actionCount: actions.length
+      actionCount: planned.length
     },
-    actions: dedupeActions(actions)
+    actions: planned
   };
 }
 
@@ -310,5 +448,6 @@ module.exports = {
   buildProfessionalFormatPlan,
   collectWorkbookSheets,
   choosePalette,
+  classifyFormatIntent,
   parseRange
 };
