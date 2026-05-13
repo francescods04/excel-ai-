@@ -12,6 +12,7 @@ const { normalizeAiSchema } = require('../../server/models/workbookAiSchema');
 const { normalizeUnderstanding } = require('../../server/models/workbookUnderstanding');
 const { selectLastModelState } = require('../../server/runtime/conversationMemory');
 const { isPrefetchSafeTask } = require('../../server/runtime/prefetchPolicy');
+const { buildExecutionMemory } = require('../../server/runtime/turns');
 const { registry } = require('../../server/tools/registry');
 
 async function test(name, fn) {
@@ -857,10 +858,47 @@ async function main() {
     assert.strictEqual(compact.parentPlan.objective, 'analizza questa azienda e crea una valutazione completa');
     assert.strictEqual(compact.parentPlan.tasks[0].tool, 'finance.dcf.buildSection');
     assert.strictEqual(compact.parentPlan.tasks[0].section, 'dcf');
+    assert.strictEqual(compact.parentResults.results.t7.resultKey, 'parent:t7');
     assert.strictEqual(compact.parentResults.results.t7.builder, 'ai-assisted');
     assert.strictEqual(compact.parentResults.results.t7.sourceType, 'workbook');
     assert.deepStrictEqual(compact.parentResults.results.t7.sheets, ['DCF']);
     assert.strictEqual(compact.parentResults.results.t7.sampleActions[0].target, 'A1:H40');
+  });
+
+  await test('runtime execution memory exposes parent results without overwriting current task ids', () => {
+    const childTurn = {
+      id: 'turn-child',
+      parentTurnId: 'turn-parent',
+      objective: 'cambia la formattazione',
+      context: { activeSheet: 'DCF' },
+      results: {
+        t1: { data: { activeSheet: 'DCF', source: 'current-read' }, actions: [] }
+      }
+    };
+    const parentTurn = {
+      id: 'turn-parent',
+      plan: { objective: 'crea una valutazione completa', tasks: [] },
+      results: {
+        t1: { data: { source: 'parent-read' }, actions: [] },
+        t7: {
+          data: { builder: 'ai-assisted', section: 'dcf', sheets: ['DCF'] },
+          actions: [{ type: 'setCellRange', sheet: 'DCF', target: 'A1:H40' }]
+        }
+      }
+    };
+
+    const memory = buildExecutionMemory(
+      childTurn,
+      { id: 't2', tool: 'llm.planFormat', params: { usesResults: ['t1', 't7', 'parent:t7'] } },
+      { requestClientTool: async () => ({}) },
+      parentTurn
+    );
+
+    assert.strictEqual(memory.results.t1.data.source, 'current-read');
+    assert.strictEqual(memory.results.t7.data.section, 'dcf');
+    assert.strictEqual(memory.results['parent:t7'].data.section, 'dcf');
+    assert.strictEqual(memory.parentResults.t7.data.builder, 'ai-assisted');
+    assert.strictEqual(memory.context.parentPlan.objective, 'crea una valutazione completa');
   });
 
   await test('planner keeps short formatting requests attached to the last model', async () => {

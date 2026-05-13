@@ -337,6 +337,85 @@ function buildTurn(message, context, parentTurnId = null, options = {}) {
   };
 }
 
+function getParentContinuity(turn, parentOverride = null) {
+  if (!turn?.parentTurnId && !parentOverride) {
+    return { parentTurn: null, parentPlan: null, parentResults: null };
+  }
+  const parentTurn = parentOverride || _getTurnRef(turn.parentTurnId);
+  if (!parentTurn) {
+    return { parentTurn: null, parentPlan: null, parentResults: null };
+  }
+  return {
+    parentTurn,
+    parentPlan: parentTurn.plan || null,
+    parentResults: parentTurn.results || null
+  };
+}
+
+function collectRequestedResultIds(params = {}) {
+  const requested = new Set();
+  const add = value => {
+    if (!value || typeof value !== 'string') return;
+    requested.add(value);
+    if (value.startsWith('$results.')) {
+      const firstPathSegment = value.replace('$results.', '').split('.')[0];
+      if (firstPathSegment) requested.add(firstPathSegment);
+    }
+  };
+
+  if (Array.isArray(params.usesResults)) {
+    params.usesResults.forEach(add);
+  }
+  add(params.fromResult);
+  add(params.resultId);
+  add(params.planRef);
+
+  for (const value of Object.values(params)) {
+    if (typeof value === 'string') add(value);
+  }
+  return requested;
+}
+
+function mergeExecutionResults(currentResults = {}, parentResults = {}, task = {}) {
+  const current = currentResults && typeof currentResults === 'object' ? currentResults : {};
+  const parent = parentResults && typeof parentResults === 'object' ? parentResults : {};
+  const requested = collectRequestedResultIds(task.params || {});
+  const merged = {};
+
+  for (const [taskId, result] of Object.entries(parent)) {
+    merged[`parent:${taskId}`] = result;
+    if (!Object.prototype.hasOwnProperty.call(current, taskId) && requested.has(taskId)) {
+      merged[taskId] = result;
+    }
+  }
+
+  for (const [taskId, result] of Object.entries(current)) {
+    merged[taskId] = result;
+  }
+
+  return merged;
+}
+
+function buildExecutionMemory(turn, task, runtime = {}, parentOverride = null) {
+  const { parentPlan, parentResults } = getParentContinuity(turn, parentOverride);
+  const executionResults = mergeExecutionResults(turn?.results || {}, parentResults || {}, task || {});
+  const context = {
+    ...(turn?.context || {})
+  };
+  if (parentPlan) context.parentPlan = parentPlan;
+  if (parentResults) context.parentResults = parentResults;
+
+  return {
+    ...turn,
+    context,
+    results: executionResults,
+    parentPlan,
+    parentResults,
+    runtime,
+    currentTask: task
+  };
+}
+
 function addPendingRequest(turnId, request) {
   const turn = _getTurnRef(turnId);
   if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
@@ -664,14 +743,12 @@ async function planTurn(turnId) {
     appendLog(turnId, 'Creo il piano di esecuzione agentico...');
 
     // If this turn has a parent, include parent results in context so planner can do incremental work
-    let parentResults = null;
-    let parentPlan = null;
+    const { parentPlan, parentResults } = getParentContinuity(turn);
     if (turn.parentTurnId) {
-      const parentTurn = _getTurnRef(turn.parentTurnId) || loadTurn(turn.parentTurnId);
-      if (parentTurn) {
-        parentResults = parentTurn.results || null;
-        parentPlan = parentTurn.plan || null;
+      if (parentPlan || parentResults) {
         appendLog(turnId, `Turn collegato a parent ${turn.parentTurnId}. Risultati precedenti disponibili per pianificazione incrementale.`);
+      } else {
+        appendLog(turnId, `Turn parent ${turn.parentTurnId} non trovato. Procedo con il solo contesto corrente.`, 'warn');
       }
     }
 
@@ -790,12 +867,13 @@ async function executeSingleTaskInner(turnId, task) {
     let activeParams = { ...(task.params || {}) };
 
     while (true) {
-      result = await executeTool(task.tool, activeParams, {
-        ...turn,
-        runtime,
-        currentTask: task
-      });
-      const layout = buildLayoutFromResults(turn.results);
+      const executionMemory = buildExecutionMemory(turn, { ...task, params: activeParams }, runtime);
+      result = await executeTool(
+        task.tool,
+        activeParams,
+        executionMemory
+      );
+      const layout = buildLayoutFromResults(executionMemory.results);
       criticResult = validateTaskOutput(result, layout);
 
       const shouldRetry = isFormulaTask
@@ -1135,6 +1213,7 @@ module.exports = {
   startTurn,
   approveTurn,
   loadTurn,
+  buildExecutionMemory,
   respondToTurnRequest,
   undoTurn
 };

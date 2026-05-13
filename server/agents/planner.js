@@ -289,6 +289,7 @@ function compactParentResults(parentResults) {
     ]).slice(0, 16);
 
     results[taskId] = {
+      resultKey: `parent:${taskId}`,
       builder: data.builder,
       section: data.section || data.analystDepth?.section,
       modelType: data.modelType,
@@ -1745,7 +1746,7 @@ async function plan(objective, context, turnId, options = {}) {
     ? `\n\nPlaybook di riferimento disponibile al runtime (NON è un piano obbligatorio: usalo come set di primitive e guardrail; tu resti responsabile di decidere cosa fare):\n${JSON.stringify(domainGuide, null, 2)}`
     : '';
   const continuityInstruction = planningContext.parentPlan || planningContext.parentResults
-    ? 'CONTESTO DI CONTINUITA: questo turn ha un parent turn. Usa parentPlan, parentResults, lastModelState e recentSheets per lavorare in modo incrementale sul modello gia creato. Se la richiesta e una modifica (colori, formattazione, formule, assunzioni, fix), non ricreare il workbook: identifica i fogli/azioni gia esistenti e pianifica solo lettura minima + modifica mirata + verifica.\n'
+    ? 'CONTESTO DI CONTINUITA: questo turn ha un parent turn. Usa parentPlan, parentResults, lastModelState e recentSheets per lavorare in modo incrementale sul modello gia creato. Durante l esecuzione i risultati del parent sono disponibili come usesResults/result key "parent:<taskId>" (vedi parentResults.results.*.resultKey). Se la richiesta e una modifica (colori, formattazione, formule, assunzioni, fix), non ricreare il workbook: identifica i fogli/azioni gia esistenti e pianifica solo lettura minima + modifica mirata + verifica.\n'
     : '';
   const userPromptBase = `${conversationCtx}${recentSheets}${continuityInstruction}Crea un piano di esecuzione per: "${objective}".\n\nContesto Excel attuale (compattato):\n${JSON.stringify(planningContext, null, 2)}${domainGuideText}`;
   logger.info('[Planner] Chiamata LLM in corso...');

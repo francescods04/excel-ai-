@@ -22,7 +22,8 @@ function sweepPendingRequests() {
   }
 }
 
-setInterval(sweepPendingRequests, SWEEP_INTERVAL_MS);
+const sweepInterval = setInterval(sweepPendingRequests, SWEEP_INTERVAL_MS);
+if (typeof sweepInterval.unref === 'function') sweepInterval.unref();
 
 function waitForClientResponse(turnId, request) {
   return new Promise((resolve, reject) => {
