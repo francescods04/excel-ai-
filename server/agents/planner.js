@@ -1287,11 +1287,60 @@ function normalizeAndValidatePlan(result) {
   };
 }
 
-function shouldUseDomainPlaybookFirst(turnId, options = {}) {
+function isAiManagedPlanningCandidate(objective = '', context = {}, domainPlan = null) {
+  if (!domainPlan || !Array.isArray(domainPlan.tasks)) return false;
+  const hasDcfRuntime = domainPlan.tasks.some(task => task.tool === 'finance.dcf.buildSection');
+  if (!hasDcfRuntime) return false;
+  const lowerObjective = String(objective || '').toLowerCase();
+  const complexIntent = [
+    'valuation',
+    'valutazione',
+    'full',
+    'completa',
+    'completo',
+    'analizza',
+    'analisi',
+    'azienda',
+    'company',
+    'dcf',
+    'modello'
+  ].some(keyword => lowerObjective.includes(keyword));
+  return complexIntent || workbookHasLocalFinancials(context);
+}
+
+function shouldUseDomainPlaybookFirst(turnId, options = {}, objective = '', context = {}, domainPlan = null) {
   if (options.forceLLMPlanner) return false;
   if (options.domainPlaybookFirst === true) return true;
+  if (process.env.PLANNER_DOMAIN_FIRST === 'true') return true;
   if (process.env.PLANNER_LLM_FIRST === 'true') return false;
+  if (!turnId) return true;
+  if (process.env.AI_MANAGED_PLANNING === 'false') return true;
+  if (isAiManagedPlanningCandidate(objective, context, domainPlan)) return false;
   return true;
+}
+
+function compactDomainPlanForPrompt(domainPlan) {
+  if (!domainPlan || !Array.isArray(domainPlan.tasks)) return null;
+  const tasks = domainPlan.tasks.map(task => ({
+    id: task.id,
+    agent: task.agent,
+    tool: task.tool,
+    description: task.description,
+    section: task.params?.section,
+    deps: task.deps || [],
+    sourcePriority: task.params?.sourcePriority,
+    mode: task.params?.mode
+  }));
+  return {
+    intent: 'reference_playbook_not_a_forced_plan',
+    rules: [
+      'AI owns the plan: choose the right steps from workbook context and user objective.',
+      'Use workbook data first when local financials are present; avoid external market data unless the user named a public ticker or a needed input is missing.',
+      'For full valuation/DCF builds prefer finance.dcf.buildSection sections over low-level llm.writeFormulas microtasks.',
+      'If you deviate from this playbook, keep the plan at least as complete: sources, assumptions, WACC, DCF, sensitivity, scenarios, summary, audit, formatting.'
+    ],
+    candidateTasks: tasks
+  };
 }
 
 function isWeakFinancePlan(normalized, domainPlan) {
@@ -1362,9 +1411,9 @@ async function plan(objective, context, turnId, options = {}) {
   const domainPlan = buildFinanceFallbackPlan(objective, planningContext);
   const plannerModel = options.modelOverride || PLANNER_MODEL || undefined;
 
-  // Domain playbook: high-confidence finance intents get a rich executable plan
-  // immediately, while section builders still use AI with guarded fallbacks.
-  if (domainPlan && shouldUseDomainPlaybookFirst(turnId, options)) {
+  // Domain playbook: fast path for deterministic contexts; for live complex
+  // finance turns the LLM planner sees it as a reference and still decides.
+  if (domainPlan && shouldUseDomainPlaybookFirst(turnId, options, objective, planningContext, domainPlan)) {
     logger.info('[Planner] Domain playbook attivato');
     return normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens);
   }
@@ -1373,7 +1422,11 @@ async function plan(objective, context, turnId, options = {}) {
   const recentSheets = Array.isArray(planningContext.recentSheets) && planningContext.recentSheets.length > 0
     ? `Fogli creati di recente: ${planningContext.recentSheets.join(', ')}\n`
     : '';
-  const userPromptBase = `${conversationCtx}${recentSheets}Crea un piano di esecuzione per: "${objective}".\n\nContesto Excel attuale (compattato):\n${JSON.stringify(planningContext, null, 2)}`;
+  const domainGuide = compactDomainPlanForPrompt(domainPlan);
+  const domainGuideText = domainGuide
+    ? `\n\nPlaybook di riferimento disponibile al runtime (NON è un piano obbligatorio: usalo come set di primitive e guardrail; tu resti responsabile di decidere cosa fare):\n${JSON.stringify(domainGuide, null, 2)}`
+    : '';
+  const userPromptBase = `${conversationCtx}${recentSheets}Crea un piano di esecuzione per: "${objective}".\n\nContesto Excel attuale (compattato):\n${JSON.stringify(planningContext, null, 2)}${domainGuideText}`;
   logger.info('[Planner] Chiamata LLM in corso...');
 
   // Attempt streaming first if turnId is provided (for progress UX)
@@ -1462,5 +1515,7 @@ async function plan(objective, context, turnId, options = {}) {
 module.exports = {
   plan,
   enforceWorkbookFirstPlan,
-  workbookHasLocalFinancials
+  workbookHasLocalFinancials,
+  shouldUseDomainPlaybookFirst,
+  compactDomainPlanForPrompt
 };

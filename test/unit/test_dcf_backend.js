@@ -175,11 +175,11 @@ async function main() {
     assert.deepStrictEqual(dcfSections, ['shell', 'sources', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'scenarios', 'summary', 'audit', 'format']);
   });
 
-  await test('planner uses domain playbook immediately for DCF turn runtime', async () => {
+  await test('planner can force domain playbook for deterministic DCF runtime tests', async () => {
     const plan = await planner.plan('crea un dcf per nvdia', {
       activeSheet: 'Sheet1',
       workbookSheets: ['Sheet1']
-    }, 'turn-test-dcf');
+    }, 'turn-test-dcf', { domainPlaybookFirst: true });
 
     assert.ok(plan.tasks.some(task => task.tool === 'yahoo.quote' && task.params.ticker === 'NVDA'));
     assert.ok(plan.tasks.some(task => task.tool === 'finance.dcf.buildSection' && task.params.section === 'audit'));
@@ -295,6 +295,51 @@ async function main() {
       assert.strictEqual(task.params.companyName, undefined);
       assert.strictEqual(task.params.localCompanyType, 'private');
     });
+  });
+
+  await test('runtime planner lets AI decide complex valuation plans before playbook fallback', async () => {
+    const domainPlan = await planner.plan(
+      'analizza questa azienda e fammi una full valuation completa',
+      localItalianContext
+    );
+    const previous = process.env.AI_MANAGED_PLANNING;
+    try {
+      delete process.env.AI_MANAGED_PLANNING;
+      assert.strictEqual(
+        planner.shouldUseDomainPlaybookFirst(
+          'turn-test-ai-managed',
+          {},
+          'analizza questa azienda e fammi una full valuation completa',
+          localItalianContext,
+          domainPlan
+        ),
+        false
+      );
+      assert.strictEqual(
+        planner.shouldUseDomainPlaybookFirst(
+          null,
+          {},
+          'analizza questa azienda e fammi una full valuation completa',
+          localItalianContext,
+          domainPlan
+        ),
+        true
+      );
+      process.env.AI_MANAGED_PLANNING = 'false';
+      assert.strictEqual(
+        planner.shouldUseDomainPlaybookFirst(
+          'turn-test-ai-managed',
+          {},
+          'analizza questa azienda e fammi una full valuation completa',
+          localItalianContext,
+          domainPlan
+        ),
+        true
+      );
+    } finally {
+      if (previous === undefined) delete process.env.AI_MANAGED_PLANNING;
+      else process.env.AI_MANAGED_PLANNING = previous;
+    }
   });
 
   await test('DCF template creates formulas for valuation and sensitivity', () => {
