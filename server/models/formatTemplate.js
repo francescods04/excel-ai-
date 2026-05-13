@@ -230,36 +230,72 @@ function classifyFormatIntent(params = {}) {
 
 function collectWorkbookSheets(params = {}, memory = {}) {
   const byName = new Map();
+  const resultFilter = Array.isArray(params.usesResults) && params.usesResults.length > 0
+    ? new Set(params.usesResults)
+    : null;
+  const explicitSheets = Array.isArray(params.sheets)
+    ? params.sheets.filter(Boolean).map(String)
+    : [];
+  const seedSheets = [
+    ...explicitSheets,
+    ...(params.sheet ? [String(params.sheet)] : [])
+  ];
+  const scope = params.scope === 'workbook' ? 'workbook' : 'sheet';
 
   function addSheet(sheet) {
-    if (!sheet || !sheet.name) return;
-    byName.set(sheet.name, {
-      name: sheet.name,
-      usedRange: sheet.usedRange || null,
-      rowCount: Number(sheet.rowCount) || 0,
-      columnCount: Number(sheet.columnCount) || 0,
-      preview: Array.isArray(sheet.preview) ? sheet.preview : []
+    const name = sheet?.name || sheet?.sheetName || sheet?.sheet || sheet?.targetSheet;
+    if (!name) return;
+    const existing = byName.get(name) || {};
+    byName.set(name, {
+      name,
+      usedRange: sheet.usedRange || existing.usedRange || null,
+      rowCount: Number(sheet.rowCount) || existing.rowCount || 0,
+      columnCount: Number(sheet.columnCount) || existing.columnCount || 0,
+      preview: Array.isArray(sheet.preview) ? sheet.preview : (existing.preview || [])
     });
   }
 
   const results = memory?.results && typeof memory.results === 'object' ? memory.results : {};
-  for (const result of Object.values(results)) {
+  for (const [id, result] of Object.entries(results)) {
+    if (resultFilter && !resultFilter.has(id)) continue;
     const data = result?.data || result;
     if (Array.isArray(data?.sheets)) data.sheets.forEach(addSheet);
     if (data?.allSheetsData && typeof data.allSheetsData === 'object') {
       for (const [name, info] of Object.entries(data.allSheetsData)) addSheet({ name, ...info });
     }
+    if (data?.sheetName || data?.name) {
+      addSheet({ name: data.sheetName || data.name, rowCount: data.rowCount || 40, columnCount: data.columnCount || 8, preview: data.preview || [] });
+    }
+    const actions = Array.isArray(result?.actions) ? result.actions : (Array.isArray(data?.actions) ? data.actions : []);
+    for (const action of actions) {
+      if (action?.type === 'createSheet') {
+        addSheet({ name: action.sheet || action.name || action.target, rowCount: 40, columnCount: 8, preview: [] });
+      } else if (action?.sheet) {
+        addSheet({ name: action.sheet, rowCount: 40, columnCount: 8, preview: [] });
+      }
+    }
   }
 
-  if (memory?.context?.allSheetsData && typeof memory.context.allSheetsData === 'object') {
+  const includeContext = explicitSheets.length === 0 && (
+    scope === 'workbook' ||
+    (seedSheets.length === 0 && byName.size === 0)
+  );
+  if (includeContext && memory?.context?.allSheetsData && typeof memory.context.allSheetsData === 'object') {
     for (const [name, info] of Object.entries(memory.context.allSheetsData)) addSheet({ name, ...info });
   }
 
-  const explicitSheets = Array.isArray(params.sheets) ? params.sheets : [];
   explicitSheets.forEach(name => addSheet({ name, rowCount: 40, columnCount: 8, preview: [] }));
   if (params.sheet && byName.size === 0) addSheet({ name: params.sheet, rowCount: 40, columnCount: 8, preview: [] });
 
-  return Array.from(byName.values()).filter(sheet => sheet.rowCount > 0 || sheet.usedRange || sheet.name === params.sheet);
+  let sheets = Array.from(byName.values()).filter(sheet => sheet.rowCount > 0 || sheet.usedRange || sheet.name === params.sheet);
+  if (scope === 'sheet' && seedSheets.length > 0) {
+    const allowed = new Set(seedSheets.map(name => name.toLowerCase()));
+    sheets = sheets.filter(sheet => allowed.has(String(sheet.name).toLowerCase()));
+  } else if (scope === 'workbook' && explicitSheets.length > 0) {
+    const allowed = new Set(explicitSheets.map(name => name.toLowerCase()));
+    sheets = sheets.filter(sheet => allowed.has(String(sheet.name).toLowerCase()));
+  }
+  return sheets;
 }
 
 function nonEmptyCount(row) {

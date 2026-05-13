@@ -464,7 +464,10 @@ function cleanupExpiredCache() {
 
 function buildAgenticDcfPlan(objective, context, equityIntent = {}) {
   const ticker = equityIntent.ticker || null;
-  const companyName = equityIntent.companyName || ticker || 'Target Company';
+  const companyName = equityIntent.companyName || ticker || null;
+  const workbookName = companyName || context?.activeSheet || 'Workbook';
+  const hasLocalFinancials = workbookHasLocalFinancials(context);
+  const localPrivate = workbookLooksPrivate(context);
   const tasks = [
     {
       id: 't1',
@@ -480,7 +483,7 @@ function buildAgenticDcfPlan(objective, context, equityIntent = {}) {
       agent: 'data',
       tool: 'workbook.buildGraph',
       description: 'Build WorkbookGraph for cross-sheet formulas, sheet roles, existing data and model risks',
-      params: { fromResult: 't1', workbookName: companyName, source: 'planner.dcf_prefetch' },
+      params: { fromResult: 't1', workbookName, source: 'planner.dcf_prefetch' },
       deps: ['t1'],
       requiresApproval: false
     }
@@ -524,13 +527,15 @@ function buildAgenticDcfPlan(objective, context, equityIntent = {}) {
   }
 
   const baseParams = {
-    companyName,
     objective,
     projectionYears: 5,
     mode: 'ai_assisted',
     usesResults: dataDeps
   };
+  if (companyName) baseParams.companyName = companyName;
   if (ticker) baseParams.ticker = ticker;
+  if (hasLocalFinancials) baseParams.sourcePriority = 'workbook_first';
+  if (hasLocalFinancials && localPrivate && !ticker) baseParams.localCompanyType = 'private';
 
   const sections = [
     {
@@ -608,13 +613,16 @@ function buildAgenticDcfPlan(objective, context, equityIntent = {}) {
     nextId++;
   }
 
-  logger.info(`[Planner] Agentic DCF plan generated for ${ticker || companyName} (${tasks.length} tasks)`);
+  logger.info(`[Planner] Agentic DCF plan generated for ${ticker || companyName || 'workbook financials'} (${tasks.length} tasks)`);
   return { objective, tasks };
 }
 
 function buildDcfCompletionPlan(objective, context, equityIntent = {}) {
   const ticker = equityIntent.ticker || null;
-  const companyName = equityIntent.companyName || ticker || 'Target Company';
+  const companyName = equityIntent.companyName || ticker || null;
+  const workbookName = companyName || context?.activeSheet || 'Workbook';
+  const hasLocalFinancials = workbookHasLocalFinancials(context);
+  const localPrivate = workbookLooksPrivate(context);
   const existingSheets = context?.workbookSheets || [];
   const hasAllDcfSheets = ['Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit'].every(sheet =>
     existingSheets.some(existing => existing.toLowerCase() === sheet.toLowerCase())
@@ -635,7 +643,7 @@ function buildDcfCompletionPlan(objective, context, equityIntent = {}) {
       agent: 'data',
       tool: 'workbook.buildGraph',
       description: 'Build WorkbookGraph to locate incomplete sheets, broken formulas and reusable model inputs',
-      params: { fromResult: 't1', workbookName: companyName, source: 'planner.dcf_completion' },
+      params: { fromResult: 't1', workbookName, source: 'planner.dcf_completion' },
       deps: ['t1'],
       requiresApproval: false
     }
@@ -670,13 +678,15 @@ function buildDcfCompletionPlan(objective, context, equityIntent = {}) {
   }
 
   const baseParams = {
-    companyName,
     objective,
     projectionYears: 5,
     mode: 'template',
     usesResults: dataDeps
   };
+  if (companyName) baseParams.companyName = companyName;
   if (ticker) baseParams.ticker = ticker;
+  if (hasLocalFinancials) baseParams.sourcePriority = 'workbook_first';
+  if (hasLocalFinancials && localPrivate && !ticker) baseParams.localCompanyType = 'private';
 
   let previousDeps = dataDeps;
   if (!hasAllDcfSheets) {
@@ -719,7 +729,7 @@ function buildDcfCompletionPlan(objective, context, equityIntent = {}) {
     nextId++;
   }
 
-  logger.info(`[Planner] DCF completion/repair plan generated for ${ticker || companyName}`);
+  logger.info(`[Planner] DCF completion/repair plan generated for ${ticker || companyName || 'workbook financials'}`);
   return { objective, tasks };
 }
 
@@ -738,7 +748,18 @@ function buildFinanceFallbackPlan(objective, context) {
   const wantsCompletion = ['completa', 'completo', 'complete', 'finish', 'finisci', 'problemi', 'problems', 'repair'].some(k => lowerObjective.includes(k));
   const wantsNewModel = equityIntent.hasBuildIntent || ['crea', 'costruisci', 'build', 'new', 'nuovo'].some(keyword => lowerObjective.includes(keyword));
   const isDcf = equityIntent.model === 'dcf' || lowerObjective.includes('dcf');
-  const isFinanceModel = !!equityIntent.model || ['dcf', 'wacc', 'lbo', 'valuation', 'forecast', 'modello'].some(keyword => lowerObjective.includes(keyword));
+  const hasLocalFinancials = workbookHasLocalFinancials(context);
+  const wantsValuation = [
+    'valuation',
+    'valutazione',
+    'valuta questa azienda',
+    'valutami questa azienda',
+    'analizza questa azienda',
+    'analisi azienda',
+    'full valuation'
+  ].some(keyword => lowerObjective.includes(keyword));
+  const isCompanyAnalysis = hasLocalFinancials && ['azienda', 'company', 'business', 'analizza', 'analisi'].some(keyword => lowerObjective.includes(keyword));
+  const isFinanceModel = !!equityIntent.model || wantsValuation || isCompanyAnalysis || ['dcf', 'wacc', 'lbo', 'valuation', 'valutazione', 'forecast', 'modello'].some(keyword => lowerObjective.includes(keyword));
   const isWacc = lowerObjective.includes('wacc') && !lowerObjective.includes('dcf');
   const isSensitivity = ['sensitivity', 'sensitività', 'scenario'].some(k => lowerObjective.includes(k));
   const isFormat = ['formatta', 'format', 'formatting', 'stile'].some(k => lowerObjective.includes(k));
@@ -758,6 +779,23 @@ function buildFinanceFallbackPlan(objective, context) {
   }
 
   if (isDcf && wantsCompletion && existingModelSheets.length === 0) {
+    return buildAgenticDcfPlan(objective, context, equityIntent);
+  }
+
+  const shouldBuildFullValuation = !isModification && !isWacc && !isSensitivity && !isFormat && (
+    isDcf ||
+    wantsValuation ||
+    (hasLocalFinancials && isFinanceModel)
+  ) && (
+    wantsNewModel ||
+    wantsCompletion ||
+    hasLocalFinancials ||
+    equityIntent.isPublicCompanyTarget ||
+    lowerObjective.includes('full')
+  );
+
+  if (shouldBuildFullValuation) {
+    logger.info('[Planner] Full valuation request routed to agentic DCF workbook-first pipeline');
     return buildAgenticDcfPlan(objective, context, equityIntent);
   }
 
@@ -898,9 +936,10 @@ function buildFinanceFallbackPlan(objective, context) {
 
   if (!isFinanceModel) return null;
 
-  const shouldBuildFullDcf = isDcf && !isModification && (
+  const shouldBuildFullDcf = !isModification && (isDcf || wantsValuation || hasLocalFinancials) && (
     wantsNewModel ||
     wantsCompletion ||
+    hasLocalFinancials ||
     equityIntent.isPublicCompanyTarget ||
     lowerObjective.includes('full') ||
     lowerObjective.includes('completo')
@@ -1017,7 +1056,14 @@ function buildFinanceFallbackPlan(objective, context) {
         agent: 'format',
         tool: 'llm.planFormat',
         description: 'Apply institutional IB formatting',
-        params: { sheet: 'DCF', objective, mode: 'institutional_finance' },
+        params: {
+          sheet: 'DCF',
+          sheets: desiredSheets,
+          objective,
+          mode: 'institutional_finance',
+          scope: 'workbook',
+          usesResults: [...Object.values(sheetTaskIds), ...formulaDeps]
+        },
         deps: formulaDeps,
         requiresApproval: false
       });
@@ -1269,6 +1315,14 @@ function isWeakFinancePlan(normalized, domainPlan) {
     .filter(task => task.tool === 'finance.dcf.buildSection')
     .map(task => task.params?.section)
     .filter(Boolean);
+  const legacyFormulaBuilds = normalized.tasks.filter(task =>
+    task.tool === 'llm.writeFormulas' && task.params?.mode === 'build_finance_model'
+  );
+  const legacyDcfLayout = normalized.tasks.some(task =>
+    task.tool === 'llm.planLayout' && String(task.params?.model || '').toLowerCase() === 'dcf'
+  );
+  if (normalizedSections.length === 0 && (legacyFormulaBuilds.length >= 3 || legacyDcfLayout)) return true;
+
   const hasCoreDcfSections = ['assumptions', 'wacc', 'dcf', 'sensitivity'].every(section =>
     normalizedSections.includes(section)
   );

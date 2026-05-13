@@ -273,6 +273,30 @@ async function main() {
     assert.strictEqual(dcfTask.params.sourcePriority, 'workbook_first');
   });
 
+  await test('planner routes local full valuation to workbook-first DCF builder', async () => {
+    const plan = await planner.plan(
+      'analizza questa azienda e fammi una full valuation completa',
+      localItalianContext
+    );
+
+    assert.ok(plan.tasks.some(task => task.tool === 'workbook.buildGraph'));
+    assert.ok(!plan.tasks.some(task => task.tool === 'llm.planLayout'));
+    assert.ok(!plan.tasks.some(task => task.tool === 'llm.writeFormulas' && task.params.mode === 'build_finance_model'));
+    assert.ok(!plan.tasks.some(task => task.tool.startsWith('yahoo.')));
+
+    const dcfTasks = plan.tasks.filter(task => task.tool === 'finance.dcf.buildSection');
+    assert.deepStrictEqual(
+      dcfTasks.map(task => task.params.section),
+      ['shell', 'sources', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'scenarios', 'summary', 'audit', 'format']
+    );
+    dcfTasks.forEach(task => {
+      assert.strictEqual(task.params.sourcePriority, 'workbook_first');
+      assert.strictEqual(task.params.ticker, undefined);
+      assert.strictEqual(task.params.companyName, undefined);
+      assert.strictEqual(task.params.localCompanyType, 'private');
+    });
+  });
+
   await test('DCF template creates formulas for valuation and sensitivity', () => {
     const dcf = buildDcfSection({ section: 'dcf', ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
     assert.strictEqual(dcf.actions.length, 1);
@@ -368,6 +392,40 @@ async function main() {
     assert.strictEqual(plan.data.strategy, 'semantic_restyle');
     assert.ok(plan.actions.some(action => action.sheet === 'Sheet1' && action.target === 'A1:D1' && action.options.backgroundColor === '#14532D'));
     assert.ok(plan.actions.some(action => action.sheet === 'Sheet1' && action.target === 'A3:D3' && action.options.backgroundColor === '#D9EAD3'));
+  });
+
+  await test('formatter targets explicit model sheets without blanket-formatting source data', () => {
+    const memory = {
+      context: {
+        allSheetsData: {
+          Sheet1: {
+            usedRange: 'Sheet1!A1:DF734',
+            rowCount: 734,
+            columnCount: 110,
+            preview: [['Local financial source data']]
+          }
+        }
+      },
+      results: {
+        t3: { data: { sheetName: 'Assumptions' }, actions: [{ type: 'createSheet', sheet: 'Assumptions' }] },
+        t4: { actions: [{ type: 'createSheet', sheet: 'WACC' }] },
+        t7: { actions: [{ type: 'setCellValue', sheet: 'DCF', target: 'A1', value: 'DCF' }] },
+        t8: { actions: [{ type: 'setCellValue', sheet: 'Sensitivity', target: 'A1', value: 'Sensitivity' }] }
+      }
+    };
+    const plan = buildProfessionalFormatPlan({
+      sheet: 'DCF',
+      sheets: ['Assumptions', 'WACC', 'DCF', 'Sensitivity'],
+      objective: 'Apply institutional IB formatting',
+      mode: 'institutional_finance',
+      scope: 'workbook',
+      usesResults: ['t3', 't4', 't7', 't8']
+    }, memory);
+
+    assert.strictEqual(plan.data.sheetCount, 4);
+    assert.ok(plan.actions.some(action => action.sheet === 'Assumptions'));
+    assert.ok(plan.actions.some(action => action.sheet === 'DCF'));
+    assert.ok(!plan.actions.some(action => action.sheet === 'Sheet1'));
   });
 
   await test('format plan task is non-mutating and applyFormat applies planned actions once', async () => {
