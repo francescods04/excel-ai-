@@ -198,7 +198,7 @@ function makeSetCellRangeAction(sheet, cells) {
 }
 
 function buildShellActions(inputs) {
-  const sheets = ['Assumptions', 'WACC', 'DCF', 'Sensitivity'];
+  const sheets = ['Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit'];
   const actions = sheets.map(name => ({ type: 'createSheet', name, sheet: name }));
   for (const sheet of sheets) {
     const cells = {};
@@ -461,20 +461,265 @@ function buildSensitivityActions() {
   return [makeSetCellRangeAction('Sensitivity', cells)];
 }
 
+function buildSourcesActions(inputs) {
+  const cells = {};
+  const money = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.currency });
+  const pct = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.percent });
+  const multiple = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.multiple });
+  const number = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.number });
+
+  set(cells, 'A1', cell(`${inputs.companyName} (${inputs.ticker}) - Source Book`, STYLE.title));
+  set(cells, 'A3', cell('Model Scope', STYLE.section));
+  set(cells, 'A4', cell('Company', STYLE.label));
+  set(cells, 'B4', cell(inputs.companyName, STYLE.input));
+  set(cells, 'A5', cell('Ticker', STYLE.label));
+  set(cells, 'B5', cell(inputs.ticker, STYLE.input));
+  set(cells, 'A6', cell('Valuation Date', STYLE.label));
+  set(cells, 'B6', cell(new Date().toISOString().slice(0, 10), STYLE.input));
+  set(cells, 'A7', cell('Units', STYLE.label));
+  set(cells, 'B7', cell('$ in millions except per-share data', STYLE.input));
+
+  set(cells, 'A10', cell('Source Register', STYLE.section));
+  set(cells, 'A11', cell('Input Area', STYLE.header));
+  set(cells, 'B11', cell('Primary Source', STYLE.header));
+  set(cells, 'C11', cell('Workbook Cell', STYLE.header));
+  set(cells, 'D11', cell('Status', STYLE.header));
+  [
+    ['Base Revenue', 'Yahoo fundamentals / workbook context', 'Assumptions!B10'],
+    ['EBITDA Margin', 'Yahoo fundamentals / analyst fallback', 'Assumptions!B11'],
+    ['Cash & Debt', 'Yahoo fundamentals / balance-sheet fallback', 'Assumptions!B33:B34'],
+    ['Shares & Share Price', 'Yahoo quote / key statistics', 'Assumptions!B35:B36'],
+    ['Beta', 'Yahoo statistics / analyst fallback', 'Assumptions!B28'],
+    ['WACC Assumptions', 'Market data + visible analyst assumptions', 'Assumptions!B26:B30'],
+    ['Terminal Growth', 'Long-term GDP / inflation sanity range', 'Assumptions!B23']
+  ].forEach(([label, source, ref], index) => {
+    const row = 12 + index;
+    set(cells, `A${row}`, cell(label, STYLE.label));
+    set(cells, `B${row}`, cell(source, STYLE.label));
+    set(cells, `C${row}`, cell(ref, STYLE.check));
+    set(cells, `D${row}`, cell('Review', STYLE.check));
+  });
+
+  set(cells, 'A22', cell('Key Data Extract', STYLE.section));
+  set(cells, 'A23', cell('Metric', STYLE.header));
+  set(cells, 'B23', cell('Value', STYLE.header));
+  set(cells, 'C23', cell('Used In', STYLE.header));
+  const extracts = [
+    ['Revenue ($M)', '=Assumptions!$B$10', 'DCF revenue build', money],
+    ['EBITDA Margin (%)', '=Assumptions!$B$11', 'DCF operating build', pct],
+    ['Tax Rate (%)', '=Assumptions!$B$12', 'NOPAT', pct],
+    ['Beta', '=Assumptions!$B$28', 'CAPM', multiple],
+    ['Cash ($M)', '=Assumptions!$B$33', 'Equity bridge', money],
+    ['Debt ($M)', '=Assumptions!$B$34', 'Equity bridge', money],
+    ['Shares (M)', '=Assumptions!$B$35', 'Per-share value', number],
+    ['Current Share Price ($)', '=Assumptions!$B$36', 'Upside/downside', fmt(STYLE.formula, { numberFormat: NUM_FORMATS.perShare })]
+  ];
+  extracts.forEach(([label, valueFormula, usedIn, style], index) => {
+    const row = 24 + index;
+    set(cells, `A${row}`, cell(label, STYLE.label));
+    set(cells, `B${row}`, formula(valueFormula, style));
+    set(cells, `C${row}`, cell(usedIn, STYLE.label));
+  });
+
+  set(cells, 'A35', cell('Data Quality Checklist', STYLE.section));
+  set(cells, 'A36', cell('Check', STYLE.header));
+  set(cells, 'B36', cell('Result', STYLE.header));
+  set(cells, 'C36', cell('Action', STYLE.header));
+  const checks = [
+    ['Revenue available', '=IF(Assumptions!$B$10>0,"OK","Review")', 'Confirm latest annual revenue'],
+    ['Shares available', '=IF(Assumptions!$B$35>0,"OK","Review")', 'Confirm diluted shares'],
+    ['WACC sane', '=IF(AND(WACC!$B$19>0.05,WACC!$B$19<0.20),"OK","Review")', 'Review capital costs'],
+    ['Terminal spread positive', '=IF(WACC!$B$19>Assumptions!$B$23,"OK","Review")', 'WACC must exceed terminal growth']
+  ];
+  checks.forEach(([label, resultFormula, action], index) => {
+    const row = 37 + index;
+    set(cells, `A${row}`, cell(label, STYLE.label));
+    set(cells, `B${row}`, formula(resultFormula, STYLE.check));
+    set(cells, `C${row}`, cell(action, STYLE.label));
+  });
+
+  return [makeSetCellRangeAction('Sources', cells)];
+}
+
+function buildScenariosActions() {
+  const cells = {};
+  const pctInput = fmt(STYLE.input, { numberFormat: NUM_FORMATS.percent });
+  const pctFormula = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.percent });
+  const perShare = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.perShare });
+  const money = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.currency });
+
+  set(cells, 'A1', cell('Scenario Analysis', STYLE.title));
+  set(cells, 'A3', cell('Operating Case Matrix', STYLE.section));
+  ['Scenario', 'Revenue Haircut / Uplift', 'EBITDA Margin Delta', 'WACC', 'Terminal Growth', 'Implied Share Price', 'Upside / Downside'].forEach((label, index) => {
+    set(cells, `${col(index)}4`, cell(label, STYLE.header));
+  });
+
+  const rows = [
+    ['Downside', -0.10, -0.03, 0.11, 0.015],
+    ['Base', 0.00, 0.00, 0.10, 0.025],
+    ['Upside', 0.10, 0.03, 0.09, 0.035]
+  ];
+  rows.forEach(([name, revenueAdj, marginAdj, wacc, growth], index) => {
+    const row = 5 + index;
+    set(cells, `A${row}`, cell(name, STYLE.label));
+    set(cells, `B${row}`, cell(revenueAdj, pctInput));
+    set(cells, `C${row}`, cell(marginAdj, pctInput));
+    set(cells, `D${row}`, cell(wacc, pctInput));
+    set(cells, `E${row}`, cell(growth, pctInput));
+    set(cells, `F${row}`, formula(`=IFERROR(((SUM(DCF!$C$24:$G$24)*(1+B${row})+DCF!$G$20*(1+C${row})*(1+E${row})/(D${row}-E${row})/(1+D${row})^5)+DCF!$H$31-DCF!$H$32)/DCF!$H$34,0)`, perShare));
+    set(cells, `G${row}`, formula(`=IFERROR(F${row}/DCF!$H$37-1,0)`, pctFormula));
+  });
+
+  set(cells, 'A11', cell('Valuation Bridge by Case', STYLE.section));
+  ['Metric', 'Downside', 'Base', 'Upside'].forEach((label, index) => {
+    set(cells, `${col(index)}12`, cell(label, STYLE.header));
+  });
+  const bridgeRows = [
+    ['Enterprise Value ($M)', '=IFERROR(SUM(DCF!$C$24:$G$24)*(1+B5)+DCF!$G$20*(1+C5)*(1+E5)/(D5-E5)/(1+D5)^5,0)', '=DCF!$H$30', '=IFERROR(SUM(DCF!$C$24:$G$24)*(1+B7)+DCF!$G$20*(1+C7)*(1+E7)/(D7-E7)/(1+D7)^5,0)'],
+    ['Equity Value ($M)', '=B13+DCF!$H$31-DCF!$H$32', '=DCF!$H$33', '=D13+DCF!$H$31-DCF!$H$32'],
+    ['Implied Share Price ($)', '=B14/DCF!$H$34', '=DCF!$H$35', '=D14/DCF!$H$34'],
+    ['Current Share Price ($)', '=DCF!$H$37', '=DCF!$H$37', '=DCF!$H$37'],
+    ['Premium / (Discount) (%)', '=IFERROR(B15/B16-1,0)', '=IFERROR(C15/C16-1,0)', '=IFERROR(D15/D16-1,0)']
+  ];
+  bridgeRows.forEach(([label, downside, base, upside], index) => {
+    const row = 13 + index;
+    set(cells, `A${row}`, cell(label, STYLE.label));
+    const style = row <= 14 ? money : (row <= 16 ? fmt(STYLE.formula, { numberFormat: NUM_FORMATS.perShare }) : pctFormula);
+    set(cells, `B${row}`, formula(downside, style));
+    set(cells, `C${row}`, formula(base, style));
+    set(cells, `D${row}`, formula(upside, style));
+  });
+
+  return [makeSetCellRangeAction('Scenarios', cells)];
+}
+
+function buildSummaryActions(inputs) {
+  const cells = {};
+  const money = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.currency });
+  const pct = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.percent });
+  const perShare = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.perShare });
+
+  set(cells, 'A1', cell(`${inputs.companyName} (${inputs.ticker}) - Valuation Summary`, STYLE.title));
+  set(cells, 'A3', cell('Executive Valuation Output', STYLE.section));
+  set(cells, 'A4', cell('Metric', STYLE.header));
+  set(cells, 'B4', cell('Value', STYLE.header));
+  set(cells, 'C4', cell('Source', STYLE.header));
+  const outputs = [
+    ['Enterprise Value ($M)', '=DCF!$H$30', 'DCF!H30', money],
+    ['Equity Value ($M)', '=DCF!$H$33', 'DCF!H33', money],
+    ['Implied Share Price ($)', '=DCF!$H$35', 'DCF!H35', perShare],
+    ['Current Share Price ($)', '=DCF!$H$37', 'DCF!H37', perShare],
+    ['Premium / (Discount) (%)', '=DCF!$H$38', 'DCF!H38', pct],
+    ['WACC (%)', '=WACC!$B$19', 'WACC!B19', pct],
+    ['Terminal Growth (%)', '=Assumptions!$B$23', 'Assumptions!B23', pct]
+  ];
+  outputs.forEach(([label, valueFormula, source, style], index) => {
+    const row = 5 + index;
+    set(cells, `A${row}`, cell(label, row === 7 ? STYLE.total : STYLE.label));
+    set(cells, `B${row}`, formula(valueFormula, row === 7 ? fmt(STYLE.total, { numberFormat: NUM_FORMATS.perShare }) : style));
+    set(cells, `C${row}`, cell(source, STYLE.check));
+  });
+
+  set(cells, 'A15', cell('Scenario Snapshot', STYLE.section));
+  ['Scenario', 'Implied Share Price', 'Upside / Downside'].forEach((label, index) => {
+    set(cells, `${col(index)}16`, cell(label, STYLE.header));
+  });
+  ['Downside', 'Base', 'Upside'].forEach((label, index) => {
+    const row = 17 + index;
+    const scenarioRow = 5 + index;
+    set(cells, `A${row}`, cell(label, STYLE.label));
+    set(cells, `B${row}`, formula(`=Scenarios!$F$${scenarioRow}`, perShare));
+    set(cells, `C${row}`, formula(`=Scenarios!$G$${scenarioRow}`, pct));
+  });
+
+  set(cells, 'A23', cell('Key Operating Assumptions', STYLE.section));
+  set(cells, 'A24', cell('Driver', STYLE.header));
+  set(cells, 'B24', cell('Base Case', STYLE.header));
+  set(cells, 'C24', cell('Model Link', STYLE.header));
+  const assumptions = [
+    ['Base Revenue ($M)', '=Assumptions!$B$10', 'Assumptions!B10', money],
+    ['EBITDA Margin (%)', '=Assumptions!$B$11', 'Assumptions!B11', pct],
+    ['Tax Rate (%)', '=Assumptions!$B$12', 'Assumptions!B12', pct],
+    ['CapEx % Revenue (%)', '=Assumptions!$B$14', 'Assumptions!B14', pct],
+    ['Shares Outstanding (M)', '=Assumptions!$B$35', 'Assumptions!B35', fmt(STYLE.formula, { numberFormat: NUM_FORMATS.shares })]
+  ];
+  assumptions.forEach(([label, valueFormula, source, style], index) => {
+    const row = 25 + index;
+    set(cells, `A${row}`, cell(label, STYLE.label));
+    set(cells, `B${row}`, formula(valueFormula, style));
+    set(cells, `C${row}`, cell(source, STYLE.check));
+  });
+
+  return [makeSetCellRangeAction('Summary', cells)];
+}
+
+function buildAuditActions() {
+  const cells = {};
+
+  set(cells, 'A1', cell('Model Audit & QA', STYLE.title));
+  set(cells, 'A3', cell('Readiness Checks', STYLE.section));
+  set(cells, 'A4', cell('Check', STYLE.header));
+  set(cells, 'B4', cell('Result', STYLE.header));
+  set(cells, 'C4', cell('Why It Matters', STYLE.header));
+  const checks = [
+    ['Assumptions populated', '=IF(COUNTA(Assumptions!$A$1:$B$37)>=45,"OK","Review")', 'DCF needs a complete assumption spine'],
+    ['WACC calculated', '=IF(AND(WACC!$B$19>0,WACC!$B$19<0.30),"OK","Review")', 'Valuation cannot discount cash flows without WACC'],
+    ['Terminal spread positive', '=IF(WACC!$B$19>Assumptions!$B$23,"OK","Review")', 'Terminal value breaks if WACC is below growth'],
+    ['Enterprise value positive', '=IF(DCF!$H$30>0,"OK","Review")', 'DCF output should produce positive enterprise value'],
+    ['Share count positive', '=IF(DCF!$H$34>0,"OK","Review")', 'Per-share value needs diluted shares'],
+    ['Bridge check clean', '=IF(ABS(DCF!$H$40)<1,"OK","Review")', 'EV to equity bridge should tie'],
+    ['Sensitivity grid populated', '=IF(COUNTA(Sensitivity!$C$5:$G$9)>=25,"OK","Review")', 'Investment committee needs range, not point estimate'],
+    ['Scenario cases populated', '=IF(COUNTA(Scenarios!$F$5:$G$7)>=6,"OK","Review")', 'Downside/base/upside cases should be visible']
+  ];
+  checks.forEach(([label, resultFormula, why], index) => {
+    const row = 5 + index;
+    set(cells, `A${row}`, cell(label, STYLE.label));
+    set(cells, `B${row}`, formula(resultFormula, STYLE.check));
+    set(cells, `C${row}`, cell(why, STYLE.label));
+  });
+
+  set(cells, 'A16', cell('Overall Status', STYLE.section));
+  set(cells, 'A17', cell('Model Status', STYLE.total));
+  set(cells, 'B17', formula('=IF(COUNTIF($B$5:$B$12,"Review")=0,"Ready for review","Needs analyst review")', STYLE.total));
+  set(cells, 'A19', cell('Recommended Next Analyst Steps', STYLE.section));
+  [
+    'Validate latest fiscal-year statements against the company filing.',
+    'Replace fallback assumptions with management guidance or consensus where available.',
+    'Add segment-level revenue build if the workbook has segment data.',
+    'Cross-check implied valuation against public comps before presenting.'
+  ].forEach((text, index) => {
+    set(cells, `A${20 + index}`, cell(`${index + 1}. ${text}`, STYLE.label));
+  });
+
+  return [makeSetCellRangeAction('Audit', cells)];
+}
+
 function buildFormatActions() {
   const ranges = [
+    ['Summary', 'A1:C32', { horizontalAlignment: 'Left' }],
+    ['Sources', 'A1:D42', { horizontalAlignment: 'Left' }],
     ['Assumptions', 'A1:A40', { horizontalAlignment: 'Left' }],
     ['WACC', 'A1:A22', { horizontalAlignment: 'Left' }],
     ['DCF', 'A1:A40', { horizontalAlignment: 'Left' }],
     ['Sensitivity', 'A1:A18', { horizontalAlignment: 'Left' }],
+    ['Scenarios', 'A1:G18', { horizontalAlignment: 'Left' }],
+    ['Audit', 'A1:C24', { horizontalAlignment: 'Left' }],
+    ['Summary', 'B1:C32', { horizontalAlignment: 'Right' }],
+    ['Sources', 'B1:D42', { horizontalAlignment: 'Right' }],
     ['Assumptions', 'B1:B40', { horizontalAlignment: 'Right' }],
     ['WACC', 'B1:B22', { horizontalAlignment: 'Right' }],
     ['DCF', 'B1:H40', { horizontalAlignment: 'Right' }],
     ['Sensitivity', 'B1:G18', { horizontalAlignment: 'Right' }],
+    ['Scenarios', 'B1:G18', { horizontalAlignment: 'Right' }],
+    ['Audit', 'B1:C24', { horizontalAlignment: 'Right' }],
+    ['Summary', 'A1:C1', STYLE.title],
+    ['Sources', 'A1:D1', STYLE.title],
     ['Assumptions', 'A1:B1', STYLE.title],
     ['WACC', 'A1:B1', STYLE.title],
     ['DCF', 'A1:H1', STYLE.title],
-    ['Sensitivity', 'A1:G1', STYLE.title]
+    ['Sensitivity', 'A1:G1', STYLE.title],
+    ['Scenarios', 'A1:G1', STYLE.title],
+    ['Audit', 'A1:C1', STYLE.title]
   ];
 
   return ranges.map(([sheet, target, options]) => ({ type: 'setCellFormat', sheet, target, options }));
@@ -502,6 +747,23 @@ function buildDcfSection(params = {}, memory = {}) {
     case 'sensitivity':
       actions = buildSensitivityActions(inputs);
       break;
+    case 'sources':
+    case 'source':
+    case 'research':
+      actions = buildSourcesActions(inputs);
+      break;
+    case 'scenarios':
+    case 'scenario':
+      actions = buildScenariosActions(inputs);
+      break;
+    case 'summary':
+    case 'output':
+      actions = buildSummaryActions(inputs);
+      break;
+    case 'audit':
+    case 'checks':
+      actions = buildAuditActions(inputs);
+      break;
     case 'format':
     case 'formatting':
       actions = buildFormatActions();
@@ -509,10 +771,14 @@ function buildDcfSection(params = {}, memory = {}) {
     case 'all':
       actions = [
         ...buildShellActions(inputs),
+        ...buildSourcesActions(inputs),
         ...buildAssumptionsActions(inputs),
         ...buildWaccActions(inputs),
         ...buildDcfActions(inputs),
         ...buildSensitivityActions(inputs),
+        ...buildScenariosActions(inputs),
+        ...buildSummaryActions(inputs),
+        ...buildAuditActions(inputs),
         ...buildFormatActions()
       ];
       break;

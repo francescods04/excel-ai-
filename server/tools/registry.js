@@ -262,7 +262,7 @@ registerTool('yahoo.fundamentals', async (params) => {
 registerTool('finance.dcf.buildSection', async (params, memory) => {
   return buildDcfSectionAi(params, memory);
 }, {
-  description: 'Costruisce una sezione AI-assisted di un DCF completo (shell, assumptions, WACC, DCF, sensitivity, format) con formule Excel istituzionali e fallback deterministico.',
+  description: 'Costruisce una sezione AI-assisted di un DCF completo (shell, sources, assumptions, WACC, DCF, sensitivity, scenarios, summary, audit, format) con formule Excel istituzionali e fallback deterministico.',
   inputs: ['section', 'ticker', 'companyName'],
   schema: {
     type: 'object',
@@ -270,7 +270,7 @@ registerTool('finance.dcf.buildSection', async (params, memory) => {
     properties: {
       section: {
         type: 'string',
-        enum: ['shell', 'assumptions', 'wacc', 'dcf', 'projection', 'sensitivity', 'format', 'formatting', 'all']
+        enum: ['shell', 'sources', 'source', 'research', 'assumptions', 'wacc', 'dcf', 'projection', 'sensitivity', 'scenarios', 'scenario', 'summary', 'output', 'audit', 'checks', 'format', 'formatting', 'all']
       },
       ticker: { type: 'string', minLength: 1, maxLength: 12 },
       companyName: { type: 'string' },

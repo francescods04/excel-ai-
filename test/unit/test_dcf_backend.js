@@ -71,11 +71,13 @@ async function main() {
     assert.ok(tools.includes('workbook.readWorkbook'));
     assert.ok(tools.includes('yahoo.quote'));
     assert.ok(tools.includes('yahoo.fundamentals'));
+    assert.ok(tools.includes('yahoo.historical'));
+    assert.ok(plan.tasks.length >= 13);
 
     const dcfSections = plan.tasks
       .filter(task => task.tool === 'finance.dcf.buildSection')
       .map(task => task.params.section);
-    assert.deepStrictEqual(dcfSections, ['shell', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'format']);
+    assert.deepStrictEqual(dcfSections, ['shell', 'sources', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'scenarios', 'summary', 'audit', 'format']);
     plan.tasks
       .filter(task => task.tool === 'finance.dcf.buildSection')
       .forEach(task => assert.strictEqual(task.params.mode, 'ai_assisted'));
@@ -106,7 +108,7 @@ async function main() {
     assert.ok(plan.tasks.some(task => task.tool === 'yahoo.quote' && task.params.ticker === 'AAPL'));
     assert.ok(!plan.tasks.some(task => task.tool === 'llm.writeFormulas' && task.params.section === 'full_model_review'));
     const dcfTasks = plan.tasks.filter(task => task.tool === 'finance.dcf.buildSection');
-    assert.deepStrictEqual(dcfTasks.map(task => task.params.section), ['assumptions', 'wacc', 'dcf', 'sensitivity', 'format']);
+    assert.deepStrictEqual(dcfTasks.map(task => task.params.section), ['shell', 'sources', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'scenarios', 'summary', 'audit', 'format']);
     dcfTasks.forEach(task => assert.strictEqual(task.params.mode, 'template'));
   });
 
@@ -121,11 +123,12 @@ async function main() {
 
     assert.ok(plan.tasks.some(task => task.tool === 'yahoo.quote' && task.params.ticker === 'NVDA'));
     assert.ok(plan.tasks.some(task => task.tool === 'yahoo.fundamentals' && task.params.ticker === 'NVDA'));
+    assert.ok(plan.tasks.some(task => task.tool === 'yahoo.historical' && task.params.ticker === 'NVDA'));
     assert.ok(!plan.tasks.some(task => task.tool === 'llm.writeFormulas' && task.params.section === 'full_model_review'));
     const dcfSections = plan.tasks
       .filter(task => task.tool === 'finance.dcf.buildSection')
       .map(task => task.params.section);
-    assert.deepStrictEqual(dcfSections, ['shell', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'format']);
+    assert.deepStrictEqual(dcfSections, ['shell', 'sources', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'scenarios', 'summary', 'audit', 'format']);
   });
 
   await test('DCF template derives assumptions from market data', () => {
@@ -150,6 +153,29 @@ async function main() {
     const sensCells = sensitivity.actions[0].cells;
     assert.ok(sensCells.C5.formula.includes('DCF!$G$20'));
     assert.ok(sensCells.G18.formula.includes('SUM(DCF!$C$24:$G$24)'));
+  });
+
+  await test('DCF template creates source, scenario, summary and audit layers', () => {
+    const shell = buildDcfSection({ section: 'shell', ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
+    const createdSheets = shell.actions.filter(action => action.type === 'createSheet').map(action => action.sheet || action.name);
+    ['Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit']
+      .forEach(sheet => assert.ok(createdSheets.includes(sheet), `${sheet} should be created by shell`));
+
+    const sources = buildDcfSection({ section: 'sources', ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
+    assert.strictEqual(sources.actions[0].sheet, 'Sources');
+    assert.strictEqual(sources.actions[0].cells.B24.formula, '=Assumptions!$B$10');
+
+    const scenarios = buildDcfSection({ section: 'scenarios', ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
+    assert.strictEqual(scenarios.actions[0].sheet, 'Scenarios');
+    assert.ok(scenarios.actions[0].cells.F5.formula.includes('DCF!$G$20'));
+
+    const summary = buildDcfSection({ section: 'summary', ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
+    assert.strictEqual(summary.actions[0].sheet, 'Summary');
+    assert.strictEqual(summary.actions[0].cells.B7.formula, '=DCF!$H$35');
+
+    const audit = buildDcfSection({ section: 'audit', ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
+    assert.strictEqual(audit.actions[0].sheet, 'Audit');
+    assert.ok(audit.actions[0].cells.B17.formula.includes('COUNTIF'));
   });
 
   await test('critic validates DCF cross-sheet formulas without regex crash', () => {

@@ -42,7 +42,7 @@ TOOLS:
 - data (OpenBB): openbb.equity.quote, openbb.equity.historical, openbb.equity.profile, openbb.equity.fundamentals.balance, openbb.equity.fundamentals.income, openbb.equity.fundamentals.cash, openbb.equity.fundamentals.metrics, openbb.equity.fundamentals.ratios, openbb.equity.fundamentals.income_growth, openbb.equity.fundamentals.balance_growth, openbb.equity.fundamentals.cash_growth, openbb.equity.estimates.consensus, openbb.equity.peers, openbb.equity.performance, openbb.equity.fundamentals.management, openbb.equity.fundamentals.esg
 - data (macro): openbb.fixedincome.treasury, openbb.fixedincome.yield_curve, openbb.fixedincome.effr, openbb.economy.cpi, openbb.economy.gdp_real, openbb.economy.unemployment, openbb.economy.interest_rates, openbb.economy.risk_premium, openbb.economy.money_measures, openbb.economy.gdp_forecast
 - data (market): openbb.index.snapshots, openbb.index.historical, openbb.etf.info, openbb.etf.holdings, openbb.currency.historical, openbb.crypto.historical
-- AI-assisted finance: finance.dcf.buildSection (sections: shell, assumptions, wacc, dcf, sensitivity, format, all; formula sections use an analyst LLM with deterministic fallback)
+- AI-assisted finance: finance.dcf.buildSection (sections: shell, sources, assumptions, wacc, dcf, sensitivity, scenarios, summary, audit, format, all; formula sections use an analyst LLM with deterministic fallback)
 - read: workbook.readWorkbook, workbook.readSheet, workbook.readRange
 - layout: llm.planLayout
 - formula: llm.writeFormulas
@@ -60,7 +60,7 @@ OPENBB PREFERRED OVER YAHOO — OpenBB provides real financial statements (balan
 - openbb.equity.peers for comparable company analysis
 
 INSTITUTIONAL DCF MODEL STRUCTURE (minimum standard):
-Sheets: Assumptions, WACC, DCF, Sensitivity
+Sheets: Summary, Sources, Assumptions, WACC, DCF, Sensitivity, Scenarios, Audit
 
 IMPORTANT: A natural request like "voglio fare un DCF di Apple", "fammi DCF AAPL", or "build DCF for Microsoft" means FULL DCF BUILD. Do not treat it as a repair task. Use the complete sequence: workbook scan, market data, DCF shell, assumptions, WACC, DCF projection, sensitivity, formatting.
 
@@ -97,6 +97,26 @@ IMPORTANT: A natural request like "voglio fare un DCF di Apple", "fammi DCF AAPL
    - 2-way data table: WACC × Terminal Growth
    - Shows Enterprise Value and Implied Share Price
 
+5) Sources Sheet:
+   - Source register for every major input
+   - Market-data/fundamental-data provenance
+   - Data quality checks and analyst review flags
+
+6) Scenarios Sheet:
+   - Downside / Base / Upside cases
+   - Explicit revenue, margin, WACC and terminal-growth deltas
+   - Case-level implied share price and upside/downside
+
+7) Summary Sheet:
+   - Enterprise value, equity value, implied share price, current price and premium/discount
+   - Scenario snapshot and key assumption summary
+   - Clear investment-committee output view
+
+8) Audit Sheet:
+   - Formula integrity checks
+   - Terminal value sanity checks
+   - Bridge checks and model readiness status
+
 CRITICAL RULES:
 - EVERY data row MUST have a descriptive label in Column A. Never output naked numbers.
 - Formulas must reference other sheets (e.g., =Assumptions!B3) — never hardcode constants.
@@ -119,28 +139,37 @@ EXAMPLE DCF task graph (chunked, institutional grade):
 t1: data/workbook.readWorkbook (maxRows:30, maxCols:20)
 t2: data/yahoo.quote (ticker:AAPL) [optional if public]
 t3: data/yahoo.fundamentals (ticker:AAPL) [optional if public]
-t4: layout/llm.planLayout (model:DCF, sheets:[Assumptions,WACC,DCF,Sensitivity], context from t1,t2,t3)
-t5: excel.createSheet (name:Assumptions) deps:[t4]
-t6: excel.createSheet (name:WACC) deps:[t4]
-t7: excel.createSheet (name:DCF) deps:[t4]
-t8: excel.createSheet (name:Sensitivity) deps:[t4]
-t9:  formula/llm.writeFormulas (section:assumptions.inputs) deps:[t4,t5]
-t10: formula/llm.writeFormulas (section:assumptions.macro) deps:[t4,t5]
-t11: formula/llm.writeFormulas (section:wacc.cost_of_equity) deps:[t4,t6]
-t12: formula/llm.writeFormulas (section:wacc.wacc_calc) deps:[t4,t6]
-t13: formula/llm.writeFormulas (section:dcf.revenue_build) deps:[t4,t7]
-t14: formula/llm.writeFormulas (section:dcf.ebitda_build) deps:[t4,t7]
-t15: formula/llm.writeFormulas (section:dcf.fcf_build) deps:[t4,t7]
-t16: formula/llm.writeFormulas (section:dcf.terminal_value) deps:[t4,t7]
-t17: formula/llm.writeFormulas (section:dcf.enterprise_value) deps:[t4,t7]
-t18: formula/llm.writeFormulas (section:dcf.equity_value) deps:[t4,t7]
-t19: formula/llm.writeFormulas (section:sensitivity.data_table) deps:[t4,t8,t17]
-t20: format/llm.planFormat (mode:institutional_finance) deps:[t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19]
-t21: excel.applyFormat (fromResult:t20) deps:[t20]
+t4: data/yahoo.historical (ticker:AAPL, period:5y) [optional if public]
+t5: layout/llm.planLayout (model:DCF, sheets:[Summary,Sources,Assumptions,WACC,DCF,Sensitivity,Scenarios,Audit], context from t1,t2,t3,t4)
+t6: excel.createSheet (name:Summary) deps:[t5]
+t7: excel.createSheet (name:Sources) deps:[t5]
+t8: excel.createSheet (name:Assumptions) deps:[t5]
+t9: excel.createSheet (name:WACC) deps:[t5]
+t10: excel.createSheet (name:DCF) deps:[t5]
+t11: excel.createSheet (name:Sensitivity) deps:[t5]
+t12: excel.createSheet (name:Scenarios) deps:[t5]
+t13: excel.createSheet (name:Audit) deps:[t5]
+t14: formula/llm.writeFormulas (section:sources.data_map) deps:[t5,t7]
+t15: formula/llm.writeFormulas (section:assumptions.inputs) deps:[t5,t8]
+t16: formula/llm.writeFormulas (section:assumptions.macro) deps:[t5,t8]
+t17: formula/llm.writeFormulas (section:wacc.cost_of_equity) deps:[t5,t9]
+t18: formula/llm.writeFormulas (section:wacc.wacc_calc) deps:[t5,t9]
+t19: formula/llm.writeFormulas (section:dcf.revenue_build) deps:[t5,t10]
+t20: formula/llm.writeFormulas (section:dcf.ebitda_build) deps:[t5,t10]
+t21: formula/llm.writeFormulas (section:dcf.fcf_build) deps:[t5,t10]
+t22: formula/llm.writeFormulas (section:dcf.terminal_value) deps:[t5,t10]
+t23: formula/llm.writeFormulas (section:dcf.enterprise_value) deps:[t5,t10]
+t24: formula/llm.writeFormulas (section:dcf.equity_value) deps:[t5,t10]
+t25: formula/llm.writeFormulas (section:sensitivity.data_table) deps:[t5,t11,t23,t24]
+t26: formula/llm.writeFormulas (section:scenarios.case_matrix) deps:[t5,t12,t24]
+t27: formula/llm.writeFormulas (section:summary.output_view) deps:[t5,t6,t25,t26]
+t28: formula/llm.writeFormulas (section:audit.model_checks) deps:[t5,t13,t27]
+t29: format/llm.planFormat (mode:institutional_finance) deps:[t14,t15,t16,t17,t18,t19,t20,t21,t22,t23,t24,t25,t26,t27,t28]
+t30: excel.applyFormat (fromResult:t29) deps:[t29]
 
 EXAMPLE for existing workbook:
 t1: data/workbook.readSheet (sheet:ActiveSheet, includeUsedRange:true)
-t2: layout/llm.planLayout (model:DCF, sheets:[Assumptions,WACC,DCF]) deps:[t1]
+t2: layout/llm.planLayout (model:DCF, sheets:[Summary,Sources,Assumptions,WACC,DCF,Sensitivity,Scenarios,Audit]) deps:[t1]
 [...]
 
 REMEMBER: Output ONLY valid JSON.`;
@@ -349,7 +378,7 @@ function cleanupExpiredCache() {
   }
 }
 
-function buildDeterministicDcfPlan(objective, context, equityIntent = {}) {
+function buildAgenticDcfPlan(objective, context, equityIntent = {}) {
   const ticker = equityIntent.ticker || null;
   const companyName = equityIntent.companyName || ticker || 'Target Company';
   const dataDeps = ['t1'];
@@ -358,38 +387,47 @@ function buildDeterministicDcfPlan(objective, context, equityIntent = {}) {
       id: 't1',
       agent: 'data',
       tool: 'workbook.readWorkbook',
-      description: 'Scan workbook for existing model/data context',
-      params: { maxRows: 30, maxCols: 20 },
+      description: 'Scan workbook for existing model/data context and reusable finance inputs',
+      params: { maxRows: 45, maxCols: 24 },
       deps: [],
       requiresApproval: false
     }
   ];
 
   let nextId = 2;
-  if (ticker) {
+  function addDataTask(tool, description, params, deps = []) {
+    const id = `t${nextId}`;
     tasks.push({
-      id: `t${nextId}`,
+      id,
       agent: 'data',
-      tool: 'yahoo.quote',
-      description: `Fetch live quote and market data for ${ticker}`,
-      params: { ticker },
-      deps: [],
+      tool,
+      description,
+      params,
+      deps,
       requiresApproval: false
     });
-    dataDeps.push(`t${nextId}`);
+    dataDeps.push(id);
     nextId++;
+    return id;
+  }
 
-    tasks.push({
-      id: `t${nextId}`,
-      agent: 'data',
-      tool: 'yahoo.fundamentals',
-      description: `Fetch financial fundamentals for ${ticker}`,
-      params: { ticker },
-      deps: [],
-      requiresApproval: false
-    });
-    dataDeps.push(`t${nextId}`);
-    nextId++;
+  if (ticker) {
+    addDataTask('yahoo.quote', `Fetch live quote, market cap and trading metadata for ${ticker}`, { ticker });
+    addDataTask('yahoo.fundamentals', `Fetch financial fundamentals for ${ticker}`, { ticker });
+    addDataTask('yahoo.historical', `Fetch five-year price history for ${ticker} to sanity-check beta and market context`, { ticker, period: '5y' });
+
+    if (process.env.OPENBB_AGENTIC_ENABLED === 'true') {
+      addDataTask('openbb.equity.profile', `Fetch OpenBB company profile for ${ticker}`, { symbol: ticker });
+      addDataTask('openbb.equity.fundamentals.income', `Fetch OpenBB income statements for ${ticker}`, { symbol: ticker, period: 'annual', limit: 5 });
+      addDataTask('openbb.equity.fundamentals.balance', `Fetch OpenBB balance sheets for ${ticker}`, { symbol: ticker, period: 'annual', limit: 5 });
+      addDataTask('openbb.equity.fundamentals.cash', `Fetch OpenBB cash-flow statements for ${ticker}`, { symbol: ticker, period: 'annual', limit: 5 });
+      addDataTask('openbb.equity.fundamentals.metrics', `Fetch OpenBB valuation and operating metrics for ${ticker}`, { symbol: ticker, period: 'annual', limit: 5 });
+      addDataTask('openbb.equity.fundamentals.ratios', `Fetch OpenBB financial ratios for ${ticker}`, { symbol: ticker, period: 'annual', limit: 5 });
+      addDataTask('openbb.equity.estimates.consensus', `Fetch OpenBB consensus estimates for ${ticker}`, { symbol: ticker });
+      addDataTask('openbb.equity.peers', `Fetch OpenBB peer set for ${ticker}`, { symbol: ticker });
+      addDataTask('openbb.fixedincome.treasury', 'Fetch current Treasury curve for risk-free-rate support', {});
+      addDataTask('openbb.economy.risk_premium', 'Fetch equity risk premium support for WACC', {});
+    }
   }
 
   const baseParams = {
@@ -402,12 +440,66 @@ function buildDeterministicDcfPlan(objective, context, equityIntent = {}) {
   if (ticker) baseParams.ticker = ticker;
 
   const sections = [
-    { section: 'shell', agent: 'layout', description: 'Create DCF workbook shell: Assumptions, WACC, DCF, Sensitivity', deps: dataDeps },
-    { section: 'assumptions', agent: 'formula', description: 'AI-build DCF assumptions from market data with auditable source notes', deps: [`t${nextId}`] },
-    { section: 'wacc', agent: 'formula', description: 'AI-build WACC calculation from CAPM and capital structure', deps: [`t${nextId + 1}`] },
-    { section: 'dcf', agent: 'formula', description: 'AI-build 5-year DCF projection, terminal value, EV and implied share price', deps: [`t${nextId + 2}`] },
-    { section: 'sensitivity', agent: 'formula', description: 'AI-build WACC x terminal growth sensitivity tables', deps: [`t${nextId + 3}`] },
-    { section: 'format', agent: 'format', description: 'Apply institutional finance formatting across DCF sheets', deps: [`t${nextId + 4}`] }
+    {
+      section: 'shell',
+      agent: 'layout',
+      description: 'Create institutional DCF workbook shell: Summary, Sources, Assumptions, WACC, DCF, Sensitivity, Scenarios and Audit',
+      deps: dataDeps
+    },
+    {
+      section: 'sources',
+      agent: 'layout',
+      description: 'Build source book and data-quality map from fetched market/fundamental data',
+      deps: [`t${nextId}`]
+    },
+    {
+      section: 'assumptions',
+      agent: 'formula',
+      description: 'AI-build assumption spine from company data, market inputs and workbook context',
+      deps: [`t${nextId + 1}`]
+    },
+    {
+      section: 'wacc',
+      agent: 'formula',
+      description: 'AI-build WACC from CAPM, debt cost, tax rate and capital structure',
+      deps: [`t${nextId + 2}`]
+    },
+    {
+      section: 'dcf',
+      agent: 'formula',
+      description: 'AI-build operating forecast, free-cash-flow bridge, terminal value and implied share price',
+      deps: [`t${nextId + 3}`]
+    },
+    {
+      section: 'sensitivity',
+      agent: 'formula',
+      description: 'AI-build WACC x terminal-growth sensitivity grids',
+      deps: [`t${nextId + 4}`]
+    },
+    {
+      section: 'scenarios',
+      agent: 'formula',
+      description: 'Build downside/base/upside scenario layer around the DCF output',
+      deps: [`t${nextId + 4}`]
+    },
+    {
+      section: 'summary',
+      agent: 'formula',
+      description: 'Build valuation summary tying DCF, sensitivity and scenarios into an investment-committee view',
+      deps: [`t${nextId + 5}`, `t${nextId + 6}`]
+    },
+    {
+      section: 'audit',
+      agent: 'formula',
+      description: 'Build model audit checks for assumptions, formulas, bridge integrity and readiness',
+      deps: [`t${nextId + 7}`]
+    },
+    {
+      section: 'format',
+      agent: 'format',
+      description: 'Apply institutional finance formatting across every DCF workbook sheet',
+      deps: [`t${nextId + 8}`]
+    }
   ];
 
   for (const entry of sections) {
@@ -423,7 +515,7 @@ function buildDeterministicDcfPlan(objective, context, equityIntent = {}) {
     nextId++;
   }
 
-  logger.info(`[Planner] AI-assisted DCF plan generated for ${ticker || companyName}`);
+  logger.info(`[Planner] Agentic DCF plan generated for ${ticker || companyName} (${tasks.length} tasks)`);
   return { objective, tasks };
 }
 
@@ -431,7 +523,7 @@ function buildDcfCompletionPlan(objective, context, equityIntent = {}) {
   const ticker = equityIntent.ticker || null;
   const companyName = equityIntent.companyName || ticker || 'Target Company';
   const existingSheets = context?.workbookSheets || [];
-  const hasAllDcfSheets = ['Assumptions', 'WACC', 'DCF', 'Sensitivity'].every(sheet =>
+  const hasAllDcfSheets = ['Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit'].every(sheet =>
     existingSheets.some(existing => existing.toLowerCase() === sheet.toLowerCase())
   );
 
@@ -500,10 +592,14 @@ function buildDcfCompletionPlan(objective, context, equityIntent = {}) {
   }
 
   const sections = [
+    { section: 'sources', agent: 'layout', description: 'Complete Sources and data-quality map' },
     { section: 'assumptions', agent: 'formula', description: 'Complete Assumptions with all required DCF drivers' },
     { section: 'wacc', agent: 'formula', description: 'Complete WACC formulas from assumptions' },
     { section: 'dcf', agent: 'formula', description: 'Complete 5-year DCF projection and valuation bridge' },
     { section: 'sensitivity', agent: 'formula', description: 'Complete WACC x terminal growth sensitivity tables' },
+    { section: 'scenarios', agent: 'formula', description: 'Complete downside/base/upside scenario layer' },
+    { section: 'summary', agent: 'formula', description: 'Complete valuation summary and output dashboard' },
+    { section: 'audit', agent: 'formula', description: 'Complete model audit and readiness checks' },
     { section: 'format', agent: 'format', description: 'Re-apply institutional DCF formatting' }
   ];
 
@@ -560,7 +656,7 @@ function buildFinanceFallbackPlan(objective, context) {
   }
 
   if (isDcf && wantsCompletion && existingModelSheets.length === 0) {
-    return buildDeterministicDcfPlan(objective, context, equityIntent);
+    return buildAgenticDcfPlan(objective, context, equityIntent);
   }
 
   if (isWacc) {
@@ -699,7 +795,7 @@ function buildFinanceFallbackPlan(objective, context) {
   );
 
   if (shouldBuildFullDcf) {
-    return buildDeterministicDcfPlan(objective, context, equityIntent);
+    return buildAgenticDcfPlan(objective, context, equityIntent);
   }
 
   if (wantsNewModel) {
@@ -1021,6 +1117,54 @@ function normalizeAndValidatePlan(result) {
   };
 }
 
+function shouldUseDomainPlaybookFirst(turnId, options = {}) {
+  if (options.forceLLMPlanner) return false;
+  if (options.domainPlaybookFirst === true) return true;
+  if (process.env.PLANNER_LLM_FIRST === 'true') return false;
+  if (process.env.PLANNER_LLM_FIRST === 'false') return true;
+  return !turnId;
+}
+
+function isWeakFinancePlan(normalized, domainPlan) {
+  if (!normalized || !domainPlan || !Array.isArray(normalized.tasks) || !Array.isArray(domainPlan.tasks)) {
+    return false;
+  }
+
+  const domainSections = domainPlan.tasks
+    .filter(task => task.tool === 'finance.dcf.buildSection')
+    .map(task => task.params?.section)
+    .filter(Boolean);
+  const isDcfDomainPlan = domainSections.includes('dcf') && domainSections.includes('assumptions');
+  if (!isDcfDomainPlan) return false;
+
+  const hasFullModelReview = normalized.tasks.some(task =>
+    task.tool === 'llm.writeFormulas' && task.params?.section === 'full_model_review'
+  );
+  if (hasFullModelReview) return true;
+
+  const normalizedSections = normalized.tasks
+    .filter(task => task.tool === 'finance.dcf.buildSection')
+    .map(task => task.params?.section)
+    .filter(Boolean);
+  const hasCoreDcfSections = ['assumptions', 'wacc', 'dcf', 'sensitivity'].every(section =>
+    normalizedSections.includes(section)
+  );
+  const hasData = normalized.tasks.some(task => task.tool === 'yahoo.quote' || task.tool === 'yahoo.fundamentals');
+  const hasWorkbookRead = normalized.tasks.some(task => task.tool === 'workbook.readWorkbook');
+
+  if (!hasCoreDcfSections && normalized.tasks.length < 10) return true;
+  if (!hasData && domainPlan.tasks.some(task => task.tool.startsWith('yahoo.'))) return true;
+  if (!hasWorkbookRead) return true;
+
+  return false;
+}
+
+function normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens) {
+  const normalized = normalizeAndValidatePlan(domainPlan);
+  setCachedPlan(cacheKey, normalized, objectiveTokens);
+  return normalized;
+}
+
 let cacheAccessCount = 0;
 
 async function plan(objective, context, turnId, options = {}) {
@@ -1038,14 +1182,14 @@ async function plan(objective, context, turnId, options = {}) {
 
   logger.info('[Planner] Avvio planning per:', objective);
   const planningContext = compactPlanningContext(context);
+  const domainPlan = buildFinanceFallbackPlan(objective, planningContext);
+  const plannerModel = options.modelOverride || PLANNER_MODEL || undefined;
 
-  // Fast-path deterministico: nessuna chiamata LLM per pattern noti
-  const fallbackPlan = buildFinanceFallbackPlan(objective, planningContext);
-  if (fallbackPlan) {
-    logger.info('[Planner] Fast-path deterministico attivato');
-    const normalized = normalizeAndValidatePlan(fallbackPlan);
-    setCachedPlan(cacheKey, normalized, objectiveTokens);
-    return normalized;
+  // Domain playbook: high-confidence finance intents get a rich executable plan
+  // immediately, while section builders still use AI with guarded fallbacks.
+  if (domainPlan && shouldUseDomainPlaybookFirst(turnId, options)) {
+    logger.info('[Planner] Domain playbook attivato');
+    return normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens);
   }
 
   const conversationCtx = planningContext.conversationHistory || '';
@@ -1053,7 +1197,6 @@ async function plan(objective, context, turnId, options = {}) {
     ? `Fogli creati di recente: ${planningContext.recentSheets.join(', ')}\n`
     : '';
   const userPromptBase = `${conversationCtx}${recentSheets}Crea un piano di esecuzione per: "${objective}".\n\nContesto Excel attuale (compattato):\n${JSON.stringify(planningContext, null, 2)}`;
-  const plannerModel = options.modelOverride || PLANNER_MODEL || undefined;
   logger.info('[Planner] Chiamata LLM in corso...');
 
   // Attempt streaming first if turnId is provided (for progress UX)
@@ -1076,6 +1219,10 @@ async function plan(objective, context, turnId, options = {}) {
 
       let result = tryParsePlan(accumulated);
       const normalized = normalizeAndValidatePlan(result);
+      if (isWeakFinancePlan(normalized, domainPlan)) {
+        logger.warn('[Planner] Piano LLM finance troppo debole; uso il domain playbook agentico');
+        return normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens);
+      }
       logger.info(`[Planner] Piano generato:`, normalized.tasks.length, 'task');
       setCachedPlan(cacheKey, normalized, objectiveTokens);
       return normalized;
@@ -1107,6 +1254,10 @@ async function plan(objective, context, turnId, options = {}) {
       }
 
       const normalized = normalizeAndValidatePlan(result);
+      if (isWeakFinancePlan(normalized, domainPlan)) {
+        logger.warn('[Planner] Piano LLM finance troppo debole; uso il domain playbook agentico');
+        return normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens);
+      }
       logger.info(`[Planner] Piano generato in ${elapsed}ms:`, normalized.tasks.length, 'task');
       setCachedPlan(cacheKey, normalized, objectiveTokens);
       return normalized;
@@ -1118,12 +1269,9 @@ async function plan(objective, context, turnId, options = {}) {
     }
   }
 
-  const emergencyFallback = buildFinanceFallbackPlan(objective, planningContext);
-  if (emergencyFallback) {
+  if (domainPlan) {
     logger.warn(`[Planner] Fallback euristico attivato dopo errore LLM: ${lastError.message}`);
-    const normalized = normalizeAndValidatePlan(emergencyFallback);
-    setCachedPlan(cacheKey, normalized, objectiveTokens);
-    return normalized;
+    return normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens);
   }
   throw lastError;
 }
