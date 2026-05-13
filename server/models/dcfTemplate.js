@@ -227,6 +227,28 @@ function inferCurrencyFromWorkbook(memory = {}, analyses = []) {
   return null;
 }
 
+function normalizeTextForInference(text) {
+  return String(text || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function inferReportingUnitFromWorkbook(memory = {}, analyses = []) {
+  const rawText = [
+    ...walkText(memory.context),
+    ...analyses.flatMap(({ context }) => walkText(context))
+  ].join(' ');
+  const lower = rawText.toLowerCase();
+  const text = normalizeTextForInference(rawText);
+  if (/\bk\s*€|\bkeur\b|\bk eur\b/.test(lower) || /\b(en )?(milliers|migliaia|thousands)\b/.test(text)) return 'thousands';
+  if (/\bm\s*€|\bmeur\b|\bm eur\b/.test(lower) || /\b(en )?(millions|milioni)\b/.test(text)) return 'millions';
+  if (/\bmd\s*€|\bmdeur\b|\bmd eur\b/.test(lower) || /\b(milliards|miliardi|billions)\b/.test(text)) return 'billions';
+  return null;
+}
+
 function currencySymbol(currency) {
   const code = String(currency || 'USD').toUpperCase();
   if (code === 'EUR') return '€';
@@ -256,10 +278,42 @@ function pickWorkbookInput(inputs, canonicals) {
     .sort((a, b) => {
       const priorityDelta = (b.priority || 0) - (a.priority || 0);
       if (priorityDelta) return priorityDelta;
+      const actualDelta = Number(!!a.isForecast) - Number(!!b.isForecast);
+      if (actualDelta) return actualDelta;
+      const aPeriod = periodSortValue(a);
+      const bPeriod = periodSortValue(b);
+      if (aPeriod != null && bPeriod != null && aPeriod !== bPeriod) return bPeriod - aPeriod;
+      if (aPeriod != null && bPeriod == null) return -1;
+      if (aPeriod == null && bPeriod != null) return 1;
       const rowDelta = (a.row ?? 999999) - (b.row ?? 999999);
       if (rowDelta) return rowDelta;
       return (a.col ?? 999999) - (b.col ?? 999999);
     })[0] || null;
+}
+
+function periodSortValue(input) {
+  const order = finiteNumber(input?.periodOrder);
+  if (order != null) return order;
+  const year = finiteNumber(input?.fiscalYear);
+  if (year != null) return year;
+  return null;
+}
+
+function sortSeriesLatestFirst(values = []) {
+  const withValues = values.filter(input => finiteNumber(input.value) != null);
+  const actualValues = withValues.filter(input => !input.isForecast);
+  const candidates = actualValues.length >= 2 ? actualValues : withValues;
+  const hasPeriod = candidates.some(input => periodSortValue(input) != null);
+  return [...candidates].sort((a, b) => {
+    if (hasPeriod) {
+      const aPeriod = periodSortValue(a);
+      const bPeriod = periodSortValue(b);
+      if (aPeriod != null && bPeriod != null && aPeriod !== bPeriod) return bPeriod - aPeriod;
+      if (aPeriod != null && bPeriod == null) return -1;
+      if (aPeriod == null && bPeriod != null) return 1;
+    }
+    return (a.col ?? 999999) - (b.col ?? 999999);
+  });
 }
 
 function pickWorkbookSeries(inputs, canonical) {
@@ -281,7 +335,7 @@ function pickWorkbookSeries(inputs, canonical) {
       groups.set(key, group);
     });
 
-  return [...groups.values()]
+  const series = [...groups.values()]
     .filter(group => group.values.length > 0)
     .sort((a, b) => {
       const countDelta = b.values.length - a.values.length;
@@ -289,8 +343,8 @@ function pickWorkbookSeries(inputs, canonical) {
       const priorityDelta = (b.priority || 0) - (a.priority || 0);
       if (priorityDelta) return priorityDelta;
       return (a.row ?? 999999) - (b.row ?? 999999);
-    })[0]?.values
-    ?.sort((a, b) => (a.col ?? 999999) - (b.col ?? 999999)) || [];
+    })[0]?.values || [];
+  return sortSeriesLatestFirst(series);
 }
 
 function average(values) {
@@ -317,31 +371,126 @@ function latestToOldestRatios(numeratorSeries, denominatorSeries) {
   return ratios;
 }
 
-function revenueGrowthPath(revenueSeries, terminalGrowthRate = DEFAULTS.terminalGrowthRate) {
-  const values = revenueSeries.map(input => finiteNumber(input.value)).filter(n => n != null && n > 0);
-  if (values.length < 2) return DEFAULTS.revenueGrowth;
+function workbookAmountToMillions(value, reportingUnit = null) {
+  const n = finiteNumber(value);
+  if (n == null) return null;
+  if (reportingUnit === 'thousands') return n / 1000;
+  if (reportingUnit === 'millions') return n;
+  if (reportingUnit === 'billions') return n * 1000;
+  return toMillions(n);
+}
+
+function periodLabel(input, fallback = 'Historical') {
+  return input?.period || (input?.fiscalYear ? `${input.fiscalYear}A` : fallback);
+}
+
+function revenueGrowthAnalysis(revenueSeries, terminalGrowthRate = DEFAULTS.terminalGrowthRate, reportingUnit = null) {
+  const values = sortSeriesLatestFirst(revenueSeries)
+    .map(input => ({
+      input,
+      label: periodLabel(input),
+      cell: input.cell,
+      rawValue: input.rawValue,
+      value: finiteNumber(input.value),
+      valueMillions: workbookAmountToMillions(input.value, reportingUnit)
+    }))
+    .filter(item => item.value != null && item.value > 0);
+
+  if (values.length < 2) {
+    return {
+      path: DEFAULTS.revenueGrowth,
+      values,
+      rates: [],
+      latestGrowth: null,
+      medianGrowth: null,
+      cagr: null,
+      startingGrowth: DEFAULTS.revenueGrowth[0],
+      terminalAnchor: DEFAULTS.revenueGrowth[DEFAULTS.revenueGrowth.length - 1],
+      method: 'No sufficient historical revenue series; using fallback growth curve.'
+    };
+  }
+
+  const rates = [];
+  for (let i = 0; i < values.length - 1; i++) {
+    const current = values[i];
+    const prior = values[i + 1];
+    if (prior.value > 0) {
+      rates.push({
+        label: `${current.label} / ${prior.label}`,
+        value: current.value / prior.value - 1,
+        current,
+        prior
+      });
+    }
+  }
+  const usableRates = rates.map(rate => rate.value).filter(rate => Number.isFinite(rate) && rate > -0.8 && rate < 2.0);
+  const latestGrowth = usableRates[0] ?? null;
+  const medianGrowth = median(usableRates);
+  const oldestIndex = Math.min(values.length, 5) - 1;
   const latest = values[0];
-  const previous = values[1];
-  const latestGrowth = previous > 0 ? latest / previous - 1 : null;
-  const oldest = values[Math.min(values.length, 5) - 1];
-  const periods = Math.min(values.length, 5) - 1;
-  const cagr = oldest > 0 && periods > 0 ? (latest / oldest) ** (1 / periods) - 1 : null;
-  const startingGrowth = clamp(average([latestGrowth, cagr]), -0.05, 0.15, DEFAULTS.revenueGrowth[0]);
+  const oldest = values[oldestIndex];
+  const latestOrder = periodSortValue(latest.input);
+  const oldestOrder = periodSortValue(oldest.input);
+  const periods = latestOrder != null && oldestOrder != null && latestOrder > oldestOrder
+    ? latestOrder - oldestOrder
+    : oldestIndex;
+  const cagr = oldest.value > 0 && periods > 0 ? (latest.value / oldest.value) ** (1 / periods) - 1 : null;
+  const startingGrowth = clamp(median([latestGrowth, medianGrowth, cagr]), -0.10, 0.20, DEFAULTS.revenueGrowth[0]);
   const terminalAnchor = clamp(terminalGrowthRate + 0.015, -0.02, 0.08, 0.04);
-  return Array.from({ length: DEFAULTS.projectionYears }, (_, index) => {
+  const path = Array.from({ length: DEFAULTS.projectionYears }, (_, index) => {
     const t = DEFAULTS.projectionYears === 1 ? 1 : index / (DEFAULTS.projectionYears - 1);
     return startingGrowth + (terminalAnchor - startingGrowth) * t;
   });
+  return {
+    path,
+    values,
+    rates,
+    latestGrowth,
+    medianGrowth,
+    cagr,
+    startingGrowth,
+    terminalAnchor,
+    method: `Growth bridge uses latest YoY (${latestGrowth == null ? 'n/a' : `${(latestGrowth * 100).toFixed(1)}%`}), median YoY (${medianGrowth == null ? 'n/a' : `${(medianGrowth * 100).toFixed(1)}%`}) and CAGR (${cagr == null ? 'n/a' : `${(cagr * 100).toFixed(1)}%`}), then fades toward terminal growth.`
+  };
 }
 
 function sourceSummaryFor(series) {
-  return series.slice(0, 5).map(input => `${input.rawValue} at ${input.cell}`).join(' | ');
+  return series.slice(0, 5).map(input => `${periodLabel(input)}: ${input.rawValue} at ${input.cell}`).join(' | ');
 }
 
-function inferWorkbookDcfInputs(memory = {}) {
+function aiSchemaInputs(aiSchema) {
+  if (!aiSchema || !Array.isArray(aiSchema.mappings)) return [];
+  const confidenceScore = { high: 120, medium: 90, low: 45 };
+  return aiSchema.mappings.map(input => ({
+    label: input.label || input.canonical,
+    canonical: input.canonical,
+    value: input.value,
+    rawValue: input.rawValue,
+    cell: input.cell,
+    confidence: input.confidence === 'low' ? 'medium' : 'high',
+    priority: (confidenceScore[input.confidence] || 75) + 100,
+    period: input.period || null,
+    fiscalYear: input.fiscalYear ?? null,
+    periodOrder: input.periodOrder ?? input.fiscalYear ?? null,
+    isForecast: !!input.isForecast,
+    isActual: !input.isForecast,
+    row: input.row,
+    col: input.col,
+    sheet: input.sheet,
+    aiMapped: true,
+    rationale: input.rationale || ''
+  })).filter(input => input.canonical && finiteNumber(input.value) != null);
+}
+
+function inferWorkbookDcfInputs(memory = {}, params = {}) {
   const analyses = collectWorkbookAnalyses(memory);
-  const inputs = analyses.flatMap(({ parsed }) => parsed.inferredInputs || [])
+  const aiSchema = params.aiSchema || memory.aiWorkbookSchema || null;
+  const deterministicInputs = analyses.flatMap(({ parsed }) => parsed.inferredInputs || [])
     .filter(input => input.confidence === 'high');
+  const inputs = [
+    ...aiSchemaInputs(aiSchema),
+    ...deterministicInputs
+  ];
   if (inputs.length === 0) return { hasWorkbookFinancials: false, sourceRefs: {} };
 
   const revenueInput = pickWorkbookInput(inputs, ['Revenue']);
@@ -389,12 +538,18 @@ function inferWorkbookDcfInputs(memory = {}) {
     ...walkText(memory.context),
     ...analyses.flatMap(({ context }) => walkText(context))
   ].join(' ');
-  const isPrivateCompany = /\b(private|privata|non quotata|unlisted)\b/i.test(workbookText);
+  const normalizedWorkbookText = normalizeTextForInference(workbookText);
+  const isPrivateCompany = typeof aiSchema?.isPrivateCompany === 'boolean'
+    ? aiSchema.isPrivateCompany
+    : /\b(private|privata|non quotata|unlisted|non cotee|non cote|societe privee)\b/i.test(normalizedWorkbookText);
   const hasWorkbookFinancials = !!(revenueInput && (ebitdaInput || ebitdaMarginInput || netIncomeInput));
   return {
     hasWorkbookFinancials,
-    companyName: findCompanyNameFromWorkbook(memory, analyses),
-    currency: inferCurrencyFromWorkbook(memory, analyses),
+    companyName: aiSchema?.companyName || findCompanyNameFromWorkbook(memory, analyses),
+    currency: aiSchema?.currency || inferCurrencyFromWorkbook(memory, analyses),
+    reportingUnit: aiSchema?.reportingUnit || inferReportingUnitFromWorkbook(memory, analyses),
+    aiSchemaUsed: !!aiSchema?.mappings?.length,
+    aiSchemaWarnings: aiSchema?.warnings || [],
     isPrivateCompany,
     revenue: revenueInput?.value ?? null,
     ebitda: ebitdaInput?.value ?? null,
@@ -419,13 +574,13 @@ function inferWorkbookDcfInputs(memory = {}) {
       nwc: nwcSeries
     },
     sourceRefs,
-    sourceSummary: inputs.slice(0, 12).map(input => `${input.canonical}: ${input.rawValue} at ${input.cell}`)
+    sourceSummary: inputs.slice(0, 12).map(input => `${input.aiMapped ? 'AI map ' : ''}${input.canonical}: ${input.rawValue} at ${input.cell}`)
   };
 }
 
 function inferDcfInputs(params = {}, memory = {}) {
   const chunks = collectResultData(memory);
-  const workbookInputs = inferWorkbookDcfInputs(memory);
+  const workbookInputs = inferWorkbookDcfInputs(memory, params);
   const sourceType = workbookInputs.hasWorkbookFinancials ? 'workbook' : 'external';
   const ticker = String(
     params.ticker ||
@@ -448,9 +603,11 @@ function inferDcfInputs(params = {}, memory = {}) {
     : firstNumber(chunks, ['beta']);
   const totalCash = workbookInputs.cash ?? firstNumber(chunks, ['totalCash', 'cash', 'cashAndCashEquivalents']);
   const totalDebt = workbookInputs.debt ?? workbookInputs.netDebt ?? firstNumber(chunks, ['totalDebt', 'debt']);
+  const reportingUnit = workbookInputs.reportingUnit || null;
+  const workbookMoney = value => workbookAmountToMillions(value, reportingUnit);
 
-  const baseRevenueMillions = toMillions(revenue) || DEFAULTS.baseRevenueMillions;
-  const ebitdaMillions = toMillions(ebitda);
+  const baseRevenueMillions = (workbookInputs.revenue != null ? workbookMoney(workbookInputs.revenue) : toMillions(revenue)) || DEFAULTS.baseRevenueMillions;
+  const ebitdaMillions = workbookInputs.ebitda != null ? workbookMoney(workbookInputs.ebitda) : toMillions(ebitda);
   const ebitdaMargin = ebitdaMillions && baseRevenueMillions
     ? clamp(ebitdaMillions / baseRevenueMillions, 0.05, 0.65, DEFAULTS.ebitdaMargin)
     : workbookInputs.ebitdaMargin != null
@@ -464,13 +621,12 @@ function inferDcfInputs(params = {}, memory = {}) {
   const historicalTaxRate = median(taxRatios);
   const latestNwc = finiteNumber(workbookInputs.nwc);
   const historicalNwcPercentRevenue = latestNwc != null && baseRevenueMillions
-    ? toMillions(latestNwc) / baseRevenueMillions
+    ? workbookMoney(latestNwc) / baseRevenueMillions
     : null;
-  const revenueGrowth = workbookInputs.series?.revenue?.length >= 2
-    ? revenueGrowthPath(workbookInputs.series.revenue, DEFAULTS.terminalGrowthRate)
-    : DEFAULTS.revenueGrowth;
-  const cashMillions = Math.max(0, toMillions(totalCash) || DEFAULTS.cashMillions);
-  const debtMillions = Math.max(0, toMillions(totalDebt) || DEFAULTS.debtMillions);
+  const growthAnalysis = revenueGrowthAnalysis(workbookInputs.series?.revenue || [], DEFAULTS.terminalGrowthRate, reportingUnit);
+  const revenueGrowth = growthAnalysis.path || DEFAULTS.revenueGrowth;
+  const cashMillions = Math.max(0, (workbookInputs.cash != null ? workbookMoney(workbookInputs.cash) : toMillions(totalCash)) || DEFAULTS.cashMillions);
+  const debtMillions = Math.max(0, ((workbookInputs.debt != null || workbookInputs.netDebt != null) ? workbookMoney(totalDebt) : toMillions(totalDebt)) || DEFAULTS.debtMillions);
   const marketCapMillions = Math.max(0, toMillions(marketCap) || 0);
   const hasLocalShareCount = finiteNumber(workbookInputs.shares) != null;
   const hasMarketShareCount = finiteNumber(shares) != null;
@@ -486,6 +642,10 @@ function inferDcfInputs(params = {}, memory = {}) {
     ? clamp(workbookInputs.debtEquity, 0, 1.5, DEFAULTS.targetDebtToEquity)
     : (marketCapMillions > 0 ? clamp(debtMillions / marketCapMillions, 0, 1.5, DEFAULTS.targetDebtToEquity) : DEFAULTS.targetDebtToEquity);
   const currency = params.currency || workbookInputs.currency || 'USD';
+  const latestRevenuePeriod = workbookInputs.series?.revenue?.[0];
+  const baseYear = Number.isInteger(latestRevenuePeriod?.fiscalYear)
+    ? latestRevenuePeriod.fiscalYear
+    : new Date().getFullYear() - 1;
 
   return {
     ticker,
@@ -493,14 +653,18 @@ function inferDcfInputs(params = {}, memory = {}) {
     currency,
     currencySymbol: currencySymbol(currency),
     unitLabel: currencyUnitLabel(currency),
+    reportingUnit,
     sourceType,
+    aiSchemaUsed: !!workbookInputs.aiSchemaUsed,
+    aiSchemaWarnings: workbookInputs.aiSchemaWarnings || [],
     sourceRefs: workbookInputs.sourceRefs || {},
     sourceSummary: workbookInputs.sourceSummary || [],
     isPrivateCompany: !!workbookInputs.isPrivateCompany,
     debtIsNetDebt: workbookInputs.debt == null && workbookInputs.netDebt != null,
     projectionYears: Number(params.projectionYears) || DEFAULTS.projectionYears,
-    baseYear: new Date().getFullYear() - 1,
+    baseYear,
     revenueGrowth,
+    historicalGrowth: growthAnalysis,
     ebitdaMargin,
     taxRate: clamp(historicalTaxRate, 0.05, 0.40, DEFAULTS.taxRate),
     daPercentRevenue: clamp(historicalDaPercentRevenue, 0.005, 0.15, DEFAULTS.daPercentRevenue),
@@ -557,7 +721,9 @@ function buildAssumptionsActions(inputs) {
   const currency = inputs.currency || 'USD';
   const amount = amountLabel(inputs);
   const perShare = perShareLabel(inputs);
-  const sourceLabel = inputs.sourceType === 'workbook' ? 'Workbook local data' : 'External market data';
+  const sourceLabel = inputs.sourceType === 'workbook'
+    ? (inputs.aiSchemaUsed ? 'AI-understood workbook local data' : 'Workbook local data')
+    : 'External market data';
   const refs = inputs.sourceRefs || {};
   const refFor = (...keys) => keys.map(key => refs[key]).find(Boolean);
   const sourceNote = (ref, fallback = 'Analyst assumption; replace with sourced value when available') =>
@@ -586,7 +752,7 @@ function buildAssumptionsActions(inputs) {
   explain(7, 'Model normalizes monetary values to millions and keeps per-share data separate.', 'Model convention');
   set(cells, 'A8', cell('Primary Data Source', STYLE.label));
   set(cells, 'B8', cell(sourceLabel, STYLE.input));
-  explain(8, 'Workbook-first when local financials are high-confidence; external tools only supplement missing inputs.', inputs.sourceType === 'workbook' ? 'Workbook-first' : 'External data / fallback');
+  explain(8, inputs.aiSchemaUsed ? 'AI schema-understanding mapped workbook cells across language/layout; deterministic parser is only a validation fallback.' : 'Workbook-first when local financials are high-confidence; external tools only supplement missing inputs.', inputs.sourceType === 'workbook' ? 'Workbook-first' : 'External data / fallback');
 
   set(cells, 'A9', cell('Historical / Market Inputs', STYLE.section));
   set(cells, 'B9', cell('Input', STYLE.header));
@@ -618,7 +784,7 @@ function buildAssumptionsActions(inputs) {
   inputs.revenueGrowth.forEach((growth, index) => {
     set(cells, `A${18 + index}`, cell(`Revenue Growth Y${index + 1} (%)`, STYLE.label));
     set(cells, `B${18 + index}`, cell(growth, pctInputStyle));
-    explain(18 + index, `Explicit forecast fade path for year ${index + 1}, anchored to historical revenue trend when available.`, inputs.historicalSourceSummary?.revenue ? `Local trend: ${inputs.historicalSourceSummary.revenue}` : 'Review: growth assumption');
+    explain(18 + index, `Forecast fade path for year ${index + 1}. ${inputs.historicalGrowth?.method || 'Uses fallback curve when no historical series is available.'}`, inputs.historicalSourceSummary?.revenue ? `Local trend: ${inputs.historicalSourceSummary.revenue}` : 'Review: growth assumption');
   });
   set(cells, 'A23', cell('Terminal Growth Rate (%)', STYLE.label));
   set(cells, 'B23', cell(inputs.terminalGrowthRate, pctInputStyle));
@@ -663,6 +829,33 @@ function buildAssumptionsActions(inputs) {
   set(cells, 'A37', cell(inputs.privateOwnershipMode ? `Reference Equity Value (${amount})` : `Current Market Cap (${amount})`, STYLE.label));
   set(cells, 'B37', formula('=IF(B36>0,B35*B36,0)', fmt(STYLE.formula, { numberFormat: NUM_FORMATS.currency })));
   explain(37, inputs.privateOwnershipMode ? 'Formula: optional reference price times ownership units; remains zero when no market reference exists.' : 'Formula: shares outstanding multiplied by current share price.', 'Calculated from B35 and B36');
+
+  set(cells, 'A40', cell('Historical Revenue Growth Bridge', STYLE.section));
+  set(cells, 'A41', cell('Metric', STYLE.header));
+  set(cells, 'B41', cell('Value', STYLE.header));
+  set(cells, 'C41', cell('How Derived', STYLE.header));
+  set(cells, 'D41', cell('Source / Review', STYLE.header));
+  (inputs.historicalGrowth?.values || []).slice(0, 4).forEach((item, index) => {
+    const row = 42 + index;
+    set(cells, `A${row}`, cell(`Historical Revenue ${item.label}`, STYLE.label));
+    set(cells, `B${row}`, cell(item.valueMillions, fmt(inputStyle, { numberFormat: NUM_FORMATS.currency })));
+    explain(row, 'Revenue cell mapped from workbook and normalized to model units.', item.cell || 'Workbook revenue series');
+  });
+  (inputs.historicalGrowth?.rates || []).slice(0, 4).forEach((rate, index) => {
+    const row = 47 + index;
+    set(cells, `A${row}`, cell(`Historical YoY Growth ${rate.label}`, STYLE.label));
+    set(cells, `B${row}`, cell(rate.value, pctInputStyle));
+    explain(row, 'Formula logic: current historical revenue divided by prior historical revenue minus one.', `${rate.current?.cell || 'current'} vs ${rate.prior?.cell || 'prior'}`);
+  });
+  set(cells, 'A52', cell('Historical Revenue CAGR (%)', STYLE.label));
+  set(cells, 'B52', cell(inputs.historicalGrowth?.cagr ?? '', pctInputStyle));
+  explain(52, 'CAGR from latest historical revenue to oldest usable historical revenue period.', inputs.historicalGrowth?.values?.length >= 2 ? 'Calculated from local revenue series' : 'Review: insufficient history');
+  set(cells, 'A53', cell('Median Historical YoY Growth (%)', STYLE.label));
+  set(cells, 'B53', cell(inputs.historicalGrowth?.medianGrowth ?? '', pctInputStyle));
+  explain(53, 'Median of usable historical YoY growth rates after excluding impossible outliers.', inputs.historicalGrowth?.rates?.length ? 'Calculated from local revenue series' : 'Review: insufficient history');
+  set(cells, 'A54', cell('Selected Starting Growth (%)', STYLE.total));
+  set(cells, 'B54', cell(inputs.historicalGrowth?.startingGrowth ?? inputs.revenueGrowth[0], fmt(STYLE.total, { numberFormat: NUM_FORMATS.percent })));
+  explain(54, 'Starting point for forecast fade path: blend of latest YoY, median YoY and CAGR, bounded by sanity caps.', inputs.historicalGrowth?.method || 'Fallback growth curve');
 
   return [makeSetCellRangeAction('Assumptions', cells)];
 }
@@ -898,7 +1091,9 @@ function buildSourcesActions(inputs) {
   const perShare = perShareLabel(inputs);
   const local = inputs.sourceType === 'workbook';
   const refs = inputs.sourceRefs || {};
-  const historicalSource = local ? 'Workbook local financial data' : 'External fundamentals / workbook fallback';
+  const historicalSource = local
+    ? (inputs.aiSchemaUsed ? 'AI schema map of workbook local financial data' : 'Workbook local financial data')
+    : 'External fundamentals / workbook fallback';
   const marketSource = local && inputs.isPrivateCompany ? 'Not in workbook; analyst fallback' : 'External market data / workbook fallback';
   const ownershipSource = inputs.privateOwnershipMode ? 'Private ownership basis; no public share count' : marketSource;
 
@@ -925,6 +1120,7 @@ function buildSourcesActions(inputs) {
     [inputs.privateOwnershipMode ? 'Ownership / Market Reference' : 'Shares & Share Price', ownershipSource, refs['Shares Outstanding'] || refs['Share Price'] || 'Assumptions!B35:B36'],
     ['Beta', marketSource, 'Assumptions!B28'],
     ['WACC Assumptions', 'Market data + visible analyst assumptions', 'Assumptions!B26:B30'],
+    ['Historical Growth Bridge', local ? 'Workbook revenue series + AI/validated period mapping' : 'Market/fallback growth curve', 'Assumptions!A40:D54'],
     ['Terminal Growth', 'Long-term GDP / inflation sanity range', 'Assumptions!B23']
   ].forEach(([label, source, ref], index) => {
     const row = 12 + index;
@@ -1122,7 +1318,7 @@ function buildAuditActions(inputs = {}) {
   set(cells, 'B4', cell('Result', STYLE.header));
   set(cells, 'C4', cell('Why It Matters', STYLE.header));
   const checks = [
-    ['Assumptions populated', '=IF(COUNTA(Assumptions!$A$1:$D$37)>=85,"OK","Review")', 'DCF needs a complete assumption spine with visible method and source'],
+    ['Assumptions populated', '=IF(COUNTA(Assumptions!$A$1:$D$54)>=110,"OK","Review")', 'DCF needs a complete assumption spine with visible method, source and historical growth bridge'],
     ['WACC calculated', '=IF(AND(WACC!$B$19>0,WACC!$B$19<0.30),"OK","Review")', 'Valuation cannot discount cash flows without WACC'],
     ['Terminal spread positive', '=IF(WACC!$B$19>Assumptions!$B$23,"OK","Review")', 'Terminal value breaks if WACC is below growth'],
     ['Enterprise value positive', '=IF(DCF!$H$30>0,"OK","Review")', 'DCF output should produce positive enterprise value'],
@@ -1159,7 +1355,7 @@ function buildAuditActions(inputs = {}) {
   set(cells, 'C27', cell('Analyst Standard', STYLE.header));
   [
     ['Sources', '=IF(COUNTA(Sources!$A$11:$D$50)>=35,"OK","Review")', 'Source register plus analyst workplan must be populated'],
-    ['Assumptions', '=IF(COUNTA(Assumptions!$A$1:$D$37)>=85,"OK","Review")', 'Input spine must cover operating, WACC and equity bridge drivers with method/source'],
+    ['Assumptions', '=IF(COUNTA(Assumptions!$A$1:$D$54)>=110,"OK","Review")', 'Input spine must cover operating, WACC, equity bridge and historical growth drivers with method/source'],
     ['WACC', '=IF(COUNTA(WACC!$A$21:$B$30)>=18,"OK","Review")', 'Discount rate must include beta evidence and cross-checks'],
     ['DCF', '=IF(COUNTA(DCF!$A$5:$H$40)>=120,"OK","Review")', 'Operating forecast, FCF, terminal value and bridge must be explicit'],
     ['Sensitivity / Scenarios', '=IF(AND(COUNTA(Sensitivity!$C$5:$G$18)>=50,COUNTA(Scenarios!$F$5:$G$7)>=6),"OK","Review")', 'Valuation must show range of outcomes']
@@ -1177,7 +1373,7 @@ function buildFormatActions() {
   const ranges = [
     ['Summary', 'A1:C32', { horizontalAlignment: 'Left' }],
     ['Sources', 'A1:D50', { horizontalAlignment: 'Left' }],
-    ['Assumptions', 'A1:D40', { horizontalAlignment: 'Left' }],
+    ['Assumptions', 'A1:D56', { horizontalAlignment: 'Left' }],
     ['WACC', 'A1:A30', { horizontalAlignment: 'Left' }],
     ['DCF', 'A1:A40', { horizontalAlignment: 'Left' }],
     ['Sensitivity', 'A1:A18', { horizontalAlignment: 'Left' }],
@@ -1185,8 +1381,8 @@ function buildFormatActions() {
     ['Audit', 'A1:C32', { horizontalAlignment: 'Left' }],
     ['Summary', 'B1:C32', { horizontalAlignment: 'Right' }],
     ['Sources', 'B1:D50', { horizontalAlignment: 'Right' }],
-    ['Assumptions', 'B1:B40', { horizontalAlignment: 'Right' }],
-    ['Assumptions', 'C1:D40', { horizontalAlignment: 'Left', wrapText: true }],
+    ['Assumptions', 'B1:B56', { horizontalAlignment: 'Right' }],
+    ['Assumptions', 'C1:D56', { horizontalAlignment: 'Left', wrapText: true }],
     ['WACC', 'B1:B30', { horizontalAlignment: 'Right' }],
     ['DCF', 'B1:H40', { horizontalAlignment: 'Right' }],
     ['Sensitivity', 'B1:G18', { horizontalAlignment: 'Right' }],
@@ -1288,6 +1484,7 @@ function buildDcfSection(params = {}, memory = {}) {
       qualityFlags: [
         inputs.cashMillions > inputs.baseRevenueMillions * 2 ? 'cash_exceeds_2x_revenue' : null,
         inputs.privateOwnershipMode ? 'private_ownership_output' : null,
+        inputs.aiSchemaUsed ? 'ai_workbook_schema' : null,
         inputs.sourceType === 'workbook' ? 'workbook_first' : null
       ].filter(Boolean)
     },

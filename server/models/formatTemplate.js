@@ -409,7 +409,7 @@ function addDcfSheetFormatting(actions, sheet, palette) {
   const geometry = {
     summary: { used: 'A1:C32', label: 'A1:A32', values: 'B1:C32', labelWidth: 220, valueWidth: 118 },
     sources: { used: 'A1:D50', label: 'A1:A50', values: 'B1:D50', labelWidth: 190, valueWidth: 150 },
-    assumptions: { used: 'A1:D40', label: 'A1:A40', values: 'B1:D40', labelWidth: 245, valueWidth: 155 },
+    assumptions: { used: 'A1:D56', label: 'A1:A56', values: 'B1:D56', labelWidth: 245, valueWidth: 155 },
     wacc: { used: 'A1:B30', label: 'A1:A30', values: 'B1:B30', labelWidth: 255, valueWidth: 125 },
     dcf: { used: 'A1:H40', label: 'A1:A40', values: 'B1:H40', labelWidth: 230, valueWidth: 92 },
     sensitivity: { used: 'A1:G18', label: 'A1:A18', values: 'B1:G18', labelWidth: 155, valueWidth: 94 },

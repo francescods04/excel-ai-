@@ -32,6 +32,17 @@ Every assumption row must have side-by-side explanation columns:
 
 Workbook-first extraction must prefer complete statement totals over line items. For example, cash should use total cash / liquid assets before petty cash, and private-company models must show equity value on a 100% ownership basis unless a real share count and reference price are available.
 
+Workbook understanding should be AI-first, not glossary-first. The LLM maps workbook rows, periods, language, reporting units, and source cells into canonical finance concepts; deterministic label matching is only a fallback/validator. The model must support non-English statements such as French `chiffre d'affaires`, `EBE`, `BFR`, `trésorerie`, and layouts where historical years run left-to-right or right-to-left.
+
+Revenue growth assumptions must show the historical bridge beside the forecast:
+- latest actual revenue series used
+- YoY growth rates by period
+- historical CAGR
+- median YoY growth
+- selected starting growth and fade path
+
+Never make growth look like a magical assumption when the workbook contains historical revenue.
+
 **Tax & Capital**
 - Tax Rate (%) — marginal effective tax rate
 - D&A % of Revenue (%) — depreciation & amortization

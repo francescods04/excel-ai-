@@ -8,6 +8,7 @@ const { inferEquityIntent } = require('../../server/utils/equityIntent');
 const { parseSheetMatrix } = require('../../server/utils/sheetParser');
 const { executeTool } = require('../../server/tools/registry');
 const { getAnalystDepth } = require('../../server/models/analystDepth');
+const { normalizeAiSchema } = require('../../server/models/workbookAiSchema');
 
 async function test(name, fn) {
   try {
@@ -89,6 +90,34 @@ const localItalianContext = {
       rowCount: 12,
       columnCount: 38,
       preview: localItalianFinancialSheet
+    }
+  }
+};
+
+const localFrenchFinancialSheet = [
+  ['SOCIETE EXEMPLE SA'],
+  ['Société privée', 'EUR', 'en milliers d’euros'],
+  ['', '2021A', '2022A', '2023A', '2024A'],
+  ['Chiffre d’affaires', 280000, 310000, 360000, 420000],
+  ['Excédent brut d’exploitation (EBE)', 70000, 80000, 95000, 120000],
+  ['Résultat avant impôt', 42000, 51000, 64000, 83000],
+  ['Impôts sur les bénéfices', -11000, -13000, -17000, -22000],
+  ['Dotations aux amortissements', 10000, 11000, 12000, 13000],
+  ['Besoin en fonds de roulement', -42000, -46000, -50000, -52000],
+  ['Trésorerie et équivalents de trésorerie', 55000, 70000, 86000, 95000],
+  ['Dette financière nette', 155000, 145000, 132000, 118000]
+];
+
+const localFrenchContext = {
+  activeSheet: 'Comptes',
+  workbookSheets: ['Comptes'],
+  allSheetsData: {
+    Comptes: {
+      isActive: true,
+      usedRange: 'Comptes!A1:E11',
+      rowCount: 11,
+      columnCount: 5,
+      preview: localFrenchFinancialSheet
     }
   }
 };
@@ -233,6 +262,90 @@ async function main() {
     assert.strictEqual(da.value, 13728388);
     assert.strictEqual(taxes.value, 26225163);
     assert.strictEqual(ros.canonical, 'EBIT Margin');
+  });
+
+  await test('sheet parser handles French periods and latest historical year', () => {
+    const parsed = parseSheetMatrix(localFrenchFinancialSheet, 'Comptes');
+    const revenue2024 = parsed.inferredInputs.find(input => input.canonical === 'Revenue' && input.fiscalYear === 2024);
+    const revenue2021 = parsed.inferredInputs.find(input => input.canonical === 'Revenue' && input.fiscalYear === 2021);
+    const cash = parsed.inferredInputs.find(input => input.canonical === 'Cash & Equivalents' && input.fiscalYear === 2024);
+    const nwc = parsed.inferredInputs.find(input => input.canonical === 'Net Working Capital' && input.fiscalYear === 2024);
+
+    assert.strictEqual(revenue2024.value, 420000);
+    assert.strictEqual(revenue2024.cell, 'Comptes!E4');
+    assert.strictEqual(revenue2024.period, '2024A');
+    assert.strictEqual(revenue2021.value, 280000);
+    assert.strictEqual(cash.value, 95000);
+    assert.strictEqual(nwc.value, -52000);
+  });
+
+  await test('DCF template uses historical French growth bridge instead of arbitrary growth', () => {
+    const inputs = inferDcfInputs({}, { context: localFrenchContext, results: {} });
+    assert.strictEqual(inputs.companyName, 'SOCIETE EXEMPLE SA');
+    assert.strictEqual(inputs.currency, 'EUR');
+    assert.strictEqual(inputs.sourceType, 'workbook');
+    assert.strictEqual(inputs.reportingUnit, 'thousands');
+    assert.strictEqual(inputs.baseYear, 2024);
+    assert.ok(Math.abs(inputs.baseRevenueMillions - 420) < 0.0001);
+    assert.ok(Math.abs(inputs.cashMillions - 95) < 0.0001);
+    assert.ok(Math.abs(inputs.debtMillions - 118) < 0.0001);
+    assert.ok(Math.abs(inputs.historicalGrowth.latestGrowth - (420000 / 360000 - 1)) < 0.0001);
+    assert.ok(inputs.revenueGrowth[0] > 0.13 && inputs.revenueGrowth[0] < 0.18);
+
+    const assumptions = buildDcfSection({ section: 'assumptions' }, { context: localFrenchContext, results: {} });
+    const cells = assumptions.actions[0].cells;
+    assert.strictEqual(cells.A40.value, 'Historical Revenue Growth Bridge');
+    assert.strictEqual(cells.A42.value, 'Historical Revenue 2024A');
+    assert.ok(Math.abs(cells.B42.value - 420) < 0.0001);
+    assert.ok(Math.abs(cells.B47.value - (420000 / 360000 - 1)) < 0.0001);
+    assert.ok(cells.C18.value.includes('Growth bridge uses latest YoY'));
+  });
+
+  await test('AI workbook schema mappings override deterministic parser without trusting invented values', () => {
+    const cellLookup = new Map([
+      ['Comptes!E4', { value: 420000, row: 3, col: 4, sheet: 'Comptes' }],
+      ['Comptes!E10', { value: 95000, row: 9, col: 4, sheet: 'Comptes' }]
+    ]);
+    const schema = normalizeAiSchema({
+      language: 'fr',
+      companyName: 'SOCIETE EXEMPLE SA',
+      currency: 'EUR',
+      reportingUnit: 'thousands',
+      isPrivateCompany: true,
+      mappings: [
+        {
+          canonical: 'Revenue',
+          label: 'Chiffre d’affaires',
+          sheet: 'Comptes',
+          cell: 'Comptes!E4',
+          row: 3,
+          col: 4,
+          period: '2024A',
+          fiscalYear: 2024,
+          isForecast: false,
+          confidence: 'high',
+          rationale: 'AI identified revenue from French label',
+          value: 999999999
+        },
+        {
+          canonical: 'Cash & Equivalents',
+          label: 'Trésorerie et équivalents de trésorerie',
+          sheet: 'Comptes',
+          cell: 'Comptes!E10',
+          row: 9,
+          col: 4,
+          period: '2024A',
+          fiscalYear: 2024,
+          isForecast: false,
+          confidence: 'high',
+          rationale: 'AI identified total cash'
+        }
+      ]
+    }, cellLookup);
+
+    assert.strictEqual(schema.mappings.length, 2);
+    assert.strictEqual(schema.mappings[0].value, 420000);
+    assert.strictEqual(schema.mappings[1].value, 95000);
   });
 
   await test('DCF template prefers local workbook financials over external/default data', () => {

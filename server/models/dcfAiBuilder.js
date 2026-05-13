@@ -4,6 +4,7 @@ const { validateTaskOutput } = require('../agents/critic');
 const { getWikiContextForPrompt } = require('../wiki/loader');
 const { buildDcfSection, inferDcfInputs } = require('./dcfTemplate');
 const { formatAnalystDepthForPrompt, getAnalystDepth } = require('./analystDepth');
+const { inferWorkbookSchemaWithAi } = require('./workbookAiSchema');
 
 const DCF_AI_TIMEOUT_MS = Number(process.env.DCF_AI_TIMEOUT_MS) || 300000;
 const DCF_AI_FALLBACK_TIMEOUT_MS = Number(process.env.DCF_AI_FALLBACK_TIMEOUT_MS) || 180000;
@@ -13,12 +14,13 @@ const AI_SECTIONS = new Set(['assumptions', 'wacc', 'dcf', 'projection', 'sensit
 const SECTION_REQUIREMENTS = {
   assumptions: {
     sheet: 'Assumptions',
-    minCells: 85,
+    minCells: 110,
     required: [
       'B10', 'B11', 'B12', 'B13', 'B14', 'B15',
       'B18', 'B19', 'B20', 'B21', 'B22', 'B23',
       'B26', 'B27', 'B28', 'B29', 'B30',
       'B33', 'B34', 'B35', 'B36', 'B37',
+      'A40', 'A42', 'B42', 'A47', 'B47', 'B52', 'B53', 'B54',
       'C10', 'C11', 'C12', 'C14', 'C23', 'C26', 'C28', 'C33', 'C37',
       'D10', 'D11', 'D12', 'D14', 'D23', 'D26', 'D28', 'D33', 'D37'
     ],
@@ -26,7 +28,8 @@ const SECTION_REQUIREMENTS = {
       'B10', 'B11', 'B12', 'B13', 'B14', 'B15',
       'B18', 'B19', 'B20', 'B21', 'B22', 'B23',
       'B26', 'B27', 'B28', 'B29', 'B30',
-      'B33', 'B34', 'B35', 'B36', 'B37'
+      'B33', 'B34', 'B35', 'B36', 'B37',
+      'B52', 'B53', 'B54'
     ]
   },
   wacc: {
@@ -310,13 +313,16 @@ function sheetForSection(section) {
 
 async function buildDcfSectionAi(params = {}, memory = {}) {
   const section = String(params.section || 'all').toLowerCase();
-  const fallback = buildDcfSection(params, memory);
+  const aiSchema = await inferWorkbookSchemaWithAi(params, memory);
+  const enrichedParams = aiSchema ? { ...params, aiSchema } : params;
+  const enrichedMemory = aiSchema ? { ...memory, aiWorkbookSchema: aiSchema } : memory;
+  const fallback = buildDcfSection(enrichedParams, enrichedMemory);
 
   if (!shouldUseAi(params)) {
     return fallbackWithBuilder(fallback, params.mode === 'template' ? 'template-requested' : 'template');
   }
 
-  const inputs = inferDcfInputs(params, memory);
+  const inputs = inferDcfInputs(enrichedParams, enrichedMemory);
   const analystDepth = params.analystDepth && typeof params.analystDepth === 'object'
     ? params.analystDepth
     : getAnalystDepth(section);
@@ -375,6 +381,7 @@ async function buildDcfSectionAi(params = {}, memory = {}) {
       data: {
         ...(fallback.data || {}),
         builder: 'ai-assisted',
+        aiSchemaUsed: !!aiSchema,
         analystDepth,
         fallbackActionCount: fallback.actions.length,
         actionCount: actions.length,
@@ -384,7 +391,7 @@ async function buildDcfSectionAi(params = {}, memory = {}) {
     };
   } catch (error) {
     logger.warn(`[DCF AI] Section "${section}" fell back to template: ${error.message}`);
-    return fallbackWithBuilder(fallback, 'template-fallback', { aiError: error.message });
+    return fallbackWithBuilder(fallback, 'template-fallback', { aiError: error.message, aiSchemaUsed: !!aiSchema });
   }
 }
 

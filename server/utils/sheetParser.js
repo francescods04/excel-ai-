@@ -23,38 +23,73 @@ const FINANCE_KEYWORDS = new Map([
   ['fatturato', 'Revenue'],
   ['vendite', 'Revenue'],
   ['valore della produzione', 'Revenue'],
+  ['chiffre d affaires', 'Revenue'],
+  ['chiffre affaires', 'Revenue'],
+  ['produits d exploitation', 'Revenue'],
+  ['produits exploitation', 'Revenue'],
+  ['produit des activites ordinaires', 'Revenue'],
+  ['revenus', 'Revenue'],
   ['revenue', 'Revenue'],
   ['sales', 'Revenue'],
   ['total revenue', 'Revenue'],
   ['margine operativo lordo', 'EBITDA'],
   ['mol', 'EBITDA'],
+  ['excedent brut d exploitation', 'EBITDA'],
+  ['excedent brut exploitation', 'EBITDA'],
+  ['ebe', 'EBITDA'],
   ['ebitda', 'EBITDA'],
   ['risultato operativo', 'EBIT'],
   ['reddito operativo', 'EBIT'],
+  ['resultat operationnel courant', 'EBIT'],
+  ['resultat operationnel', 'EBIT'],
+  ['resultat d exploitation', 'EBIT'],
+  ['resultat exploitation', 'EBIT'],
   ['operating income', 'EBIT'],
   ['ebit', 'EBIT'],
   ['utile netto', 'Net Income'],
   ['risultato netto', 'Net Income'],
+  ['resultat net part du groupe', 'Net Income'],
+  ['resultat net', 'Net Income'],
+  ['benefice net', 'Net Income'],
   ['net income', 'Net Income'],
   ['net profit', 'Net Income'],
   ['profit', 'Net Income'],
   ['free cash flow', 'FCF'],
+  ['flux de tresorerie disponible', 'FCF'],
+  ['cash flow libre', 'FCF'],
   ['fcf', 'FCF'],
   ['capex', 'CapEx'],
   ['capital expenditure', 'CapEx'],
+  ['depenses d investissement', 'CapEx'],
+  ['acquisitions d immobilisations', 'CapEx'],
+  ['investissements corporels et incorporels', 'CapEx'],
   ['ammortamenti e svalut', 'D&A'],
+  ['dotations aux amortissements', 'D&A'],
+  ['amortissements et provisions', 'D&A'],
   ['ammortamenti', 'D&A'],
   ['depreciation', 'D&A'],
   ['amortization', 'D&A'],
   ['risultato prima delle imposte', 'Pre-Tax Income'],
   ['utile prima delle imposte', 'Pre-Tax Income'],
+  ['resultat avant impots', 'Pre-Tax Income'],
+  ['resultat avant impot', 'Pre-Tax Income'],
   ['totale imposte sul reddito', 'Income Taxes'],
   ['imposte correnti', 'Income Taxes'],
   ['imposte sul reddito', 'Income Taxes'],
+  ['impots sur les benefices', 'Income Taxes'],
+  ['impot sur les benefices', 'Income Taxes'],
+  ['impot sur les societes', 'Income Taxes'],
+  ['charge d impot', 'Income Taxes'],
   ['tax rate', 'Tax Rate'],
+  ['taux d impot', 'Tax Rate'],
   ['tax', 'Tax Rate'],
+  ['croissance du chiffre d affaires', 'Revenue Growth'],
+  ['croissance des revenus', 'Revenue Growth'],
+  ['taux de croissance', 'Revenue Growth'],
   ['growth', 'Revenue Growth'],
   ['growth rate', 'Revenue Growth'],
+  ['marge d ebitda', 'EBITDA Margin'],
+  ['marge ebe', 'EBITDA Margin'],
   ['margin', 'EBITDA Margin'],
   ['ebitda margin', 'EBITDA Margin'],
   ['operating margin', 'EBIT Margin'],
@@ -70,12 +105,25 @@ const FINANCE_KEYWORDS = new Map([
   ['perpetuity growth', 'Terminal Growth Rate'],
   ['posizione finanziaria netta', 'Net Debt'],
   ['indebitamento finanziario netto', 'Net Debt'],
+  ['endettement financier net', 'Net Debt'],
+  ['endettement net', 'Net Debt'],
+  ['dette financiere nette', 'Net Debt'],
+  ['dette nette', 'Net Debt'],
   ['net financial debt', 'Net Debt'],
   ['pfn', 'Net Debt'],
   ['debiti verso banche', 'Total Debt'],
   ['debiti v banche', 'Total Debt'],
   ['debiti finanziari', 'Total Debt'],
+  ['emprunts et dettes financieres', 'Total Debt'],
+  ['dettes financieres', 'Total Debt'],
+  ['dette financiere', 'Total Debt'],
   ['debt', 'Total Debt'],
+  ['tresorerie et equivalents de tresorerie', 'Cash & Equivalents'],
+  ['tresorerie et equivalents', 'Cash & Equivalents'],
+  ['equivalents de tresorerie', 'Cash & Equivalents'],
+  ['tresorerie disponible', 'Cash & Equivalents'],
+  ['disponibilites', 'Cash & Equivalents'],
+  ['actifs liquides', 'Cash & Equivalents'],
   ['tot dispon liquide', 'Cash & Equivalents'],
   ['dispon liquide', 'Cash & Equivalents'],
   ['totale disponibilita liquide', 'Cash & Equivalents'],
@@ -86,8 +134,11 @@ const FINANCE_KEYWORDS = new Map([
   ['cash', 'Cash & Equivalents'],
   ['shares', 'Shares Outstanding'],
   ['shares outstanding', 'Shares Outstanding'],
+  ['nombre d actions', 'Shares Outstanding'],
   ['diluted shares', 'Diluted Shares'],
+  ['actions diluees', 'Diluted Shares'],
   ['share price', 'Share Price'],
+  ['cours de l action', 'Share Price'],
   ['stock price', 'Share Price'],
   ['ev/ebitda', 'EV/EBITDA'],
   ['p/e', 'P/E'],
@@ -97,13 +148,19 @@ const FINANCE_KEYWORDS = new Map([
   ['totale attivita', 'Total Assets'],
   ['totale attivo', 'Total Assets'],
   ['attivo totale', 'Total Assets'],
+  ['total des actifs', 'Total Assets'],
+  ['total actif', 'Total Assets'],
   ['total assets', 'Total Assets'],
   ['totale passivita', 'Total Liabilities'],
   ['totale passivo', 'Total Liabilities'],
+  ['total des passifs', 'Total Liabilities'],
+  ['total passif', 'Total Liabilities'],
   ['total liabilities', 'Total Liabilities'],
   ['patrimonio netto', 'Shareholders Equity'],
   ['mezzi propri', 'Shareholders Equity'],
   ['capitale proprio', 'Shareholders Equity'],
+  ['capitaux propres', 'Shareholders Equity'],
+  ['fonds propres', 'Shareholders Equity'],
   ['shareholders equity', 'Shareholders Equity'],
   ['equity', 'Shareholders Equity'],
   ['roi', 'ROI'],
@@ -112,17 +169,26 @@ const FINANCE_KEYWORDS = new Map([
   ['roic', 'ROIC'],
   ['return on invested capital', 'ROIC'],
   ['gross profit', 'Gross Profit'],
+  ['marge brute', 'Gross Margin'],
   ['gross margin', 'Gross Margin'],
+  ['cout des ventes', 'COGS'],
   ['cost of goods sold', 'COGS'],
   ['cogs', 'COGS'],
+  ['frais commerciaux et administratifs', 'SG&A'],
+  ['frais generaux', 'SG&A'],
   ['sg&a', 'SG&A'],
   ['rnd', 'R&D'],
+  ['recherche et developpement', 'R&D'],
   ['research and development', 'R&D'],
+  ['charges d interets', 'Interest Expense'],
   ['interest expense', 'Interest Expense'],
   ['dso', 'DSO'],
   ['dio', 'DIO'],
   ['dpo', 'DPO'],
   ['capitale circolante netto', 'Net Working Capital'],
+  ['besoin en fonds de roulement', 'Net Working Capital'],
+  ['fonds de roulement', 'Net Working Capital'],
+  ['bfr', 'Net Working Capital'],
   ['nwc', 'Net Working Capital'],
   ['working capital', 'Net Working Capital'],
 ]);
@@ -185,6 +251,7 @@ function parseNumber(value) {
 }
 
 function isHeaderLike(value) {
+  if (parsePeriodMeta(value)) return true;
   if (typeof value !== 'string') return false;
   const text = value.trim();
   if (text.length === 0) return false;
@@ -213,6 +280,60 @@ function classifyLabel(labelText) {
     if (normalized.includes(key)) return canonical;
   }
   return null;
+}
+
+function parsePeriodMeta(value) {
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 1900 && value <= 2100) {
+    return { label: String(value), year: value, order: value, isForecast: false, isActual: true };
+  }
+  if (typeof value !== 'string') return null;
+  const original = value.trim();
+  if (!original) return null;
+  const normalized = normalizeLabel(original);
+
+  const relative = normalized.match(/^n(?:\s*[-]\s*(\d+))?$/);
+  if (relative) {
+    const offset = relative[1] ? -Number(relative[1]) : 0;
+    return { label: original, year: null, order: offset, isForecast: false, isActual: true };
+  }
+
+  const yearMatch = original.match(/((?:19|20)\d{2})\s*([AaEeFfPp])?/);
+  if (!yearMatch) return null;
+  const year = Number(yearMatch[1]);
+  const suffix = (yearMatch[2] || '').toLowerCase();
+  const forecastText = /\b(e|est|estimate|forecast|budget|budgete|prevision|prevu|projete|projected|plan|guidance|bp)\b/.test(normalized);
+  const actualText = /\b(a|actual|reel|audited|historique|realise|reported)\b/.test(normalized);
+  const isForecast = ['e', 'f', 'p'].includes(suffix) || forecastText;
+  const isActual = suffix === 'a' || actualText || !isForecast;
+  const quarterMatch = normalized.match(/\bq([1-4])\b|\bt([1-4])\b/);
+  const halfMatch = normalized.match(/\bh([1-2])\b|\bs([1-2])\b/);
+  const periodFraction = quarterMatch ? Number(quarterMatch[1] || quarterMatch[2]) / 4 : (halfMatch ? Number(halfMatch[1] || halfMatch[2]) / 2 : 0);
+  return {
+    label: original,
+    year,
+    order: year + periodFraction,
+    isForecast,
+    isActual
+  };
+}
+
+function inferColumnPeriods(matrix) {
+  const candidates = [];
+  for (let r = 0; r < matrix.length; r++) {
+    const row = matrix[r] || [];
+    const metaByCol = new Map();
+    for (let c = 0; c < row.length; c++) {
+      const meta = parsePeriodMeta(row[c]);
+      if (meta) metaByCol.set(c, meta);
+    }
+    if (metaByCol.size >= 2) candidates.push({ row: r, count: metaByCol.size, metaByCol });
+  }
+  candidates.sort((a, b) => {
+    const countDelta = b.count - a.count;
+    if (countDelta) return countDelta;
+    return a.row - b.row;
+  });
+  return candidates[0]?.metaByCol || new Map();
 }
 
 function scoreCanonicalLabel(canonical, labelText) {
@@ -270,6 +391,7 @@ function parseSheetMatrix(matrix, sheetName = 'Sheet1') {
   const headers = [];
   const dataRows = [];
   const usedCells = new Set();
+  const columnPeriods = inferColumnPeriods(matrix);
 
   const addInput = ({ label, canonical, value, rawValue, row, col, confidence }) => {
     if (!canonical || value === null || value === undefined) return;
@@ -283,6 +405,11 @@ function parseSheetMatrix(matrix, sheetName = 'Sheet1') {
       cell: cellAddress(sheetName, row, col),
       confidence,
       priority: scoreCanonicalLabel(canonical, label),
+      period: columnPeriods.get(col)?.label || null,
+      fiscalYear: columnPeriods.get(col)?.year ?? null,
+      periodOrder: columnPeriods.get(col)?.order ?? null,
+      isForecast: !!columnPeriods.get(col)?.isForecast,
+      isActual: columnPeriods.has(col) ? !!columnPeriods.get(col)?.isActual : null,
       row,
       col
     });
@@ -366,7 +493,8 @@ function parseSheetMatrix(matrix, sheetName = 'Sheet1') {
   if (inferredInputs.length > 0) {
     lines.push(`Inferred ${inferredInputs.length} financial inputs (${unit || 'unknown unit'}):`);
     for (const inp of inferredInputs.slice(0, 20)) {
-      lines.push(`  - ${inp.canonical}: ${inp.rawValue} (${inp.confidence} confidence) at ${inp.cell}`);
+      const period = inp.period ? ` ${inp.period}` : '';
+      lines.push(`  - ${inp.canonical}${period}: ${inp.rawValue} (${inp.confidence} confidence) at ${inp.cell}`);
     }
   }
   if (headers.length > 0) {
