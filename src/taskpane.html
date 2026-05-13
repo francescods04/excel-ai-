@@ -9,12 +9,18 @@
 </head>
 <body>
   <div id="app">
-    <!-- Header -->
     <div id="header">
       <div id="header-left">
-        <h2>AI Agent for Excel</h2>
-        <div id="status" class="status-disconnected">In connessione...</div>
-        <span id="elapsed-time"></span>
+        <div id="brand-mark" aria-hidden="true">
+          <span></span><span></span><span></span><span></span>
+        </div>
+        <div id="brand-copy">
+          <h1>Excel Agent</h1>
+          <div id="status-row">
+            <div id="status" class="status-disconnected">In connessione...</div>
+            <span id="elapsed-time"></span>
+          </div>
+        </div>
       </div>
       <div id="header-right">
         <select id="model-select" title="Seleziona modello AI">
@@ -26,21 +32,21 @@
           <option value="xiaomi/mimo-v2.5-pro">Xiaomi MiMo v2.5 Pro</option>
           <option value="openai/gpt-4o-mini">GPT-4o Mini</option>
         </select>
-        <label id="agent-mode-toggle" title="Attiva per compiti complessi (modelli finanziari)">
-          <input type="checkbox" id="agent-mode-check"> Agent
+        <label id="agent-mode-toggle" class="toggle-chip" title="Attiva per compiti complessi">
+          <input type="checkbox" id="agent-mode-check"><span>Agent</span>
         </label>
-        <label id="prompt-variant-toggle" title="Fast variant: forza tool batch e compact, +veloce ma meno verboso">
-          <input type="checkbox" id="prompt-variant-check"> Fast
+        <label id="prompt-variant-toggle" class="toggle-chip" title="Variante rapida">
+          <input type="checkbox" id="prompt-variant-check"><span>Fast</span>
         </label>
-        <button id="theme-toggle" title="Cambia tema">☀</button>
+        <button id="theme-toggle" title="Cambia tema" aria-label="Cambia tema">◐</button>
       </div>
     </div>
 
     <!-- Tab Navigation -->
     <div id="tab-nav">
       <button class="tab-btn active" data-tab="chat">Chat</button>
-      <button class="tab-btn" data-tab="progress">Progresso <span class="tab-badge" id="progress-badge" style="display:none">0</span></button>
-      <button class="tab-btn" data-tab="details">Dettagli</button>
+      <button class="tab-btn" data-tab="progress">Piano <span class="tab-badge" id="progress-badge" style="display:none">0</span></button>
+      <button class="tab-btn" data-tab="details">Review</button>
     </div>
 
     <!-- Tab: Chat -->
@@ -49,28 +55,27 @@
         <!-- Fixed banner for pending questions (impossible to miss) -->
         <div id="pending-question-banner" class="pending-question-banner hidden">
           <div class="pending-question-content">
-            <span class="pending-question-icon">❓</span>
+            <span class="pending-question-icon">?</span>
             <span class="pending-question-text">In attesa della tua risposta...</span>
           </div>
         </div>
         <div id="messages">
           <div class="message bot-message">
-            <div class="bubble">
-              Ciao! Sono il tuo AI Agent per Excel.<br><br>
-              <strong>Modalità normale:</strong> comandi semplici (colora, somma, grafico).<br>
-              <strong>Agent Mode:</strong> attiva la checkbox per costruire modelli finanziari complessi (DCF, WACC, etc.) con multi-agente parallelo.
+            <div class="bubble welcome-bubble">
+              <div class="welcome-kicker">Workbook cockpit</div>
+              <div class="welcome-title">Pronto per lavorare sul foglio con piano, preview e conferma.</div>
             </div>
           </div>
         </div>
-        <button id="scroll-bottom-btn" class="visible" title="Vai in fondo">↓</button>
+        <button id="scroll-bottom-btn" class="visible" title="Vai in fondo" aria-label="Vai in fondo">↓</button>
       </div>
       <div id="actions-preview">
-        <strong>Azioni in esecuzione:</strong>
+        <strong>Azioni in esecuzione</strong>
         <ul id="actions-list"></ul>
       </div>
       <div id="input-area">
-        <textarea id="user-input" placeholder="Scrivi un comando... (es. 'DCF per AAPL')" rows="2"></textarea>
-        <button id="send-btn">➤</button>
+        <textarea id="user-input" placeholder="Chiedi una modifica o un'analisi del workbook..." rows="2"></textarea>
+        <button id="send-btn" title="Invia" aria-label="Invia">➤</button>
       </div>
     </div>
 
@@ -96,10 +101,10 @@
       </div>
 
       <div id="plan-view">
-        <h4 style="font-size:11px;color:var(--color-text-secondary);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;">Piano di esecuzione</h4>
+        <h4 class="panel-title">Piano di esecuzione</h4>
         <div id="task-tree" class="task-tree"></div>
-        <div id="approve-bar" class="hidden" style="display:flex;gap:8px;margin-top:12px;">
-          <button id="btn-execute" class="btn btn-primary" style="background:var(--color-success)">Esegui piano</button>
+        <div id="approve-bar" class="hidden">
+          <button id="btn-execute" class="btn btn-primary btn-approve">Esegui piano</button>
           <button id="btn-cancel-plan" class="btn btn-secondary">Annulla</button>
         </div>
       </div>

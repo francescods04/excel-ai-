@@ -29,6 +29,8 @@ const actionsPreview = document.getElementById('actions-preview');
 const actionsList = document.getElementById('actions-list');
 const agentModeCheck = document.getElementById('agent-mode-check');
 const agentModeToggle = document.getElementById('agent-mode-toggle');
+const promptVariantCheck = document.getElementById('prompt-variant-check');
+const promptVariantToggle = document.getElementById('prompt-variant-toggle');
 const agentPanel = document.getElementById('progress-panel');
 const taskTreeEl = document.getElementById('task-tree');
 const approveBar = document.getElementById('approve-bar');
@@ -120,7 +122,8 @@ async function init() {
   themeToggle.addEventListener('click', () => {
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
     document.documentElement.setAttribute('data-theme', isDark ? '' : 'dark');
-    themeToggle.textContent = isDark ? '☀' : '🌙';
+    themeToggle.setAttribute('aria-pressed', String(!isDark));
+    themeToggle.textContent = isDark ? '◐' : '◑';
   });
 
   sendBtn.addEventListener('click', handleSend);
@@ -146,13 +149,17 @@ async function init() {
   btnRequestPrimary.addEventListener('click', handlePrimaryRequestAction);
   btnRequestSecondary.addEventListener('click', handleSecondaryRequestAction);
 
+  agentModeToggle.classList.toggle('active', agentModeCheck.checked);
   agentModeCheck.addEventListener('change', () => {
-    if (agentModeCheck.checked) {
-      agentModeToggle.classList.add('active');
-    } else {
-      agentModeToggle.classList.remove('active');
-    }
+    agentModeToggle.classList.toggle('active', agentModeCheck.checked);
   });
+
+  if (promptVariantCheck && promptVariantToggle) {
+    promptVariantToggle.classList.toggle('active', promptVariantCheck.checked);
+    promptVariantCheck.addEventListener('change', () => {
+      promptVariantToggle.classList.toggle('active', promptVariantCheck.checked);
+    });
+  }
 }
 
 async function handleSend() {
@@ -251,7 +258,6 @@ async function runAgentMode(text) {
     const context = await getExcelContext();
     addLog('Lettura contesto Excel completata');
 
-    const promptVariantCheck = document.getElementById('prompt-variant-check');
     const promptVariant = promptVariantCheck && promptVariantCheck.checked ? 'fast' : 'default';
     const startData = await startAgent(text, context, modelSelect.value, promptVariant);
     state.currentAgentId = startData.agentId;
@@ -375,7 +381,7 @@ function openAgentEventStream(agentId) {
         } else {
           const qText = String(data.question || '');
           addLog(`[agentPaused] RENDER: domanda testo "${qText.slice(0, 80)}"`);
-          addMessage(`<div style="background:#fff3e0;border:2px solid #ff9800;border-radius:8px;padding:10px 12px;font-size:13px;font-weight:600;">❓ Domanda: ${escapeHtml(qText)}</div>`, 'bot');
+          addMessage(`<div class="inline-question-alert"><span>Domanda</span>${escapeHtml(qText)}</div>`, 'bot');
         }
       } else {
         addLog(`[agentPaused] SALTATO: reason=${data.reason}, question=${JSON.stringify(data.question).slice(0, 100)}`);
