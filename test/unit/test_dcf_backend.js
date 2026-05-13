@@ -11,6 +11,8 @@ const { getAnalystDepth } = require('../../server/models/analystDepth');
 const { normalizeAiSchema } = require('../../server/models/workbookAiSchema');
 const { normalizeUnderstanding } = require('../../server/models/workbookUnderstanding');
 const { selectLastModelState } = require('../../server/runtime/conversationMemory');
+const { isPrefetchSafeTask } = require('../../server/runtime/prefetchPolicy');
+const { registry } = require('../../server/tools/registry');
 
 async function test(name, fn) {
   try {
@@ -492,6 +494,12 @@ async function main() {
       if (previous === undefined) delete process.env.WORKBOOK_UNDERSTANDING_ENABLED;
       else process.env.WORKBOOK_UNDERSTANDING_ENABLED = previous;
     }
+  });
+
+  await test('prefetch skips high-cost workbook understanding but keeps cheap workbook reads', () => {
+    assert.strictEqual(isPrefetchSafeTask({ tool: 'workbook.understand' }, registry), false);
+    assert.strictEqual(isPrefetchSafeTask({ tool: 'workbook.readWorkbook' }, registry), true);
+    assert.strictEqual(isPrefetchSafeTask({ tool: 'workbook.buildGraph' }, registry), true);
   });
 
   await test('DCF template prefers local workbook financials over external/default data', () => {

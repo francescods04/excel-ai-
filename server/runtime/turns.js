@@ -17,6 +17,7 @@ const {
 const { buildActionPreview, hasMutationActions } = require('./actionPreview');
 const { computeLevels } = require('../utils/graph');
 const { buildUndoActions, summarizeUndo } = require('./undo');
+const { isPrefetchSafeTask } = require('./prefetchPolicy');
 
 const TURNS_DIR = path.join(__dirname, '..', 'turns');
 
@@ -537,13 +538,7 @@ async function failTurn(turnId, errorMessage, itemPatch) {
 }
 
 function isSafeTask(task) {
-  if (!task || !task.tool) return false;
-  const toolMeta = registry.meta(task.tool);
-  if (toolMeta?.category === 'read') return true;
-  if (toolMeta?.requiresApproval === 'never') return true;
-  const safePrefixes = ['yahoo.', 'workbook.read'];
-  const safeTools = new Set(['requestUserInput']);
-  return safePrefixes.some(p => task.tool.startsWith(p)) || safeTools.has(task.tool);
+  return isPrefetchSafeTask(task, registry);
 }
 
 function buildLayoutFromResults(results) {
