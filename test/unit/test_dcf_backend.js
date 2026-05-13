@@ -814,6 +814,55 @@ async function main() {
     assert.ok(plan.actions.some(action => action.sheet === 'Sheet1' && action.target === 'A3:D3' && action.options.backgroundColor === '#D9EAD3'));
   });
 
+  await test('planner preserves compact parent turn context for continuous chat', () => {
+    const compact = planner.compactPlanningContext({
+      activeSheet: 'DCF',
+      workbookSheets: ['Sheet1', 'Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit'],
+      parentPlan: {
+        objective: 'analizza questa azienda e crea una valutazione completa',
+        tasks: [
+          {
+            id: 't7',
+            agent: 'formula',
+            tool: 'finance.dcf.buildSection',
+            status: 'completed',
+            description: 'Costruisci la sezione DCF con proiezioni e valutazione.',
+            params: {
+              section: 'dcf',
+              sheet: 'DCF',
+              mode: 'ai_assisted',
+              sourcePriority: 'workbook_first',
+              usesResults: ['t1', 't2']
+            },
+            deps: ['t1', 't2']
+          }
+        ]
+      },
+      parentResults: {
+        t7: {
+          data: {
+            builder: 'ai-assisted',
+            section: 'dcf',
+            sourceType: 'workbook',
+            sheets: ['DCF'],
+            summary: 'DCF built from local workbook financials.'
+          },
+          actions: [
+            { type: 'setCellRange', sheet: 'DCF', target: 'A1:H40', cells: { A1: { value: 'DCF Model' } } }
+          ]
+        }
+      }
+    });
+
+    assert.strictEqual(compact.parentPlan.objective, 'analizza questa azienda e crea una valutazione completa');
+    assert.strictEqual(compact.parentPlan.tasks[0].tool, 'finance.dcf.buildSection');
+    assert.strictEqual(compact.parentPlan.tasks[0].section, 'dcf');
+    assert.strictEqual(compact.parentResults.results.t7.builder, 'ai-assisted');
+    assert.strictEqual(compact.parentResults.results.t7.sourceType, 'workbook');
+    assert.deepStrictEqual(compact.parentResults.results.t7.sheets, ['DCF']);
+    assert.strictEqual(compact.parentResults.results.t7.sampleActions[0].target, 'A1:H40');
+  });
+
   await test('planner keeps short formatting requests attached to the last model', async () => {
     const plan = await planner.plan('cambia la formattazione in verde professionale', {
       activeSheet: 'Sheet1',

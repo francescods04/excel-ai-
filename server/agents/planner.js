@@ -214,6 +214,102 @@ function compactAllSheetsData(allSheetsData, activeSheet) {
   return compact;
 }
 
+function truncateText(value, maxLength = 240) {
+  if (value === undefined || value === null) return undefined;
+  const text = String(value).replace(/\s+/g, ' ').trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1))}...`;
+}
+
+function extractSheetNamesFromActions(actions = []) {
+  const sheets = [];
+  for (const action of actions) {
+    if (!action || typeof action !== 'object') continue;
+    const sheet = action.sheet || action.sheetName || action.name;
+    if (sheet) sheets.push(sheet);
+  }
+  return normalizeSheetSet(sheets).slice(0, 16);
+}
+
+function summarizeActionForPrompt(action = {}) {
+  if (!action || typeof action !== 'object') return null;
+  return {
+    type: action.type,
+    sheet: action.sheet || action.sheetName || action.name,
+    target: action.target || action.range || action.address,
+    cell: action.cell,
+    name: action.name
+  };
+}
+
+function compactParentPlan(parentPlan) {
+  if (!parentPlan || typeof parentPlan !== 'object' || !Array.isArray(parentPlan.tasks)) return null;
+  return {
+    objective: truncateText(parentPlan.objective, 260),
+    taskCount: parentPlan.tasks.length,
+    tasks: parentPlan.tasks.slice(0, 48).map(task => {
+      const params = task?.params || {};
+      return {
+        id: task?.id,
+        agent: task?.agent,
+        tool: task?.tool,
+        status: task?.status,
+        description: truncateText(task?.description, 220),
+        deps: Array.isArray(task?.deps) ? task.deps.slice(0, 10) : [],
+        section: params.section,
+        sheet: params.sheet,
+        sheets: Array.isArray(params.sheets) ? params.sheets.slice(0, 16) : undefined,
+        scope: params.scope,
+        mode: params.mode,
+        sourcePriority: params.sourcePriority,
+        usesResults: Array.isArray(params.usesResults) ? params.usesResults.slice(0, 12) : undefined
+      };
+    })
+  };
+}
+
+function compactParentResults(parentResults) {
+  if (!parentResults || typeof parentResults !== 'object') return null;
+  const entries = Object.entries(parentResults).slice(0, 48);
+  const results = {};
+  for (const [taskId, result] of entries) {
+    if (!result || typeof result !== 'object') continue;
+    const data = result.data && typeof result.data === 'object' ? result.data : {};
+    const directActions = Array.isArray(result.actions) ? result.actions : [];
+    const plannedActions = Array.isArray(data.actions) ? data.actions : [];
+    const actionSampleSource = directActions.length > 0 ? directActions : plannedActions;
+    const sheets = normalizeSheetSet([
+      data.sheet,
+      data.sheetName,
+      data.activeSheet,
+      ...(Array.isArray(data.sheets) ? data.sheets.map(sheet => (
+        typeof sheet === 'string' ? sheet : (sheet?.name || sheet?.sheetName || sheet?.sheet)
+      )) : []),
+      ...extractSheetNamesFromActions(actionSampleSource)
+    ]).slice(0, 16);
+
+    results[taskId] = {
+      builder: data.builder,
+      section: data.section || data.analystDepth?.section,
+      modelType: data.modelType,
+      theme: data.theme,
+      strategy: data.strategy,
+      sourceType: data.sourceType,
+      sheet: data.sheet || data.sheetName || data.activeSheet,
+      sheets,
+      actionCount: directActions.length,
+      plannedActionCount: plannedActions.length,
+      error: truncateText(result.error || data.error, 220),
+      summary: truncateText(data.summary, 260),
+      sampleActions: actionSampleSource.slice(0, 8).map(summarizeActionForPrompt).filter(Boolean)
+    };
+  }
+  return {
+    resultCount: Object.keys(parentResults).length,
+    results
+  };
+}
+
 function compactPlanningContext(context) {
   if (!context || typeof context !== 'object') return {};
 
@@ -241,6 +337,8 @@ function compactPlanningContext(context) {
       turnId: context.lastModelState.turnId || null,
       keyCells: context.lastModelState.keyCells || {}
     } : null,
+    parentPlan: compactParentPlan(context.parentPlan),
+    parentResults: compactParentResults(context.parentResults),
     inferredData: {
       inputCount: parsed.inferredInputs.length,
       highConfidenceInputs: parsed.inferredInputs.filter(i => i.confidence === 'high').map(i => ({
@@ -541,18 +639,48 @@ function jaccardSimilarity(tokensA, tokensB) {
   return union === 0 ? 0 : intersection / union;
 }
 
+function getPlanCacheContextHash(context) {
+  const sheetsHash = (context?.workbookSheets || []).slice().sort().join(',');
+  const lastModel = context?.lastModelState && typeof context.lastModelState === 'object'
+    ? [
+      context.lastModelState.turnId || '',
+      context.lastModelState.modelType || '',
+      ...(Array.isArray(context.lastModelState.sheets) ? context.lastModelState.sheets.slice(0, 16).sort() : [])
+    ].join('|')
+    : '';
+  const parentPlan = context?.parentPlan && typeof context.parentPlan === 'object'
+    ? [
+      truncateText(context.parentPlan.objective, 120) || '',
+      ...(Array.isArray(context.parentPlan.tasks) ? context.parentPlan.tasks.slice(0, 36).map(task => (
+        `${task?.id || ''}:${task?.tool || ''}:${task?.params?.section || task?.section || ''}:${task?.params?.sheet || task?.sheet || ''}`
+      )) : [])
+    ].join('|')
+    : '';
+  const parentResults = context?.parentResults && typeof context.parentResults === 'object'
+    ? Object.entries(context.parentResults).slice(0, 36).map(([id, result]) => {
+      const data = result?.data || {};
+      const actions = Array.isArray(result?.actions) ? result.actions.length : 0;
+      const planned = Array.isArray(data?.actions) ? data.actions.length : 0;
+      return `${id}:${data.builder || ''}:${data.section || data.analystDepth?.section || ''}:${data.sheet || data.sheetName || ''}:${actions}:${planned}`;
+    }).join('|')
+    : '';
+  return `sheets=${sheetsHash};last=${lastModel};parentPlan=${parentPlan};parentResults=${parentResults}`;
+}
+
 function getPlanCacheKey(objective, context) {
   const normalizedObjective = String(objective).toLowerCase()
     .replace(/[.,;:!?()]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
-  const sheetsHash = (context?.workbookSheets || []).slice().sort().join(',');
-  return `${normalizedObjective}::${sheetsHash}`;
+  return `${normalizedObjective}::${getPlanCacheContextHash(context)}`;
 }
 
 function getSemanticCacheKey(tokens, context) {
-  const sheetsHash = (context?.workbookSheets || []).slice().sort().join(',');
-  return `${tokens.join('|')}::${sheetsHash}`;
+  return `${tokens.join('|')}::${getPlanCacheContextHash(context)}`;
+}
+
+function cacheContextHashFromKey(key) {
+  return String(key).split('::').slice(1).join('::');
 }
 
 function getCachedPlan(key, objectiveTokens = null) {
@@ -569,10 +697,11 @@ function getCachedPlan(key, objectiveTokens = null) {
     let bestMatch = null;
     let bestScore = 0;
     const now = Date.now();
+    const contextHash = cacheContextHashFromKey(key);
     for (const [cachedKey, cachedEntry] of planCache.entries()) {
       if (!cachedEntry.tokens || cachedEntry.tokens.length === 0) continue;
-      // Only consider entries with same workbook sheets (exact key suffix match)
-      if (!key.endsWith(cachedKey.split('::').pop())) continue;
+      // Only consider entries with the same workbook/continuity context.
+      if (cacheContextHashFromKey(cachedKey) !== contextHash) continue;
       const age = now - cachedEntry.timestamp;
       if (age > SEMANTIC_CACHE_TTL_MS) continue;
       const score = jaccardSimilarity(objectiveTokens, cachedEntry.tokens);
@@ -1615,7 +1744,10 @@ async function plan(objective, context, turnId, options = {}) {
   const domainGuideText = domainGuide
     ? `\n\nPlaybook di riferimento disponibile al runtime (NON è un piano obbligatorio: usalo come set di primitive e guardrail; tu resti responsabile di decidere cosa fare):\n${JSON.stringify(domainGuide, null, 2)}`
     : '';
-  const userPromptBase = `${conversationCtx}${recentSheets}Crea un piano di esecuzione per: "${objective}".\n\nContesto Excel attuale (compattato):\n${JSON.stringify(planningContext, null, 2)}${domainGuideText}`;
+  const continuityInstruction = planningContext.parentPlan || planningContext.parentResults
+    ? 'CONTESTO DI CONTINUITA: questo turn ha un parent turn. Usa parentPlan, parentResults, lastModelState e recentSheets per lavorare in modo incrementale sul modello gia creato. Se la richiesta e una modifica (colori, formattazione, formule, assunzioni, fix), non ricreare il workbook: identifica i fogli/azioni gia esistenti e pianifica solo lettura minima + modifica mirata + verifica.\n'
+    : '';
+  const userPromptBase = `${conversationCtx}${recentSheets}${continuityInstruction}Crea un piano di esecuzione per: "${objective}".\n\nContesto Excel attuale (compattato):\n${JSON.stringify(planningContext, null, 2)}${domainGuideText}`;
   logger.info('[Planner] Chiamata LLM in corso...');
 
   // Attempt streaming first if turnId is provided (for progress UX)
@@ -1700,6 +1832,7 @@ async function plan(objective, context, turnId, options = {}) {
 
 module.exports = {
   plan,
+  compactPlanningContext,
   enforceWorkbookFirstPlan,
   ensureWorkbookUnderstandingPlan,
   workbookHasLocalFinancials,
