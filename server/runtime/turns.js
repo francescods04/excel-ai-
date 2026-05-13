@@ -694,7 +694,8 @@ async function executeSingleTask(turnId, task) {
 
     // Critic retry loop: re-prompt FormulaAgent on validation errors (max CRITIC_MAX_RETRY).
     const MAX_CRITIC_RETRY = Number(process.env.CRITIC_MAX_RETRY ?? 2);
-    const isFormulaTask = task.tool === 'llm.writeFormulas';
+    const isFormulaTask = task.tool === 'llm.writeFormulas'
+      || (task.tool === 'finance.dcf.buildSection' && task.agent === 'formula');
     let result;
     let criticResult;
     let attempt = 0;
@@ -737,6 +738,12 @@ async function executeSingleTask(turnId, task) {
     if (criticResult.warnings.length > 0) {
       const warnSummary = criticResult.warnings.join('; ');
       appendLog(turnId, `[${task.id}] Warning: ${warnSummary}`, 'warn', { taskId: task.id, itemId });
+    }
+    if (result.data?.builder) {
+      appendLog(turnId, `[${task.id}] Builder: ${result.data.builder}`, result.data.aiError ? 'warn' : 'info', {
+        taskId: task.id,
+        itemId
+      });
     }
 
     // Log metriche critic (formula count, mutation count)

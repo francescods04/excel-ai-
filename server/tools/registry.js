@@ -1,6 +1,6 @@
 const Ajv = require('ajv');
 const yahoo = require('../tools/yahoo');
-const { buildDcfSection } = require('../models/dcfTemplate');
+const { buildDcfSectionAi } = require('../models/dcfAiBuilder');
 const { runLayoutAgent, runFormulaAgent, runFormatAgent } = require('../agents/specialists');
 const { searchTools } = require('../utils/toolSearch');
 const SHARED_SCHEMAS = require('./schemas');
@@ -260,9 +260,9 @@ registerTool('yahoo.fundamentals', async (params) => {
 });
 
 registerTool('finance.dcf.buildSection', async (params, memory) => {
-  return buildDcfSection(params, memory);
+  return buildDcfSectionAi(params, memory);
 }, {
-  description: 'Costruisce una sezione deterministica di un DCF completo (shell, assumptions, WACC, DCF, sensitivity, format) con formule Excel istituzionali.',
+  description: 'Costruisce una sezione AI-assisted di un DCF completo (shell, assumptions, WACC, DCF, sensitivity, format) con formule Excel istituzionali e fallback deterministico.',
   inputs: ['section', 'ticker', 'companyName'],
   schema: {
     type: 'object',
@@ -276,6 +276,7 @@ registerTool('finance.dcf.buildSection', async (params, memory) => {
       companyName: { type: 'string' },
       objective: { type: 'string' },
       projectionYears: { type: 'integer', minimum: 5, maximum: 5 },
+      mode: { type: 'string', enum: ['ai_assisted', 'template'] },
       usesResults: { type: 'array', items: { type: 'string' } }
     }
   },

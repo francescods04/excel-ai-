@@ -42,7 +42,7 @@ TOOLS:
 - data (OpenBB): openbb.equity.quote, openbb.equity.historical, openbb.equity.profile, openbb.equity.fundamentals.balance, openbb.equity.fundamentals.income, openbb.equity.fundamentals.cash, openbb.equity.fundamentals.metrics, openbb.equity.fundamentals.ratios, openbb.equity.fundamentals.income_growth, openbb.equity.fundamentals.balance_growth, openbb.equity.fundamentals.cash_growth, openbb.equity.estimates.consensus, openbb.equity.peers, openbb.equity.performance, openbb.equity.fundamentals.management, openbb.equity.fundamentals.esg
 - data (macro): openbb.fixedincome.treasury, openbb.fixedincome.yield_curve, openbb.fixedincome.effr, openbb.economy.cpi, openbb.economy.gdp_real, openbb.economy.unemployment, openbb.economy.interest_rates, openbb.economy.risk_premium, openbb.economy.money_measures, openbb.economy.gdp_forecast
 - data (market): openbb.index.snapshots, openbb.index.historical, openbb.etf.info, openbb.etf.holdings, openbb.currency.historical, openbb.crypto.historical
-- deterministic finance: finance.dcf.buildSection (sections: shell, assumptions, wacc, dcf, sensitivity, format, all)
+- AI-assisted finance: finance.dcf.buildSection (sections: shell, assumptions, wacc, dcf, sensitivity, format, all; formula sections use an analyst LLM with deterministic fallback)
 - read: workbook.readWorkbook, workbook.readSheet, workbook.readRange
 - layout: llm.planLayout
 - formula: llm.writeFormulas
@@ -367,16 +367,17 @@ function buildDeterministicDcfPlan(objective, context, equityIntent = {}) {
     companyName,
     objective,
     projectionYears: 5,
+    mode: 'ai_assisted',
     usesResults: dataDeps
   };
   if (ticker) baseParams.ticker = ticker;
 
   const sections = [
     { section: 'shell', agent: 'layout', description: 'Create DCF workbook shell: Assumptions, WACC, DCF, Sensitivity', deps: dataDeps },
-    { section: 'assumptions', agent: 'formula', description: 'Populate DCF assumptions from market data and sensible defaults', deps: [`t${nextId}`] },
-    { section: 'wacc', agent: 'formula', description: 'Build WACC calculation from CAPM and capital structure', deps: [`t${nextId + 1}`] },
-    { section: 'dcf', agent: 'formula', description: 'Build 5-year DCF projection, terminal value, EV and implied share price', deps: [`t${nextId + 2}`] },
-    { section: 'sensitivity', agent: 'formula', description: 'Build WACC x terminal growth sensitivity tables', deps: [`t${nextId + 3}`] },
+    { section: 'assumptions', agent: 'formula', description: 'AI-build DCF assumptions from market data with auditable source notes', deps: [`t${nextId}`] },
+    { section: 'wacc', agent: 'formula', description: 'AI-build WACC calculation from CAPM and capital structure', deps: [`t${nextId + 1}`] },
+    { section: 'dcf', agent: 'formula', description: 'AI-build 5-year DCF projection, terminal value, EV and implied share price', deps: [`t${nextId + 2}`] },
+    { section: 'sensitivity', agent: 'formula', description: 'AI-build WACC x terminal growth sensitivity tables', deps: [`t${nextId + 3}`] },
     { section: 'format', agent: 'format', description: 'Apply institutional finance formatting across DCF sheets', deps: [`t${nextId + 4}`] }
   ];
 
@@ -393,7 +394,7 @@ function buildDeterministicDcfPlan(objective, context, equityIntent = {}) {
     nextId++;
   }
 
-  logger.info(`[Planner] Deterministic DCF plan generated for ${ticker || companyName}`);
+  logger.info(`[Planner] AI-assisted DCF plan generated for ${ticker || companyName}`);
   return { objective, tasks };
 }
 

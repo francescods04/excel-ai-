@@ -1,6 +1,8 @@
 const assert = require('assert');
 const planner = require('../../server/agents/planner');
 const { buildDcfSection, inferDcfInputs } = require('../../server/models/dcfTemplate');
+const { buildDcfSectionAi, normalizeActions } = require('../../server/models/dcfAiBuilder');
+const { validateFormula, validateTaskOutput } = require('../../server/agents/critic');
 const { inferEquityIntent } = require('../../server/utils/equityIntent');
 
 async function test(name, fn) {
@@ -51,7 +53,7 @@ async function main() {
     assert.strictEqual(intent.hasBuildIntent, true);
   });
 
-  await test('planner turns Apple DCF into full deterministic backend pipeline', async () => {
+  await test('planner turns Apple DCF into full AI-assisted backend pipeline', async () => {
     const plan = await planner.plan('voglio fare un dcf di apple', {
       activeSheet: 'Sheet1',
       workbookSheets: ['Sheet1']
@@ -66,6 +68,9 @@ async function main() {
       .filter(task => task.tool === 'finance.dcf.buildSection')
       .map(task => task.params.section);
     assert.deepStrictEqual(dcfSections, ['shell', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'format']);
+    plan.tasks
+      .filter(task => task.tool === 'finance.dcf.buildSection')
+      .forEach(task => assert.strictEqual(task.params.mode, 'ai_assisted'));
 
     const shellTask = plan.tasks.find(task => task.params.section === 'shell');
     assert.strictEqual(shellTask.params.ticker, 'AAPL');
@@ -95,6 +100,63 @@ async function main() {
     const sensCells = sensitivity.actions[0].cells;
     assert.ok(sensCells.C5.formula.includes('DCF!$G$20'));
     assert.ok(sensCells.G18.formula.includes('SUM(DCF!$C$24:$G$24)'));
+  });
+
+  await test('critic validates DCF cross-sheet formulas without regex crash', () => {
+    const formula = '=SUM(DCF!$C$24:$G$24)+Assumptions!$B$33-WACC!$B$19';
+    const result = validateFormula(formula, {
+      sheets: ['Assumptions', 'WACC', 'DCF', 'Sensitivity'],
+      references: new Set()
+    });
+    assert.strictEqual(result.ok, true);
+    assert.ok(result.refs.includes('DCF!$C$24:$G$24'));
+    assert.ok(result.refs.includes('Assumptions!$B$33'));
+    assert.ok(result.refs.includes('WACC!$B$19'));
+  });
+
+  await test('critic accepts every deterministic DCF section before Excel execution', () => {
+    const layout = {
+      sheets: ['Assumptions', 'WACC', 'DCF', 'Sensitivity'],
+      references: new Set()
+    };
+    for (const section of ['assumptions', 'wacc', 'dcf', 'sensitivity']) {
+      const output = buildDcfSection({ section, ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
+      const critic = validateTaskOutput(output, layout);
+      assert.strictEqual(critic.ok, true, `${section}: ${JSON.stringify(critic.errors)}`);
+      assert.ok(critic.stats.formulaCount > 0, `${section} should expose formulas in stats`);
+      assert.ok(critic.stats.mutationCount > 0, `${section} should expose mutations in stats`);
+    }
+  });
+
+  await test('AI DCF action normalizer preserves formula semantics in setCellRange', () => {
+    const actions = normalizeActions([
+      {
+        type: 'setCellRange',
+        cells: {
+          A1: { value: 'Metric' },
+          B1: { value: '=Assumptions!$B$10' }
+        }
+      }
+    ], 'DCF');
+
+    assert.strictEqual(actions.length, 1);
+    assert.strictEqual(actions[0].sheet, 'DCF');
+    assert.strictEqual(actions[0].cells.A1.value, 'Metric');
+    assert.strictEqual(actions[0].cells.B1.formula, '=Assumptions!$B$10');
+    assert.strictEqual(actions[0].cells.B1.value, undefined);
+  });
+
+  await test('AI DCF builder can be disabled for deterministic fallback', async () => {
+    const previous = process.env.DCF_AI_BUILDER_ENABLED;
+    process.env.DCF_AI_BUILDER_ENABLED = 'false';
+    try {
+      const output = await buildDcfSectionAi({ section: 'wacc', ticker: 'AAPL' }, mockMemory);
+      assert.strictEqual(output.data.builder, 'template');
+      assert.strictEqual(output.actions[0].sheet, 'WACC');
+    } finally {
+      if (previous === undefined) delete process.env.DCF_AI_BUILDER_ENABLED;
+      else process.env.DCF_AI_BUILDER_ENABLED = previous;
+    }
   });
 }
 
