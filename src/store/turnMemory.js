@@ -45,7 +45,10 @@ function writeTurnMemory(patch = {}) {
     ...patch,
     updatedAt: Date.now()
   };
-  if (!next.lastTurnId && !next.lastCompletedTurnId) return null;
+  if (!next.lastTurnId && !next.lastCompletedTurnId) {
+    try { storage.removeItem(TURN_MEMORY_KEY); } catch (removeErr) {}
+    return null;
+  }
   try {
     storage.setItem(TURN_MEMORY_KEY, JSON.stringify(next));
     return next;
@@ -75,11 +78,16 @@ function persistTurnCompleted(turnId, ok = true) {
   });
 }
 
+function forgetActiveTurn() {
+  return writeTurnMemory({ lastTurnId: null });
+}
+
 export {
   TURN_MEMORY_KEY,
   TURN_MEMORY_TTL_MS,
   readTurnMemory,
   restoreTurnMemory,
   persistTurnStarted,
-  persistTurnCompleted
+  persistTurnCompleted,
+  forgetActiveTurn
 };

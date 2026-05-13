@@ -1,7 +1,7 @@
 'use strict';
 
 import state from './store/state.js';
-import { restoreTurnMemory, persistTurnStarted, persistTurnCompleted } from './store/turnMemory.js';
+import { restoreTurnMemory, persistTurnStarted, persistTurnCompleted, forgetActiveTurn } from './store/turnMemory.js';
 import { escapeHtml, formatActionTarget, isRangeWriteAction, summarizeMatrix } from './utils/html.js';
 import { initTabs, switchTab, updateProgressBadge, API_BASE } from './ui/tabs.js';
 import { addMessage, removeMessage, showTypingIndicator, hideTypingIndicator, showQuestionOptionsInChat, getChatContainer } from './ui/chat.js';
@@ -16,7 +16,7 @@ import { hideRequestPanel, showPermissionRequest, showUserInputRequest, showQues
 import { getExcelContext } from './excel/context.js';
 import { worksheetExists, readWorkbookSnapshot, readSheetSnapshot, readRangeSnapshot, readRangeAsCsv, readNamedRanges, readMultiRangeBatch } from './excel/readers.js';
 import { enqueueActions, executeActions as execActions, undoLastSnapshot } from './excel/writers.js';
-import { startTurn, approveTurnExecution, postTurnResponse, postTurnResponseBatch, getErrorMessageFromResponse } from './api/turn.js';
+import { startTurn, approveTurnExecution, postTurnResponse, postTurnResponseBatch, getTurn, getErrorMessageFromResponse } from './api/turn.js';
 import { startAgent, resumeAgentWithResponse, postAgentClientResponse } from './api/agent.js';
 import { loadModelConfig, changeModel, warmupLLM } from './api/config.js';
 
@@ -165,6 +165,8 @@ async function init() {
       promptVariantToggle.classList.toggle('active', promptVariantCheck.checked);
     });
   }
+
+  resumeStoredTurnIfActive(restoredTurnMemory);
 }
 
 async function handleSend() {
@@ -224,6 +226,7 @@ function resetAgent() {
   hideApproveBar();
   hideRequestPanel();
   state.currentTurnId = null;
+  forgetActiveTurn();
   state.currentPlanTasks = null;
   state.handledActionBatchIds.clear();
   state.handledRequestIds.clear();
@@ -242,6 +245,28 @@ function resetRequestQueue() {
   state.activeRequest = null;
   state.isProcessingRequestQueue = false;
   hideRequestPanel();
+}
+
+async function resumeStoredTurnIfActive(restoredTurnMemory) {
+  const turnId = restoredTurnMemory?.lastTurnId;
+  if (!turnId || state.currentTurnId) return;
+
+  try {
+    const turn = await getTurn(turnId);
+    const resumable = ['planning', 'awaiting_approval', 'running'].includes(turn.status);
+    if (!resumable) return;
+
+    state.currentTurnId = turn.id;
+    state.lastTurnId = turn.id;
+    switchTab('progress');
+    startElapsedTimer();
+    const planMsgId = addMessage(`Riprendo il turn in corso: <strong>${escapeHtml(turn.id)}</strong>`, 'bot');
+    addLog(`Ripresa turn ${turn.id} (${turn.status})`, 'info');
+    if (turn.status === 'awaiting_approval') showApproveBar();
+    openTurnEventStream(turn.id, planMsgId);
+  } catch (err) {
+    addLog(`Ripresa turn salvato non disponibile: ${err.message}`, 'warn');
+  }
 }
 
 function closeAgentEventStream() {

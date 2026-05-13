@@ -49,6 +49,14 @@ async function postTurnResponseBatch(turnId, responses) {
   }
 }
 
+async function getTurn(turnId) {
+  const res = await fetch(`${API_BASE}/api/turn/${encodeURIComponent(turnId)}`);
+  if (!res.ok) {
+    throw new Error(await getErrorMessageFromResponse(res, 'Errore lettura turn'));
+  }
+  return res.json();
+}
+
 async function getErrorMessageFromResponse(response, fallbackMessage) {
   const fallback = fallbackMessage || `Errore HTTP ${response.status}`;
   if (!response) return fallback;
@@ -72,4 +80,4 @@ async function getErrorMessageFromResponse(response, fallbackMessage) {
   return fallback;
 }
 
-export { startTurn, approveTurnExecution, postTurnResponse, postTurnResponseBatch, getErrorMessageFromResponse, API_BASE };
+export { startTurn, approveTurnExecution, postTurnResponse, postTurnResponseBatch, getTurn, getErrorMessageFromResponse, API_BASE };
