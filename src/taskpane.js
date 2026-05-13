@@ -410,6 +410,8 @@
     let attempt = 0;
     const maxBackoff = 15000;
     let currentSource = null;
+    let lastPlanningProgressAt = 0;
+    let lastPlanningProgressChars = 0;
 
     function setupListeners(src) {
       let planReceived = false;
@@ -516,11 +518,20 @@
       src.addEventListener('llmProgress', (e) => {
         try {
           const data = JSON.parse(e.data);
-          if (data.text) {
-            // Show first ~120 chars as a status indicator while LLM generates
-            const preview = data.text.length > 120 ? data.text.slice(0, 120) + '...' : data.text;
-            if (!planReceived) {
-              addLog(`Generazione piano in corso... ${preview}`);
+          if (data.text && !planReceived) {
+            const now = Date.now();
+            const chars = String(data.text).length;
+            const shouldLog = data.isDone
+              || lastPlanningProgressAt === 0
+              || now - lastPlanningProgressAt >= 5000
+              || chars - lastPlanningProgressChars >= 3000;
+
+            if (shouldLog) {
+              lastPlanningProgressAt = now;
+              lastPlanningProgressChars = chars;
+              addLog(data.isDone
+                ? 'Generazione piano LLM completata.'
+                : `Generazione piano LLM in corso (${chars} caratteri)...`);
             }
           }
         } catch (err) {}
@@ -1922,9 +1933,8 @@
       } else if (spec.value !== undefined) {
         cell.values = [[spec.value]];
       }
-      if (spec.note) {
-        cell.comments.add(spec.note);
-      }
+      // Excel comments can fail late during context.sync and abort the whole batch.
+      // Keep notes out of the write path until comments have a dedicated safe action.
       if (spec.cellStyles) {
         const fmt = spec.cellStyles;
         if (fmt.fontColor) cell.format.font.color = fmt.fontColor;
@@ -2171,25 +2181,52 @@
   // -------- Steps Panel (todo_write) --------
 
   function updateStepsPanel(todos) {
-    if (!todos || todos.length === 0) return;
     const panel = document.getElementById('steps-panel');
     const list = document.getElementById('steps-list');
+    if (!panel || !list) return;
+
+    if (!todos || todos.length === 0) {
+      panel.classList.add('hidden');
+      panel.classList.remove('visible');
+      list.innerHTML = '';
+      return;
+    }
+
+    const allDone = todos.every(t => t.status === 'completed' || t.status === 'cancelled');
+    if (allDone) {
+      // Auto-clear after brief flash so the user sees the final ✓ state
+      panel.classList.remove('hidden');
+      panel.classList.add('visible');
+      renderSteps(list, todos);
+      setTimeout(() => {
+        panel.classList.add('hidden');
+        panel.classList.remove('visible');
+        list.innerHTML = '';
+      }, 1500);
+      return;
+    }
+
     panel.classList.remove('hidden');
     panel.classList.add('visible');
+    renderSteps(list, todos);
+  }
 
+  function renderSteps(list, todos) {
     list.innerHTML = todos.map(todo => {
       const statusIcon = {
         pending: '○',
-        in_progress: '◐',
+        in_progress: '<span class="step-spinner"></span>',
         completed: '✓',
         cancelled: '✕'
       }[todo.status] || '○';
 
+      // Prefer activeForm while in_progress (Anthropic UX), fallback to content
+      const label = (todo.status === 'in_progress' && todo.activeForm) ? todo.activeForm : todo.content;
+
       return `
         <div class="step-item ${todo.status}">
           <span class="step-icon">${statusIcon}</span>
-          <span class="step-content">${escapeHtml(todo.content)}</span>
-          <span class="step-priority priority-${todo.priority || 'medium'}">${todo.priority || 'medium'}</span>
+          <span class="step-content">${escapeHtml(label)}</span>
         </div>
       `;
     }).join('');

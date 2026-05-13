@@ -36,6 +36,11 @@ app.get('/api/health', (req, res) => {
     || (llmCfg.provider === 'deepseek' ? process.env.DEEPSEEK_MODEL : null)
     || process.env.AI_MODEL
     || 'kimi-k2.6';
+  const fallbackModel = llmCfg.fallbackModel
+    || (llmCfg.provider === 'openrouter' ? process.env.OPENROUTER_FALLBACK_MODEL : null)
+    || (llmCfg.provider === 'deepseek' ? process.env.DEEPSEEK_FALLBACK_MODEL : null)
+    || process.env.AI_FALLBACK_MODEL
+    || '';
 
   res.json({
     ok: true,
@@ -46,12 +51,12 @@ app.get('/api/health', (req, res) => {
     model: {
       provider: llmCfg.provider,
       primary: activeModel,
-      fallback: llmCfg.fallbackModel || process.env.AI_FALLBACK_MODEL || '',
-      maxTokens: Number(process.env.MAX_TOKENS) || 16384
+      fallback: fallbackModel,
+      maxTokens: Number(process.env.MAX_TOKENS) || 131072
     },
     tools: {
       count: TOOL_DEFINITIONS.length,
-      list: TOOL_DEFINITIONS.map(t => t.name)
+      list: TOOL_DEFINITIONS.map(t => t.function?.name || t.name)
     },
     promptVariant,
     promptVariantsAvailable: Object.keys(PROMPT_VARIANTS),
@@ -72,7 +77,7 @@ app.get('/api/health', (req, res) => {
     env: {
       nodeEnv: process.env.NODE_ENV || 'development',
       cacheBreakpointEnabled: process.env.CACHE_BREAKPOINT_ENABLED !== 'false',
-      autoCompactLimit: Number(process.env.AGENT_AUTO_COMPACT_LIMIT) || 18
+      autoCompactLimit: Number(process.env.AGENT_AUTO_COMPACT_LIMIT) || 80
     }
   });
 });
@@ -81,10 +86,10 @@ app.get('/api/health', (req, res) => {
 
 app.post('/api/turn/start', async (req, res) => {
   try {
-    const { message, context, parentTurnId } = req.body;
+    const { message, context, parentTurnId, modelOverride } = req.body;
     if (!message) return res.status(400).json({ error: 'Messaggio richiesto' });
 
-    const turn = turns.startTurn(message, context, parentTurnId || null);
+    const turn = turns.startTurn(message, context, parentTurnId || null, { modelOverride });
     res.json({
       turnId: turn.id,
       status: turn.status

@@ -3,13 +3,15 @@ const path = require('path');
 const { callLLM, callLLMStreaming, getLLMConfig } = require('../tools/llm');
 const logger = require('../utils/logger');
 const { executeTool, registry } = require('../tools/registry');
+const SHARED_SCHEMAS = require('../tools/schemas');
 const { validateTaskOutput } = require('./critic');
 const streaming = require('./streaming');
 const { initializeTools } = require('../utils/toolSearch');
 const { detectSkills } = require('../utils/skillSuggest');
 
-const AGENT_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT_AGENT || 'low';
+const AGENT_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT_AGENT || 'high';
 const AGENT_THINKING_FIRST_ITER = process.env.AGENT_THINKING_FIRST_ITER !== 'false';
+const AGENT_THINKING_EVERY_ITER = process.env.AGENT_THINKING_EVERY_ITER !== 'false';
 const AGENT_USE_STREAMING = process.env.AGENT_USE_STREAMING !== 'false';
 
 /* ---------- Message ID helpers for context_snip targeting ---------- */
@@ -116,7 +118,7 @@ const DEFAULT_PROMPT_VARIANT = process.env.AGENT_PROMPT_VARIANT || 'default';
 let AGENT_SYSTEM_PROMPT = loadPromptVariant(DEFAULT_PROMPT_VARIANT);
 
 /* Common output format suffix appended to ANY variant */
-const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nOUTPUT FORMAT: Respond with a JSON object containing:\n{\n  "thought": "Your reasoning about what to do next",\n  "tool": "tool_name",\n  "params": { ...tool parameters... }\n}\n\nIMPORTANT: NEVER call more than one tool at a time. Wait for the result before the next step.\n\nWHEN THE TASK IS COMPLETE: You MUST call the tool "done" with a summary. Do NOT keep calling other tools after the work is finished. Calling "done" ends the session.\n\nPYTHON RULES:\n- execute_python is ONLY for mathematical calculations on data provided as variables in the code string.\n- execute_python does NOT have access to the Excel workbook file system. Do NOT use openpyxl, xlrd, or any file paths like /tmp/current.xlsx, /files/input/workbook.xlsx, etc.\n- To read or write Excel, always use the dedicated Excel tools (set_cell_range, create_sheet, execute_excel_formula, etc.).\n\nDATA RULES:\n- Use publicly known FY2024/2025 figures from your training data for well-known companies (AAPL, MSFT, GOOGL, TSLA, etc.).\n- Do NOT search the web. Build the model immediately with available data.\n\nASK_USER_QUESTION RULES (CRITICAL):\n- The tool ask_user_question is an EMERGENCY BREAK. Use it ONLY when a truly critical piece of information is missing AND cannot be inferred from the workbook context or the user's original request.\n- NEVER ask the user for confirmation before proceeding (e.g. "Should I proceed?", "Continue?", "Go ahead?"). Just DO the work.\n- NEVER ask which sheet to use — the active sheet is provided in the context. If unspecified, default to the active sheet.\n- NEVER ask for a ticker/company name if the user already mentioned it in the original request.\n- NEVER ask for data that is already visible in the workbook context preview. Reference those cells directly.\n- If you are unsure about a minor assumption, make a reasonable default choice and proceed. Do NOT pause the flow.
+const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nOUTPUT FORMAT: Respond with a JSON object containing:\n{\n  "thought": "Your reasoning about what to do next",\n  "tool": "tool_name",\n  "params": { ...tool parameters... }\n}\n\nIMPORTANT: NEVER call more than one tool at a time. Wait for the result before the next step.\n\nEXCEL AGENT WORKFLOW:\n- For complex workbook work, inspect the workbook first, build_workbook_graph for multi-sheet dependency context, create a brief task list, then execute in small visible chunks.\n- Prefer set_cell_range for each logical section instead of many single-cell writes.\n- After important writes, verify touched ranges or formulas before calling done.\n- Report only changes you actually made and checked, with sheet names and ranges.\n- Use allow_overwrite:false when exploring a new range. Use allow_overwrite:true only when the user asked to replace or the target sheet was just created by you.\n\nWHEN THE TASK IS COMPLETE: You MUST call the tool "done" with a summary. Do NOT keep calling other tools after the work is finished. Calling "done" ends the session.\n\nPYTHON RULES:\n- execute_python is ONLY for mathematical calculations on data provided as variables in the code string.\n- execute_python does NOT have access to the Excel workbook file system. Do NOT use openpyxl, xlrd, or any file paths like /tmp/current.xlsx, /files/input/workbook.xlsx, etc.\n- To read or write Excel, always use the dedicated Excel tools (set_cell_range, create_sheet, execute_excel_formula, etc.).\n\nDATA RULES:\n- For public-company valuation work, use available finance tools first (OpenBB/Yahoo, treasury/macro tools when relevant), then visible workbook data.\n- Do not invent live market data. If a value is from training memory or a heuristic, label it as an assumption in the workbook.\n- Add short notes/comments for externally sourced input cells when the write tool supports notes.\n- Search/fetch the web only when the user asks for current source material or when a required data point is unavailable from the provided finance tools.\n\nASK_USER_QUESTION RULES (CRITICAL):\n- The tool ask_user_question is an EMERGENCY BREAK. Use it ONLY when a truly critical piece of information is missing AND cannot be inferred from the workbook context or the user's original request.\n- NEVER ask the user for confirmation before proceeding (e.g. "Should I proceed?", "Continue?", "Go ahead?"). Just DO the work.\n- NEVER ask which sheet to use — the active sheet is provided in the context. If unspecified, default to the active sheet.\n- NEVER ask for a ticker/company name if the user already mentioned it in the original request.\n- NEVER ask for data that is already visible in the workbook context preview. Reference those cells directly.\n- If you are unsure about a minor assumption, make a reasonable default choice and proceed. Do NOT pause the flow.
 
 CITATION RULES:
 - Every action explanation MUST include a citation in the format: [A1:D1](<citation:SheetName!A1:D1>)
@@ -133,6 +135,12 @@ INDUSTRY ADD-IN FORMULAS (use when user mentions Bloomberg, CapIQ, Refinitiv):
 - CapIQ CIQ: =CIQ("AAPL","IQ_TOTAL_REV")
 - Refinitiv TR: =TR("AAPL.O","TR.Revenue")
 
+LIVE DATA POLICY:
+- API/tool calls are cheap compared with wrong spreadsheet analysis. When a requested fact, market input, company figure, regulation, management detail, pricing, filing, rate, benchmark, or news item could have changed, verify it with external tools before writing assumptions or formulas.
+- Prefer structured finance tools for standardized market and statement data, and use web_search/web_fetch to cross-check, find source documents, current news, investor pages, filings, and any data point the finance tools do not clearly cover.
+- Use training memory only for stable concepts, formulas, and modeling methodology. Do not use it as the source for current facts.
+- If sources disagree, prefer official filings, company investor relations, central-bank/government/statistical sources, exchange data, or major data providers, and note the chosen source in the workbook when possible.
+
 SKILLS RULES:
 - <available_skills> are listed at the top of this prompt.
 - BEFORE starting a complex task (DCF, LBO, comps, 3-statement, audit), call read_skill to load the relevant skill instructions.
@@ -142,10 +150,15 @@ SKILLS RULES:
 LIMITATIONS — What You Cannot Do:
 - You cannot execute VBA macros.
 - You cannot download files from the internet to the user's disk.
-- You cannot access external APIs other than the provided financial data tools.
+- You cannot access external APIs or websites except through the provided tools.
 - You cannot create PivotTables or Power Query connections (not yet supported).`;
 
-AGENT_SYSTEM_PROMPT += AGENT_SYSTEM_PROMPT_SUFFIX;
+const ACTIVE_AGENT_SYSTEM_PROMPT_SUFFIX = AGENT_SYSTEM_PROMPT_SUFFIX.replace(
+  '- Search/fetch the web only when the user asks for current source material or when a required data point is unavailable from the provided finance tools.',
+  '- Search/fetch the web whenever current source material can improve accuracy, especially for mutable market, company, regulatory, pricing, filing, rate, benchmark, or news inputs.'
+);
+
+AGENT_SYSTEM_PROMPT += ACTIVE_AGENT_SYSTEM_PROMPT_SUFFIX;
 
 function getSystemPrompt(variant) {
   const v = variant || DEFAULT_PROMPT_VARIANT;
@@ -155,7 +168,7 @@ function getSystemPrompt(variant) {
   // Prepend available skills to the prompt (lightweight index, not full content)
   const skillsPrefix = skillsBlock ? skillsBlock + '\n\n' : '';
   const instructionsPrefix = instructionsBlock ? instructionsBlock + '\n\n' : '';
-  return skillsPrefix + instructionsPrefix + base + AGENT_SYSTEM_PROMPT_SUFFIX;
+  return skillsPrefix + instructionsPrefix + base + ACTIVE_AGENT_SYSTEM_PROMPT_SUFFIX;
 }
 
 /* ---------- Tool Definitions (OpenAI function calling schema) ---------- */
@@ -170,7 +183,23 @@ const TOOL_DEFINITIONS = [
         type: 'object',
         properties: {
           maxRows: { type: 'number', description: 'Max rows to read per sheet' },
-          maxCols: { type: 'number', description: 'Max cols to read per sheet' }
+          maxCols: { type: 'number', description: 'Max cols to read per sheet' },
+          includeFormulas: { type: 'boolean', description: 'Include formulas in each sheet preview (default true)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'build_workbook_graph',
+      description: 'Build a semantic WorkbookGraph for the current workbook: sheet roles, detected tables, formulas, cross-sheet dependencies, Excel errors and financial objects. Use before audits, repairs, model completion and multi-sheet analysis.',
+      parameters: {
+        type: 'object',
+        properties: {
+          maxRows: { type: 'number', description: 'Max rows to scan per sheet' },
+          maxCols: { type: 'number', description: 'Max cols to scan per sheet' },
+          workbookName: { type: 'string', description: 'Optional workbook label' }
         }
       }
     }
@@ -340,44 +369,15 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'set_cell_range',
       description: `Write cells using a map of A1 addresses to {value, formula, note, cellStyles, borderStyles}. Supports copyToRange for pattern fill. Supports allow_overwrite for overwrite protection. This is the PRIMARY write tool.\n\nExample:\n{\n  "sheet": "Sheet1",\n  "cells": {\n    "A1": { "value": "Revenue" },\n    "B1": { "value": 100, "cellStyles": { "fontColor": "#0000FF" } },\n    "B2": { "formula": "=B1*1.05" }\n  },\n  "copyToRange": "B2:B10",\n  "allow_overwrite": false\n}`,
-      parameters: {
-        type: 'object',
-        properties: {
-          sheet: { type: 'string', description: 'Sheet name' },
-          cells: {
-            type: 'object',
-            description: 'Map of A1 address to cell spec: {value, formula, note, cellStyles: {fontColor, backgroundColor, bold, numberFormat}, borderStyles}',
-            additionalProperties: {
-              type: 'object',
-              properties: {
-                value: {},
-                formula: { type: 'string' },
-                note: { type: 'string' },
-                cellStyles: {
-                  type: 'object',
-                  properties: {
-                    fontColor: { type: 'string' },
-                    backgroundColor: { type: 'string' },
-                    bold: { type: 'boolean' },
-                    numberFormat: { type: 'string' }
-                  }
-                },
-                borderStyles: { type: 'object' }
-              }
-            }
-          },
-          copyToRange: { type: 'string', description: 'Optional: copy the pattern to this range (e.g. "B2:B100")' },
-          allow_overwrite: { type: 'boolean', description: 'If false (default), fails if cells are non-empty. If true, overwrites without confirmation.' }
-        },
-        required: ['sheet', 'cells']
-      }
+      // Schema sourced from server/tools/schemas.js (single source of truth, also used by registry.js)
+      parameters: SHARED_SCHEMAS.SET_CELL_RANGE
     }
   },
   {
     type: 'function',
     function: {
       name: 'set_format',
-      description: 'Apply formatting to a cell range (colors, number format, alignment)',
+      description: 'Apply formatting to a cell range (colors, font, number format, alignment, widths/heights, borders)',
       parameters: {
         type: 'object',
         properties: {
@@ -389,8 +389,18 @@ const TOOL_DEFINITIONS = [
               backgroundColor: { type: 'string' },
               fontColor: { type: 'string' },
               bold: { type: 'boolean' },
+              italic: { type: 'boolean' },
+              fontSize: { type: 'number' },
+              fontName: { type: 'string' },
               numberFormat: { type: 'string' },
-              horizontalAlignment: { type: 'string' }
+              horizontalAlignment: { type: 'string' },
+              verticalAlignment: { type: 'string' },
+              wrapText: { type: 'boolean' },
+              columnWidth: { type: 'number' },
+              rowHeight: { type: 'number' },
+              borderBottomColor: { type: 'string' },
+              borderTopColor: { type: 'string' },
+              borders: { type: 'object' }
             }
           }
         },
@@ -461,18 +471,24 @@ const TOOL_DEFINITIONS = [
         properties: {
           questions: {
             type: 'array',
+            minItems: 1,
+            maxItems: 4,
             items: {
               type: 'object',
+              required: ['question', 'options'],
               properties: {
-                header: { type: 'string' },
-                question: { type: 'string' },
+                header: { type: 'string', description: 'Short heading shown above the question' },
+                question: { type: 'string', description: 'The question text' },
                 options: {
                   type: 'array',
+                  minItems: 2,
+                  maxItems: 4,
                   items: {
                     type: 'object',
+                    required: ['label', 'description'],
                     properties: {
-                      label: { type: 'string' },
-                      description: { type: 'string' }
+                      label: { type: 'string', description: 'Tappable button label (short)' },
+                      description: { type: 'string', description: 'One-line context shown under label' }
                     }
                   }
                 },
@@ -489,7 +505,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'todo_write',
-      description: `Update the task list shown to the user. Use to track progress on multi-phase tasks.\n\nExample:\n{\n  "todos": [\n    { "content": "Set up assumptions", "status": "completed", "priority": "high" },\n    { "content": "Build revenue projections", "status": "in_progress", "priority": "high" }\n  ]\n}`,
+      description: `Update the task list shown to the user as a "Steps" panel. Wholesale replacement — pass the entire list every time.\n\nRULES:\n- Only ONE task in_progress at a time. Move to in_progress BEFORE starting work, completed IMMEDIATELY after.\n- Never mark completed if it failed or only partially done.\n- When all tasks completed, the panel auto-clears.\n- Skip for single-step or trivial tasks.\n\nFIELDS:\n- content: short imperative phrase (<10 words), e.g. "Build revenue projections"\n- activeForm: present-continuous shown as spinner text while in_progress, e.g. "Building revenue projections"\n- status: pending → in_progress → completed (or cancelled)\n\nExample:\n{\n  "todos": [\n    { "content": "Set up assumptions", "activeForm": "Setting up assumptions", "status": "completed" },\n    { "content": "Build revenue projections", "activeForm": "Building revenue projections", "status": "in_progress" }\n  ]\n}`,
       parameters: {
         type: 'object',
         properties: {
@@ -498,10 +514,12 @@ const TOOL_DEFINITIONS = [
             items: {
               type: 'object',
               properties: {
-                content: { type: 'string' },
+                content: { type: 'string', description: 'Short imperative phrase (<10 words)' },
+                activeForm: { type: 'string', description: 'Present-continuous form shown while in_progress' },
                 status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'cancelled'] },
                 priority: { type: 'string', enum: ['high', 'medium', 'low'] }
-              }
+              },
+              required: ['content', 'status']
             }
           }
         },
@@ -984,8 +1002,8 @@ function tryAutoAnswer(questionData, context, objective) {
 async function runAgentLoop(objective, context, options = {}) {
   const maxIterations = options.maxIterations || Number(process.env.AGENT_MAX_ITER) || 200;
   const maxConsecutiveErrors = options.maxConsecutiveErrors || 4;
-  const timeoutMs = options.timeoutMs || 180000;
-  const fallbackTimeoutMs = options.fallbackTimeoutMs || 90000;
+  const timeoutMs = options.timeoutMs || Number(process.env.AGENT_LLM_TIMEOUT_MS) || 300000;
+  const fallbackTimeoutMs = options.fallbackTimeoutMs || Number(process.env.AGENT_LLM_FALLBACK_TIMEOUT_MS) || 180000;
   const onEvent = options.onEvent || (() => {});
 
   const FATAL_ERROR_PATTERNS = [
@@ -1006,7 +1024,7 @@ async function runAgentLoop(objective, context, options = {}) {
   let userPrompt = `Goal: ${objective}\n\n${overview}\n\nWorkbook context (compact JSON):\n${JSON.stringify(compactCtx, null, 2)}\n\nProceed step by step. When writing, ALWAYS pass an explicit "sheet" parameter — the active sheet at task start may NOT be where the user wants the data.`;
   const lowerObjective = objective.toLowerCase();
   if (lowerObjective.includes('apple') || lowerObjective.includes('aapl')) {
-    userPrompt += `\n\nHINT — Use these publicly known Apple FY2024 figures (build the model with these; no need to search):\n- Revenue: ~$394B\n- Net Income: ~$97B\n- EBITDA: ~$120B\n- CapEx: ~$10B\n- D&A: ~$12B\n- Shares Outstanding: ~15.5B\n- Cash & Equivalents: ~$70B\n- Total Debt: ~$110B\n- Tax Rate: ~16%\nStart immediately with todo_write to plan the DCF, then build it.`;
+    userPrompt += `\n\nHINT — These publicly known Apple FY2024 figures are rough sanity-check anchors, not live sources:\n- Revenue: ~$394B\n- Net Income: ~$97B\n- EBITDA: ~$120B\n- CapEx: ~$10B\n- D&A: ~$12B\n- Shares Outstanding: ~15.5B\n- Cash & Equivalents: ~$70B\n- Total Debt: ~$110B\n- Tax Rate: ~16%\nVerify or update current market/filing inputs with tools when available, then build the model with visible sources and review flags.`;
   }
 
   const promptVariant = options.promptVariant || DEFAULT_PROMPT_VARIANT;
@@ -1040,7 +1058,7 @@ async function runAgentLoop(objective, context, options = {}) {
   onEvent('agentStarted', { objective, iteration });
 
   let webSearchCount = 0;
-  const MAX_WEB_SEARCH = 2;
+  const MAX_WEB_SEARCH = Number(process.env.AGENT_MAX_WEB_SEARCH) || 20;
   let consecutiveErrors = 0;
   let lastErrorMessage = '';
   let aborted = false;
@@ -1052,8 +1070,8 @@ async function runAgentLoop(objective, context, options = {}) {
     onEvent('iterationStart', { iteration, maxIterations });
 
     try {
-      // Adaptive thinking: enable only on first iter (planning), disable for tool execution
-      const useThinking = AGENT_THINKING_FIRST_ITER && iteration === 1;
+      // DeepSeek calls are cheap enough that quality wins: keep thinking enabled by default.
+      const useThinking = AGENT_THINKING_EVERY_ITER || (AGENT_THINKING_FIRST_ITER && iteration === 1);
       const turnId = options.turnId || options.agentId;
       const callOpts = {
         messages,
@@ -1125,7 +1143,7 @@ async function runAgentLoop(objective, context, options = {}) {
       if (toolName === 'web_search' || toolName === 'web_fetch') {
         webSearchCount++;
         if (webSearchCount > MAX_WEB_SEARCH) {
-          const blockMsg = `Maximum web search attempts (${MAX_WEB_SEARCH}) reached. Proceed with your knowledge of publicly known figures and BUILD the model. Do NOT search again.`;
+          const blockMsg = `Maximum web search attempts (${MAX_WEB_SEARCH}) reached. Use the sourced information already gathered, label any remaining uncertain inputs as assumptions, and continue the model. Do NOT search again.`;
           logger.info(`[AgentLoop] ${blockMsg}`);
           messages.push(makeUserMessage(blockMsg));
           results.push({ type: 'error', error: blockMsg });
@@ -1273,9 +1291,9 @@ async function runAgentLoop(objective, context, options = {}) {
       onEvent('toolResult', { iteration, tool: toolName, result: toolResult });
 
       // Auto-compact context if too large (LLM should also call context_snip explicitly)
-      const AUTO_COMPACT_LIMIT = Number(process.env.AGENT_AUTO_COMPACT_LIMIT) || 18;
+      const AUTO_COMPACT_LIMIT = Number(process.env.AGENT_AUTO_COMPACT_LIMIT) || 80;
       if (messages.length > AUTO_COMPACT_LIMIT) {
-        const keepCount = 6;
+        const keepCount = Number(process.env.AGENT_AUTO_COMPACT_KEEP) || 12;
         const toCompact = messages.slice(1, messages.length - keepCount);
         // Find first and last user message IDs in the range for snipContext
         const userMsgs = toCompact.filter(m => m.role === 'user');
@@ -1444,13 +1462,18 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
   params = normalizeAgentParams(toolName, params);
   // Build a memory object compatible with registry.executeTool so that
   // workbook.* tools can access requestClientTool via memory.runtime.
-  const toolMemory = requestClientTool ? { runtime: { requestClientTool } } : {};
+  const toolMemory = { context };
+  if (requestClientTool) toolMemory.runtime = { requestClientTool };
   switch (toolName) {
     case 'read_workbook': {
       // Try client round-trip for fresh data if available
       if (requestClientTool) {
         try {
-          const data = await requestClientTool('workbook.readWorkbook', { maxRows: params.maxRows || 50, maxCols: params.maxCols || 20 });
+          const data = await requestClientTool('workbook.readWorkbook', {
+            maxRows: params.maxRows || 80,
+            maxCols: params.maxCols || 32,
+            includeFormulas: params.includeFormulas !== false
+          });
           return {
             activeSheet: data.activeSheet || context?.activeSheet,
             workbookSheets: data.workbookSheets || [],
@@ -1458,7 +1481,13 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
             selectedValues: data.selectedValues,
             selectedFormulas: data.selectedFormulas,
             allSheetsData: (data.sheets || []).reduce((acc, s) => {
-              acc[s.name] = { usedRange: s.usedRange, rowCount: s.rowCount, columnCount: s.columnCount, preview: s.preview || [] };
+              acc[s.name] = {
+                usedRange: s.usedRange,
+                rowCount: s.rowCount,
+                columnCount: s.columnCount,
+                preview: s.preview || [],
+                formulas: s.formulas || []
+              };
               return acc;
             }, {})
           };
@@ -1474,6 +1503,26 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
         usedRangeData: context?.usedRangeData,
         allSheetsData: context?.allSheetsData
       };
+    }
+    case 'build_workbook_graph': {
+      let snapshot = context || {};
+      if (requestClientTool) {
+        try {
+          snapshot = await requestClientTool('workbook.readWorkbook', {
+            maxRows: params.maxRows || 160,
+            maxCols: params.maxCols || 50,
+            includeFormulas: true
+          });
+        } catch (err) {
+          logger.warn(`[AgentLoop] Client read failed for build_workbook_graph: ${err.message}. Falling back to static context.`);
+        }
+      }
+      const result = await executeTool('workbook.buildGraph', {
+        snapshot,
+        workbookName: params.workbookName,
+        source: 'agent_loop'
+      }, toolMemory);
+      return result.data;
     }
     case 'read_sheet': {
       if (requestClientTool) {

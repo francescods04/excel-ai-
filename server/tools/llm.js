@@ -54,14 +54,42 @@ function getLLMConfig() {
   return { ...dynamicConfig };
 }
 
-const DEFAULT_LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS) || 90000;
-const DEFAULT_LLM_FALLBACK_TIMEOUT_MS = Number(process.env.LLM_FALLBACK_TIMEOUT_MS) || 45000;
+const DEFAULT_LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS) || 300000;
+const DEFAULT_LLM_FALLBACK_TIMEOUT_MS = Number(process.env.LLM_FALLBACK_TIMEOUT_MS) || 180000;
 
 const LLM_JSON_MODE = process.env.LLM_JSON_MODE !== 'false';
-const MAX_TOKENS = Number(process.env.MAX_TOKENS) || 16384;
+const MAX_TOKENS = Number(process.env.MAX_TOKENS) || 131072;
+const DEFAULT_LLM_STREAM_MAX_MS = Number(process.env.LLM_STREAM_MAX_MS) || DEFAULT_LLM_TIMEOUT_MS;
 
 /* ---------- Cache optimization ---------- */
 const CACHE_BREAKPOINT_ENABLED = process.env.CACHE_BREAKPOINT_ENABLED !== 'false';
+
+/**
+ * Track previous system-prompt hash per provider to detect cache-busting drift.
+ * DeepSeek auto-caches on identical prefix; if the system text changes between
+ * calls (e.g. timestamps, random IDs, hot-reload), the entire prefix invalidates
+ * silently. We log a warning so the regression is visible.
+ */
+const _lastSystemHash = new Map();
+function _hashSystem(text) {
+  if (!text) return '';
+  // Cheap rolling hash (FNV-1a 32-bit) — collision-safe enough to detect change.
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
+}
+function checkSystemPrefixStability(provider, systemText) {
+  const h = _hashSystem(systemText);
+  const prev = _lastSystemHash.get(provider);
+  _lastSystemHash.set(provider, h);
+  if (prev && prev !== h) {
+    logger.warn(`[Cache] ${provider} system prompt changed since last call (${prev} → ${h}). DeepSeek/Anthropic cache invalidated. Check for non-deterministic content (timestamps, random IDs, ENV vars).`);
+  }
+  return { hash: h, changed: !!prev && prev !== h };
+}
 
 /**
  * Anthropic-style 4-breakpoint cache optimization:
@@ -121,10 +149,12 @@ class CacheMessageBuilder {
    */
   build(messages, systemText, cachePrompt = false) {
     if (!CACHE_BREAKPOINT_ENABLED || !cachePrompt || !this.supportsCacheControl) {
-      // DeepSeek path: no cache_control, but log prefix size
+      // DeepSeek path: no cache_control field (DeepSeek auto-caches on identical
+      // prefix). Log prefix size + detect drift that would silently bust cache.
       if (this.provider === 'deepseek' && systemText) {
         const prefixLen = systemText.length;
-        logger.debug(`[Cache] DeepSeek prefix size: ${prefixLen} chars (${Math.round(prefixLen / 4)} tokens est.)`);
+        const drift = checkSystemPrefixStability(this.provider, systemText);
+        logger.debug(`[Cache] DeepSeek prefix size: ${prefixLen} chars (~${Math.round(prefixLen / 4)} tokens, hash=${drift.hash})`);
       }
       return messages;
     }
@@ -471,6 +501,7 @@ async function callDeepSeekStream(messages, options = {}, onChunk) {
     model,
     messages,
     temperature: 0.2,
+    max_tokens: MAX_TOKENS,
     stream: true
   };
   if (jsonMode) body.response_format = { type: 'json_object' };
@@ -497,9 +528,26 @@ async function callDeepSeekStream(messages, options = {}, onChunk) {
   const stream = response.data;
   let accumulated = '';
   let done = false;
+  const maxTotalMs = safeTimeoutMs(options.maxTotalMs, requestTimeoutMs);
 
   return new Promise((resolve, reject) => {
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    let settled = false;
+    let timeoutId = null;
+
+    function finish(error, value) {
+      if (settled) return;
+      settled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+      if (error) reject(error);
+      else resolve(value);
+    }
+
+    timeoutId = setTimeout(() => {
+      done = true;
+      try { stream.destroy(); } catch (_) {}
+      finish(new Error(`DeepSeek stream timeout after ${maxTotalMs}ms`));
+    }, maxTotalMs);
 
     rl.on('line', (line) => {
       if (done) return;
@@ -509,6 +557,7 @@ async function callDeepSeekStream(messages, options = {}, onChunk) {
       if (data === '[DONE]') {
         done = true;
         onChunk('', accumulated, true);
+        finish(null, accumulated);
         return;
       }
       try {
@@ -529,11 +578,11 @@ async function callDeepSeekStream(messages, options = {}, onChunk) {
       if (!done) {
         onChunk('', accumulated, true);
       }
-      resolve(accumulated);
+      finish(null, accumulated);
     });
 
     stream.on('error', (err) => {
-      reject(err);
+      finish(err);
     });
   });
 }
@@ -798,6 +847,7 @@ async function callOpenRouterAIStream(messages, options = {}, onChunk) {
     model,
     messages,
     temperature: 0.2,
+    max_tokens: MAX_TOKENS,
     stream: true
   };
   if (jsonMode) body.response_format = { type: 'json_object' };
@@ -891,6 +941,7 @@ async function callOpenAICompatStream(messages, options = {}, onChunk) {
     model,
     messages,
     temperature: 0.2,
+    max_tokens: MAX_TOKENS,
     stream: true
   };
   if (jsonMode) body.response_format = { type: 'json_object' };
@@ -955,6 +1006,7 @@ async function callLLMStreaming({
   system,
   messages,
   userText,
+  timeoutMs = DEFAULT_LLM_TIMEOUT_MS,
   modelOverride,
   label = 'LLM stream',
   onChunk,
@@ -990,17 +1042,22 @@ async function callLLMStreaming({
     : msgs;
 
   if (provider === 'openrouter' || provider === 'openai' || provider === 'xiaomi' || provider === 'deepseek') {
+    // Cache stability check: warn if system prefix changed since last call (cache buster)
+    if (systemText && CACHE_BREAKPOINT_ENABLED) {
+      checkSystemPrefixStability(provider, systemText);
+    }
     logger.info(`[LLM] ${label} stream start → [${provider}] ${primaryModel}`);
     const start = Date.now();
-    const maxStreamMs = Number(process.env.LLM_STREAM_MAX_MS) || 30000;
+    const maxStreamMs = Number(process.env.LLM_STREAM_MAX_MS) || timeoutMs || DEFAULT_LLM_STREAM_MAX_MS;
     try {
       let accumulated;
       if (provider === 'openrouter') {
-        accumulated = await callOpenRouterAIStream(finalMessages, { model: primaryModel, maxTotalMs: maxStreamMs }, onChunk);
+        accumulated = await callOpenRouterAIStream(finalMessages, { model: primaryModel, maxTotalMs: maxStreamMs, requestTimeoutMs: maxStreamMs }, onChunk);
       } else if (provider === 'deepseek') {
         accumulated = await callDeepSeekStream(finalMessages, {
           model: primaryModel,
           maxTotalMs: maxStreamMs,
+          requestTimeoutMs: maxStreamMs,
           apiUrl: dynamicConfig.apiUrl || DEEPSEEK_API_URL,
           apiKey: dynamicConfig.apiKey || DEEPSEEK_API_KEY,
           thinkingDisabled,
@@ -1010,6 +1067,7 @@ async function callLLMStreaming({
         accumulated = await callOpenAICompatStream(finalMessages, {
           model: primaryModel,
           maxTotalMs: maxStreamMs,
+          requestTimeoutMs: maxStreamMs,
           apiUrl: provider === 'xiaomi' ? XIAOMI_API_URL : undefined,
           apiKey: provider === 'xiaomi' ? (dynamicConfig.apiKey || XIAOMI_API_KEY) : undefined,
           thinkingDisabled: provider === 'xiaomi'

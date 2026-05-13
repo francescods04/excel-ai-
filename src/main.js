@@ -1,6 +1,7 @@
 'use strict';
 
 import state from './store/state.js';
+import { restoreTurnMemory, persistTurnStarted, persistTurnCompleted, forgetActiveTurn } from './store/turnMemory.js';
 import { escapeHtml, formatActionTarget, isRangeWriteAction, summarizeMatrix } from './utils/html.js';
 import { initTabs, switchTab, updateProgressBadge, API_BASE } from './ui/tabs.js';
 import { addMessage, removeMessage, showTypingIndicator, hideTypingIndicator, showQuestionOptionsInChat, getChatContainer } from './ui/chat.js';
@@ -15,7 +16,7 @@ import { hideRequestPanel, showPermissionRequest, showUserInputRequest, showQues
 import { getExcelContext } from './excel/context.js';
 import { worksheetExists, readWorkbookSnapshot, readSheetSnapshot, readRangeSnapshot, readRangeAsCsv, readNamedRanges, readMultiRangeBatch } from './excel/readers.js';
 import { enqueueActions, executeActions as execActions, undoLastSnapshot } from './excel/writers.js';
-import { startTurn, approveTurnExecution, postTurnResponse, postTurnResponseBatch, getErrorMessageFromResponse } from './api/turn.js';
+import { startTurn, approveTurnExecution, postTurnResponse, postTurnResponseBatch, getTurn, getErrorMessageFromResponse } from './api/turn.js';
 import { startAgent, resumeAgentWithResponse, postAgentClientResponse } from './api/agent.js';
 import { loadModelConfig, changeModel, warmupLLM } from './api/config.js';
 
@@ -29,6 +30,8 @@ const actionsPreview = document.getElementById('actions-preview');
 const actionsList = document.getElementById('actions-list');
 const agentModeCheck = document.getElementById('agent-mode-check');
 const agentModeToggle = document.getElementById('agent-mode-toggle');
+const promptVariantCheck = document.getElementById('prompt-variant-check');
+const promptVariantToggle = document.getElementById('prompt-variant-toggle');
 const agentPanel = document.getElementById('progress-panel');
 const taskTreeEl = document.getElementById('task-tree');
 const approveBar = document.getElementById('approve-bar');
@@ -85,6 +88,10 @@ async function init() {
   initExecutionLog();
   initApprovalModal();
   initUndoBadge(handleUndo);
+  const restoredTurnMemory = restoreTurnMemory(state);
+  if (restoredTurnMemory?.lastCompletedTurnId || restoredTurnMemory?.lastTurnId) {
+    addLog(`Continuità chat ripristinata: ${restoredTurnMemory.lastCompletedTurnId || restoredTurnMemory.lastTurnId}`, 'info');
+  }
 
   loadModelConfig().then(config => {
     if (config && config.current) {
@@ -120,7 +127,8 @@ async function init() {
   themeToggle.addEventListener('click', () => {
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
     document.documentElement.setAttribute('data-theme', isDark ? '' : 'dark');
-    themeToggle.textContent = isDark ? '☀' : '🌙';
+    themeToggle.setAttribute('aria-pressed', String(!isDark));
+    themeToggle.textContent = isDark ? '◐' : '◑';
   });
 
   sendBtn.addEventListener('click', handleSend);
@@ -146,13 +154,19 @@ async function init() {
   btnRequestPrimary.addEventListener('click', handlePrimaryRequestAction);
   btnRequestSecondary.addEventListener('click', handleSecondaryRequestAction);
 
+  agentModeToggle.classList.toggle('active', agentModeCheck.checked);
   agentModeCheck.addEventListener('change', () => {
-    if (agentModeCheck.checked) {
-      agentModeToggle.classList.add('active');
-    } else {
-      agentModeToggle.classList.remove('active');
-    }
+    agentModeToggle.classList.toggle('active', agentModeCheck.checked);
   });
+
+  if (promptVariantCheck && promptVariantToggle) {
+    promptVariantToggle.classList.toggle('active', promptVariantCheck.checked);
+    promptVariantCheck.addEventListener('change', () => {
+      promptVariantToggle.classList.toggle('active', promptVariantCheck.checked);
+    });
+  }
+
+  resumeStoredTurnIfActive(restoredTurnMemory);
 }
 
 async function handleSend() {
@@ -188,14 +202,12 @@ async function handleSend() {
   try {
     if (shouldUseAgentMode(text)) {
       if (!agentModeCheck.checked) {
-        addMessage('Ho rilevato una richiesta complessa. Attivo la modalità <strong>Agent</strong> per costruire il modello con multi-agente parallelo.', 'bot');
+        addMessage('Ho rilevato una richiesta complessa. Preparo un piano agentico con preview e approvazione prima delle modifiche.', 'bot');
         agentModeCheck.checked = true;
         agentModeToggle.classList.add('active');
       }
-      await runAgentMode(text);
-    } else {
-      await runAgentMode(text);
     }
+    await runTurnMode(text);
   } catch (err) {
     console.error(err);
     addMessage('Errore: ' + err.message, 'error');
@@ -214,6 +226,7 @@ function resetAgent() {
   hideApproveBar();
   hideRequestPanel();
   state.currentTurnId = null;
+  forgetActiveTurn();
   state.currentPlanTasks = null;
   state.handledActionBatchIds.clear();
   state.handledRequestIds.clear();
@@ -232,6 +245,28 @@ function resetRequestQueue() {
   state.activeRequest = null;
   state.isProcessingRequestQueue = false;
   hideRequestPanel();
+}
+
+async function resumeStoredTurnIfActive(restoredTurnMemory) {
+  const turnId = restoredTurnMemory?.lastTurnId;
+  if (!turnId || state.currentTurnId) return;
+
+  try {
+    const turn = await getTurn(turnId);
+    const resumable = ['planning', 'awaiting_approval', 'running'].includes(turn.status);
+    if (!resumable) return;
+
+    state.currentTurnId = turn.id;
+    state.lastTurnId = turn.id;
+    switchTab('progress');
+    startElapsedTimer();
+    const planMsgId = addMessage(`Riprendo il turn in corso: <strong>${escapeHtml(turn.id)}</strong>`, 'bot');
+    addLog(`Ripresa turn ${turn.id} (${turn.status})`, 'info');
+    if (turn.status === 'awaiting_approval') showApproveBar();
+    openTurnEventStream(turn.id, planMsgId);
+  } catch (err) {
+    addLog(`Ripresa turn salvato non disponibile: ${err.message}`, 'warn');
+  }
 }
 
 function closeAgentEventStream() {
@@ -253,7 +288,6 @@ async function runAgentMode(text) {
     const context = await getExcelContext();
     addLog('Lettura contesto Excel completata');
 
-    const promptVariantCheck = document.getElementById('prompt-variant-check');
     const promptVariant = promptVariantCheck && promptVariantCheck.checked ? 'fast' : 'default';
     const startData = await startAgent(text, context, modelSelect.value, promptVariant);
     state.currentAgentId = startData.agentId;
@@ -377,7 +411,7 @@ function openAgentEventStream(agentId) {
         } else {
           const qText = String(data.question || '');
           addLog(`[agentPaused] RENDER: domanda testo "${qText.slice(0, 80)}"`);
-          addMessage(`<div style="background:#fff3e0;border:2px solid #ff9800;border-radius:8px;padding:10px 12px;font-size:13px;font-weight:600;">❓ Domanda: ${escapeHtml(qText)}</div>`, 'bot');
+          addMessage(`<div class="inline-question-alert"><span>Domanda</span>${escapeHtml(qText)}</div>`, 'bot');
         }
       } else {
         addLog(`[agentPaused] SALTATO: reason=${data.reason}, question=${JSON.stringify(data.question).slice(0, 100)}`);
@@ -482,11 +516,25 @@ async function resumeAgent(agentId, userResponse) {
   }
 }
 
-async function runLegacyTurn(text, context, planMsgId) {
+async function runTurnMode(text) {
+  const parentTurnId = state.currentTurnId || state.lastCompletedTurnId || state.lastTurnId || null;
+  resetAgent();
+  switchTab('progress');
+  closeAgentEventStream();
+  startElapsedTimer();
+
+  const planMsgId = addMessage('Analizzo il workbook e genero un piano...', 'bot');
+
   try {
-    const startData = await startTurn(text, context);
+    const context = await getExcelContext();
+    addLog('Lettura contesto Excel completata');
+
+    const startData = await startTurn(text, context, modelSelect.value, parentTurnId);
     state.currentTurnId = startData.turnId;
+    state.lastTurnId = startData.turnId;
+    persistTurnStarted(startData.turnId);
     addLog('Turn creato: ' + startData.turnId);
+    if (parentTurnId) addLog('Continuità chat: uso il contesto del turn precedente ' + parentTurnId);
     openTurnEventStream(startData.turnId, planMsgId);
   } catch (err) {
     removeMessage(planMsgId);
@@ -502,6 +550,8 @@ function openTurnEventStream(turnId, planMsgId) {
   let attempt = 0;
   const maxBackoff = 15000;
   let currentSource = null;
+  let lastPlanningProgressAt = 0;
+  let lastPlanningProgressChars = 0;
 
   function setupListeners(src) {
     let planReceived = false;
@@ -605,9 +655,20 @@ function openTurnEventStream(turnId, planMsgId) {
     src.addEventListener('llmProgress', (e) => {
       try {
         const data = JSON.parse(e.data);
-        if (data.text) {
-          if (!planReceived) {
-            addLog(`Generazione piano in corso...`);
+        if (data.text && !planReceived) {
+          const now = Date.now();
+          const chars = String(data.text).length;
+          const shouldLog = data.isDone
+            || lastPlanningProgressAt === 0
+            || now - lastPlanningProgressAt >= 5000
+            || chars - lastPlanningProgressChars >= 3000;
+
+          if (shouldLog) {
+            lastPlanningProgressAt = now;
+            lastPlanningProgressChars = chars;
+            addLog(data.isDone
+              ? 'Generazione piano LLM completata.'
+              : `Generazione piano LLM in corso (${chars} caratteri)...`);
           }
         }
       } catch (err) {}
@@ -623,6 +684,11 @@ function openTurnEventStream(turnId, planMsgId) {
     src.addEventListener('turnCompleted', (e) => {
       try {
         const data = JSON.parse(e.data);
+        state.lastTurnId = data.turnId || turnId;
+        if (!(data.status === 'error' || data.error)) {
+          state.lastCompletedTurnId = data.turnId || turnId;
+        }
+        persistTurnCompleted(data.turnId || turnId, !(data.status === 'error' || data.error));
         removeMessage(planMsgId);
         hideApproveBar();
         hideTypingIndicator();

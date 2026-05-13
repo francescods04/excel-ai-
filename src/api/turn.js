@@ -2,11 +2,11 @@
 
 import { API_BASE } from '../ui/tabs.js';
 
-async function startTurn(message, context, modelOverride) {
+async function startTurn(message, context, modelOverride, parentTurnId = null) {
   const res = await fetch(`${API_BASE}/api/turn/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, context })
+    body: JSON.stringify({ message, context, modelOverride, parentTurnId })
   });
   if (!res.ok) {
     throw new Error(await getErrorMessageFromResponse(res, 'Errore avvio turn'));
@@ -49,6 +49,14 @@ async function postTurnResponseBatch(turnId, responses) {
   }
 }
 
+async function getTurn(turnId) {
+  const res = await fetch(`${API_BASE}/api/turn/${encodeURIComponent(turnId)}`);
+  if (!res.ok) {
+    throw new Error(await getErrorMessageFromResponse(res, 'Errore lettura turn'));
+  }
+  return res.json();
+}
+
 async function getErrorMessageFromResponse(response, fallbackMessage) {
   const fallback = fallbackMessage || `Errore HTTP ${response.status}`;
   if (!response) return fallback;
@@ -72,4 +80,4 @@ async function getErrorMessageFromResponse(response, fallbackMessage) {
   return fallback;
 }
 
-export { startTurn, approveTurnExecution, postTurnResponse, postTurnResponseBatch, getErrorMessageFromResponse, API_BASE };
+export { startTurn, approveTurnExecution, postTurnResponse, postTurnResponseBatch, getTurn, getErrorMessageFromResponse, API_BASE };

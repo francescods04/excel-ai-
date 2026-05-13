@@ -17,6 +17,7 @@ const {
 const { buildActionPreview, hasMutationActions } = require('./actionPreview');
 const { computeLevels } = require('../utils/graph');
 const { buildUndoActions, summarizeUndo } = require('./undo');
+const { isPrefetchSafeTask } = require('./prefetchPolicy');
 
 const TURNS_DIR = path.join(__dirname, '..', 'turns');
 
@@ -26,6 +27,7 @@ if (!fs.existsSync(TURNS_DIR)) {
 
 const activeTurns = new Map();
 const pendingDiskWrites = new Map(); // turnId -> timeoutId
+const runningTaskPromises = new Map(); // `${turnId}:${taskId}` -> Promise
 
 const MAX_ACTIVE_TURNS = 20;
 const TURN_CLEANUP_DELAY_MS = 5 * 60 * 1000;
@@ -311,7 +313,7 @@ function emitToolRequestResolved(turnId, request, response, status = 'resolved')
   });
 }
 
-function buildTurn(message, context, parentTurnId = null) {
+function buildTurn(message, context, parentTurnId = null, options = {}) {
   const turnId = makeTurnId();
   const createdAt = nowIso();
 
@@ -319,6 +321,9 @@ function buildTurn(message, context, parentTurnId = null) {
     id: turnId,
     objective: message,
     context: context || {},
+    llm: {
+      modelOverride: options.modelOverride || null
+    },
     status: 'planning',
     error: null,
     plan: null,
@@ -329,6 +334,85 @@ function buildTurn(message, context, parentTurnId = null) {
     parentTurnId,
     createdAt,
     updatedAt: createdAt
+  };
+}
+
+function getParentContinuity(turn, parentOverride = null) {
+  if (!turn?.parentTurnId && !parentOverride) {
+    return { parentTurn: null, parentPlan: null, parentResults: null };
+  }
+  const parentTurn = parentOverride || _getTurnRef(turn.parentTurnId);
+  if (!parentTurn) {
+    return { parentTurn: null, parentPlan: null, parentResults: null };
+  }
+  return {
+    parentTurn,
+    parentPlan: parentTurn.plan || null,
+    parentResults: parentTurn.results || null
+  };
+}
+
+function collectRequestedResultIds(params = {}) {
+  const requested = new Set();
+  const add = value => {
+    if (!value || typeof value !== 'string') return;
+    requested.add(value);
+    if (value.startsWith('$results.')) {
+      const firstPathSegment = value.replace('$results.', '').split('.')[0];
+      if (firstPathSegment) requested.add(firstPathSegment);
+    }
+  };
+
+  if (Array.isArray(params.usesResults)) {
+    params.usesResults.forEach(add);
+  }
+  add(params.fromResult);
+  add(params.resultId);
+  add(params.planRef);
+
+  for (const value of Object.values(params)) {
+    if (typeof value === 'string') add(value);
+  }
+  return requested;
+}
+
+function mergeExecutionResults(currentResults = {}, parentResults = {}, task = {}) {
+  const current = currentResults && typeof currentResults === 'object' ? currentResults : {};
+  const parent = parentResults && typeof parentResults === 'object' ? parentResults : {};
+  const requested = collectRequestedResultIds(task.params || {});
+  const merged = {};
+
+  for (const [taskId, result] of Object.entries(parent)) {
+    merged[`parent:${taskId}`] = result;
+    if (!Object.prototype.hasOwnProperty.call(current, taskId) && requested.has(taskId)) {
+      merged[taskId] = result;
+    }
+  }
+
+  for (const [taskId, result] of Object.entries(current)) {
+    merged[taskId] = result;
+  }
+
+  return merged;
+}
+
+function buildExecutionMemory(turn, task, runtime = {}, parentOverride = null) {
+  const { parentPlan, parentResults } = getParentContinuity(turn, parentOverride);
+  const executionResults = mergeExecutionResults(turn?.results || {}, parentResults || {}, task || {});
+  const context = {
+    ...(turn?.context || {})
+  };
+  if (parentPlan) context.parentPlan = parentPlan;
+  if (parentResults) context.parentResults = parentResults;
+
+  return {
+    ...turn,
+    context,
+    results: executionResults,
+    parentPlan,
+    parentResults,
+    runtime,
+    currentTask: task
   };
 }
 
@@ -533,13 +617,7 @@ async function failTurn(turnId, errorMessage, itemPatch) {
 }
 
 function isSafeTask(task) {
-  if (!task || !task.tool) return false;
-  const toolMeta = registry.meta(task.tool);
-  if (toolMeta?.category === 'read') return true;
-  if (toolMeta?.requiresApproval === 'never') return true;
-  const safePrefixes = ['yahoo.', 'workbook.read'];
-  const safeTools = new Set(['requestUserInput']);
-  return safePrefixes.some(p => task.tool.startsWith(p)) || safeTools.has(task.tool);
+  return isPrefetchSafeTask(task, registry);
 }
 
 function buildLayoutFromResults(results) {
@@ -577,6 +655,86 @@ function buildLayoutFromResults(results) {
   return { sheets: [...sheets], references };
 }
 
+const STANDARD_DCF_SHEETS = ['Summary', 'Sources', 'Assumptions', 'WACC', 'DCF', 'Sensitivity', 'Scenarios', 'Audit'];
+
+function addSheetName(set, value) {
+  if (!value) return;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed) set.add(trimmed);
+    return;
+  }
+  if (typeof value === 'object') {
+    addSheetName(set, value.name || value.sheetName || value.sheet || value.targetSheet);
+  }
+}
+
+function addSheetsFromActions(set, actions) {
+  if (!Array.isArray(actions)) return;
+  for (const action of actions) {
+    if (!action || typeof action !== 'object') continue;
+    if (action.type === 'createSheet') addSheetName(set, action.name || action.sheet);
+    addSheetName(set, action.sheet || action.sheetName || action.targetSheet);
+    if (action.type === 'setCellRange' && action.cells && typeof action.cells === 'object') {
+      for (const address of Object.keys(action.cells)) {
+        const match = String(address).match(/^(?:'((?:[^']|'')+)'|([^!]+))!/);
+        if (match) addSheetName(set, (match[1] || match[2] || '').replace(/''/g, "'"));
+      }
+    }
+  }
+}
+
+function extractTurnMemorySummary(turn, failedTaskIds = new Set()) {
+  const sheets = new Set();
+  const dcfSections = new Set();
+  let modelType = null;
+
+  for (const task of (turn.plan?.tasks || [])) {
+    if (failedTaskIds.has(task.id)) continue;
+    if (task.tool === 'excel.createSheet') addSheetName(sheets, task.params?.name || task.params?.sheet);
+    if (task.tool === 'llm.planLayout' && task.params?.model) modelType = task.params.model;
+    if (task.tool === 'finance.dcf.buildSection') {
+      modelType = 'DCF';
+      if (task.params?.section) dcfSections.add(String(task.params.section).toLowerCase());
+      if (Array.isArray(task.params?.sheets)) task.params.sheets.forEach(sheet => addSheetName(sheets, sheet));
+    }
+  }
+
+  for (const result of Object.values(turn.results || {})) {
+    if (!result) continue;
+    addSheetsFromActions(sheets, result.actions);
+    const data = result.data && typeof result.data === 'object' ? result.data : null;
+    if (!data) continue;
+    addSheetName(sheets, data.sheetName || data.name || data.sheet);
+    if (Array.isArray(data.sheets)) data.sheets.forEach(sheet => addSheetName(sheets, sheet));
+    if (data.allSheetsData && typeof data.allSheetsData === 'object') {
+      Object.keys(data.allSheetsData).forEach(name => addSheetName(sheets, name));
+    }
+    addSheetsFromActions(sheets, data.actions);
+  }
+
+  const sheetList = Array.from(sheets);
+  const hasDcfSignal = modelType === 'DCF' ||
+    dcfSections.size > 0 ||
+    STANDARD_DCF_SHEETS.filter(sheet => sheetList.some(name => name.toLowerCase() === sheet.toLowerCase())).length >= 3;
+  const modelSheets = hasDcfSignal
+    ? STANDARD_DCF_SHEETS.filter(sheet => sheetList.some(name => name.toLowerCase() === sheet.toLowerCase()))
+    : sheetList;
+
+  const keyCells = hasDcfSignal ? {
+    assumptions: 'Assumptions!B10:B37',
+    wacc: 'WACC!B4:B30',
+    valuation: 'DCF!H30:H40',
+    sensitivity: 'Sensitivity!B4:G18'
+  } : null;
+
+  return {
+    sheetsCreated: modelSheets,
+    modelType: hasDcfSignal ? 'DCF' : (modelType || (sheetList.length > 0 ? 'custom' : null)),
+    keyCells
+  };
+}
+
 async function planTurn(turnId) {
   const turn = _getTurnRef(turnId);
   if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
@@ -585,14 +743,12 @@ async function planTurn(turnId) {
     appendLog(turnId, 'Creo il piano di esecuzione agentico...');
 
     // If this turn has a parent, include parent results in context so planner can do incremental work
-    let parentResults = null;
-    let parentPlan = null;
+    const { parentPlan, parentResults } = getParentContinuity(turn);
     if (turn.parentTurnId) {
-      const parentTurn = _getTurnRef(turn.parentTurnId) || loadTurn(turn.parentTurnId);
-      if (parentTurn) {
-        parentResults = parentTurn.results || null;
-        parentPlan = parentTurn.plan || null;
+      if (parentPlan || parentResults) {
         appendLog(turnId, `Turn collegato a parent ${turn.parentTurnId}. Risultati precedenti disponibili per pianificazione incrementale.`);
+      } else {
+        appendLog(turnId, `Turn parent ${turn.parentTurnId} non trovato. Procedo con il solo contesto corrente.`, 'warn');
       }
     }
 
@@ -604,7 +760,9 @@ async function planTurn(turnId) {
       parentResults,
       parentPlan
     };
-    const plan = await planner.plan(turn.objective, enrichedContext, turnId);
+    const plan = await planner.plan(turn.objective, enrichedContext, turnId, {
+      modelOverride: turn.llm?.modelOverride || undefined
+    });
 
     const updatedTurn = _getTurnRef(turnId);
     updatedTurn.plan = plan;
@@ -646,7 +804,7 @@ async function planTurn(turnId) {
       (async () => {
         for (const batch of prefetchByLevel) {
           const results = await Promise.allSettled(batch.tasks.map(task => executeSingleTask(turnId, task)));
-          const failed = results.filter(r => r.status === 'rejected');
+          const failed = results.filter(r => r.status === 'rejected' || r.value?.ok === false);
           if (failed.length > 0) {
             appendLog(turnId, `Errore prefetch livello ${batch.level}: ${failed.length} task falliti`, 'error');
           }
@@ -666,6 +824,18 @@ async function planTurn(turnId) {
 }
 
 async function executeSingleTask(turnId, task) {
+  const key = `${turnId}:${task.id}`;
+  if (runningTaskPromises.has(key)) {
+    appendLog(turnId, `[${task.id}] già in corso (prefetch), attendo completamento`, 'info', { taskId: task.id });
+    return runningTaskPromises.get(key);
+  }
+  const promise = executeSingleTaskInner(turnId, task)
+    .finally(() => runningTaskPromises.delete(key));
+  runningTaskPromises.set(key, promise);
+  return promise;
+}
+
+async function executeSingleTaskInner(turnId, task) {
   const itemId = taskItemId(task.id);
   logger.info(`[Turn ${turnId}][${task.id}] Start task: ${task.agent}/${task.tool}`);
   const runningItem = upsertItem(turnId, {
@@ -689,19 +859,21 @@ async function executeSingleTask(turnId, task) {
 
     // Critic retry loop: re-prompt FormulaAgent on validation errors (max CRITIC_MAX_RETRY).
     const MAX_CRITIC_RETRY = Number(process.env.CRITIC_MAX_RETRY ?? 2);
-    const isFormulaTask = task.tool === 'llm.writeFormulas';
+    const isFormulaTask = task.tool === 'llm.writeFormulas'
+      || (task.tool === 'finance.dcf.buildSection' && task.agent === 'formula');
     let result;
     let criticResult;
     let attempt = 0;
     let activeParams = { ...(task.params || {}) };
 
     while (true) {
-      result = await executeTool(task.tool, activeParams, {
-        ...turn,
-        runtime,
-        currentTask: task
-      });
-      const layout = buildLayoutFromResults(turn.results);
+      const executionMemory = buildExecutionMemory(turn, { ...task, params: activeParams }, runtime);
+      result = await executeTool(
+        task.tool,
+        activeParams,
+        executionMemory
+      );
+      const layout = buildLayoutFromResults(executionMemory.results);
       criticResult = validateTaskOutput(result, layout);
 
       const shouldRetry = isFormulaTask
@@ -733,6 +905,12 @@ async function executeSingleTask(turnId, task) {
       const warnSummary = criticResult.warnings.join('; ');
       appendLog(turnId, `[${task.id}] Warning: ${warnSummary}`, 'warn', { taskId: task.id, itemId });
     }
+    if (result.data?.builder) {
+      appendLog(turnId, `[${task.id}] Builder: ${result.data.builder}`, result.data.aiError ? 'warn' : 'info', {
+        taskId: task.id,
+        itemId
+      });
+    }
 
     // Log metriche critic (formula count, mutation count)
     if (criticResult.stats) {
@@ -743,13 +921,15 @@ async function executeSingleTask(turnId, task) {
       // Smart approval: check requiresApproval from tool registry
       const AUTO_APPROVE = process.env.AUTO_APPROVE_ALL === 'true';
       const toolMeta = registry.meta(task.tool);
+      const actionHasMutations = hasMutationActions(result.actions);
       const needsApproval = !AUTO_APPROVE && (
         task.requiresApproval === true ||
         toolMeta?.requiresApproval === 'always' ||
-        (!criticResult.ok && hasMutationActions(result.actions))
+        (toolMeta?.category === 'mutation' && actionHasMutations) ||
+        actionHasMutations
       );
 
-      if (needsApproval && (hasMutationActions(result.actions) || task.requiresApproval)) {
+      if (needsApproval && (actionHasMutations || task.requiresApproval)) {
         const preview = buildActionPreview(result.actions, task);
         appendLog(turnId, `[${task.id}] In attesa di conferma per ${preview.mutationCount} modifiche`, 'info', {
           taskId: task.id,
@@ -779,8 +959,15 @@ async function executeSingleTask(turnId, task) {
 
     emitItemCompleted(turnId, completedItem);
     appendLog(turnId, `[${task.id}] completato`, 'info', { taskId: task.id, itemId });
+    return { ok: true, taskId: task.id, result };
   } catch (error) {
     logger.error(`[Turn ${turnId}][${task.id}] Task error: ${error.message}`);
+    storeTaskResult(turnId, task.id, {
+      ok: false,
+      error: error.message,
+      agent: task.agent,
+      tool: task.tool
+    });
     const failedItem = upsertItem(turnId, {
       id: itemId,
       type: 'taskExecution',
@@ -795,9 +982,38 @@ async function executeSingleTask(turnId, task) {
 
     emitItemCompleted(turnId, failedItem);
     appendLog(turnId, `[${task.id}] errore: ${error.message}`, 'error', { taskId: task.id, itemId });
-    // NON lanciare l'errore: permetti agli altri task dello stesso livello di continuare
-    // Il turn continuerà; i task dipendenti riceveranno contesto vuoto per questo task fallito
+    // Non rilanciare: gli altri task dello stesso livello possono continuare,
+    // ma il caller riceve un esito strutturato per marcare il turn come fallito.
+    return { ok: false, taskId: task.id, error: error.message };
   }
+}
+
+function skipTaskDueToFailedDeps(turnId, task, failedDeps) {
+  const itemId = taskItemId(task.id);
+  const message = `Saltato perché dipendenze fallite: ${failedDeps.join(', ')}`;
+  storeTaskResult(turnId, task.id, {
+    ok: false,
+    skipped: true,
+    error: message,
+    agent: task.agent,
+    tool: task.tool,
+    failedDeps
+  });
+  const item = upsertItem(turnId, {
+    id: itemId,
+    type: 'taskExecution',
+    taskId: task.id,
+    agent: task.agent,
+    tool: task.tool,
+    description: task.description || task.tool,
+    deps: task.deps || [],
+    status: 'error',
+    error: message
+  });
+  emitItemStarted(turnId, item);
+  emitItemCompleted(turnId, item);
+  appendLog(turnId, `[${task.id}] ${message}`, 'warn', { taskId: task.id, itemId });
+  return { ok: false, skipped: true, taskId: task.id, error: message };
 }
 
 async function executeTurn(turnId) {
@@ -820,6 +1036,10 @@ async function executeTurn(turnId) {
       const results = await Promise.allSettled(taskIds.map(taskId => {
         const task = turn.plan.tasks.find(entry => entry.id === taskId);
         if (!task) throw new Error(`Task non trovato: ${taskId}`);
+        const failedDeps = (task.deps || []).filter(dep => failedTaskIds.has(dep));
+        if (failedDeps.length > 0) {
+          return skipTaskDueToFailedDeps(turnId, task, failedDeps);
+        }
         // Skip task già eseguiti dal prefetch (read-only safe in background)
         const liveTurn = _getTurnRef(turnId);
         if (liveTurn?.results && Object.prototype.hasOwnProperty.call(liveTurn.results, taskId)) {
@@ -830,13 +1050,20 @@ async function executeTurn(turnId) {
       }));
 
       results.forEach((result, idx) => {
-        if (result.status === 'rejected') {
+        if (result.status === 'rejected' || result.value?.ok === false) {
           failedTaskIds.add(taskIds[idx]);
         }
       });
     }
 
-    const completedTurn = setTurnStatus(turnId, 'completed');
+    const finalError = failedTaskIds.size > 0
+      ? `${failedTaskIds.size} task falliti su ${turn.plan.tasks.length}: ${Array.from(failedTaskIds).join(', ')}`
+      : undefined;
+    const completedTurn = setTurnStatus(
+      turnId,
+      failedTaskIds.size > 0 ? 'error' : 'completed',
+      finalError
+    );
     if (failedTaskIds.size > 0) {
       appendLog(turnId, `Turn completato con ${failedTaskIds.size} task falliti su ${turn.plan.tasks.length}.`, 'warn');
       logger.warn(`[Turn ${turnId}] Turn completed with ${failedTaskIds.size} failed tasks: ${Array.from(failedTaskIds).join(', ')}`);
@@ -863,23 +1090,15 @@ async function executeTurn(turnId) {
       logger.info(`[Turn ${turnId}] Turn completed successfully`);
     }
 
-    const sheetsCreated = [];
-    let modelType = null;
-    for (const task of (completedTurn.plan?.tasks || [])) {
-      if (task.tool === 'excel.createSheet' && task.params?.name) {
-        sheetsCreated.push(task.params.name);
-      }
-      if (task.tool === 'llm.planLayout' && task.params?.model) {
-        modelType = task.params.model;
-      }
-    }
+    const memorySummary = extractTurnMemorySummary(completedTurn, failedTaskIds);
     const successCount = turn.plan.tasks.length - failedTaskIds.size;
     conversationMemory.addTurnMemory({
       turnId,
       objective: completedTurn.objective,
       planSummary: `Piano con ${successCount}/${turn.plan.tasks.length} task completati${failedTaskIds.size > 0 ? ` (${failedTaskIds.size} falliti)` : ''}`,
-      sheetsCreated,
-      modelType: modelType || (sheetsCreated.length > 0 ? 'custom' : null)
+      sheetsCreated: memorySummary.sheetsCreated,
+      modelType: memorySummary.modelType,
+      keyCells: memorySummary.keyCells
     });
   } catch (error) {
     logger.error(`[Turn ${turnId}] Turn execution error: ${error.message}`);
@@ -887,8 +1106,8 @@ async function executeTurn(turnId) {
   }
 }
 
-function startTurn(message, context, parentTurnId = null) {
-  const turn = buildTurn(message, context, parentTurnId);
+function startTurn(message, context, parentTurnId = null, options = {}) {
+  const turn = buildTurn(message, context, parentTurnId, options);
   saveTurn(turn);
 
   emitTurnStarted(turn);
@@ -994,6 +1213,7 @@ module.exports = {
   startTurn,
   approveTurn,
   loadTurn,
+  buildExecutionMemory,
   respondToTurnRequest,
   undoTurn
 };

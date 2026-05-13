@@ -29,6 +29,8 @@ Where:
 - **Levered beta** (βL) reflects both business risk and financial leverage
 - **Unlevered beta** (βU) = βL / (1 + (1-T) × D/E)
 - When using comparable company betas, always unlever first, then relever to target D/E
+- For public companies, do not rely on a single beta datapoint. Compare observed regression beta with peer/sector beta and document the selected beta.
+- If peer data is unavailable, keep the peer/sector beta row visible and flag it for analyst review rather than hiding the assumption.
 
 ### Typical Values (US Market)
 - Risk-Free Rate: 4.0% - 5.0% (varies with Treasury yields)
@@ -78,9 +80,16 @@ Row 2: Section headers (grey background, white bold)
 
 **Cost of Equity Section:**
 - Risk-Free Rate (%) = Assumptions!B8
-- Beta = Assumptions!B9
+- Selected Beta = selected beta from the beta evidence section
 - Market Risk Premium (%) = Assumptions!B10
 - **Cost of Equity (%)** = B2 + B3 × B4
+
+**Beta Evidence Section:**
+- Observed Levered Beta = company regression / market-data beta
+- Peer / Sector Levered Beta = median comparable beta where available
+- Unlevered Peer Beta = Peer Beta / (1 + (1-Tax Rate) × D/E)
+- Relevered Peer Beta = Unlevered Beta × (1 + (1-Tax Rate) × Target D/E)
+- Selected Beta = average or analyst-selected blend of observed and relevered peer beta
 
 **Cost of Debt Section:**
 - Pre-Tax Cost of Debt (%) = Assumptions!B11

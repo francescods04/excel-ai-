@@ -111,10 +111,22 @@ Una conversazione con system prompt lungo (es. 3k token) + contesto workbook (2k
 3. Aspetta 2-3 richieste: il sistema deve prima rilevare e persistere il prefisso comune.
 
 **Timeout su prompt lunghi?**
-Aumenta i timeout in `.env`:
+Con DeepSeek V4 il costo dei token e' abbastanza basso da preferire profondita' e verifica. Usa budget ampi in `.env`:
 ```env
-LLM_TIMEOUT_MS=120000
-PLANNER_TIMEOUT_MS=180000
+MAX_TOKENS=131072
+LLM_TIMEOUT_MS=300000
+LLM_STREAM_MAX_MS=300000
+PLANNER_TIMEOUT_MS=300000
+FORMULA_TIMEOUT_MS=300000
+FORMULA_SECTION_TIMEOUT_MS=300000
+DCF_AI_TIMEOUT_MS=300000
+FORMAT_TIMEOUT_MS=240000
+LAYOUT_TIMEOUT_MS=240000
+AGENT_LLM_TIMEOUT_MS=300000
+AGENT_MAX_WEB_SEARCH=20
+AGENT_AUTO_COMPACT_LIMIT=80
+AGENT_THINKING_EVERY_ITER=true
+DEEPSEEK_REASONING_EFFORT_AGENT=high
 ```
 
 **Fallback non si attiva?**

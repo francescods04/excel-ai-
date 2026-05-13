@@ -4,25 +4,92 @@
  */
 
 const FINANCE_KEYWORDS = new Map([
+  ['ebitda vendite', 'EBITDA Margin'],
+  ['ebitda revenue', 'EBITDA Margin'],
+  ['ebitda margin', 'EBITDA Margin'],
+  ['debt equity', 'Debt / Equity'],
+  ['debt ebitda', 'Debt / EBITDA'],
+  ['ev ebitda', 'EV/EBITDA'],
+  ['p e', 'P/E'],
+  ['redditivita delle vendite', 'EBIT Margin'],
+  ['ros', 'EBIT Margin'],
+  ['redditivita del totale attivo', 'ROA'],
+  ['roa', 'ROA'],
+  ['redditivita del capitale proprio', 'ROE'],
+  ['roe', 'ROE'],
+  ['ricavi delle vendite', 'Revenue'],
+  ['ricavi vendite', 'Revenue'],
+  ['ricavi', 'Revenue'],
+  ['fatturato', 'Revenue'],
+  ['vendite', 'Revenue'],
+  ['valore della produzione', 'Revenue'],
+  ['chiffre d affaires', 'Revenue'],
+  ['chiffre affaires', 'Revenue'],
+  ['produits d exploitation', 'Revenue'],
+  ['produits exploitation', 'Revenue'],
+  ['produit des activites ordinaires', 'Revenue'],
+  ['revenus', 'Revenue'],
   ['revenue', 'Revenue'],
   ['sales', 'Revenue'],
   ['total revenue', 'Revenue'],
+  ['margine operativo lordo', 'EBITDA'],
+  ['mol', 'EBITDA'],
+  ['excedent brut d exploitation', 'EBITDA'],
+  ['excedent brut exploitation', 'EBITDA'],
+  ['ebe', 'EBITDA'],
   ['ebitda', 'EBITDA'],
+  ['risultato operativo', 'EBIT'],
+  ['reddito operativo', 'EBIT'],
+  ['resultat operationnel courant', 'EBIT'],
+  ['resultat operationnel', 'EBIT'],
+  ['resultat d exploitation', 'EBIT'],
+  ['resultat exploitation', 'EBIT'],
   ['operating income', 'EBIT'],
   ['ebit', 'EBIT'],
+  ['utile netto', 'Net Income'],
+  ['risultato netto', 'Net Income'],
+  ['resultat net part du groupe', 'Net Income'],
+  ['resultat net', 'Net Income'],
+  ['benefice net', 'Net Income'],
   ['net income', 'Net Income'],
   ['net profit', 'Net Income'],
   ['profit', 'Net Income'],
   ['free cash flow', 'FCF'],
+  ['flux de tresorerie disponible', 'FCF'],
+  ['cash flow libre', 'FCF'],
   ['fcf', 'FCF'],
   ['capex', 'CapEx'],
   ['capital expenditure', 'CapEx'],
+  ['depenses d investissement', 'CapEx'],
+  ['acquisitions d immobilisations', 'CapEx'],
+  ['investissements corporels et incorporels', 'CapEx'],
+  ['ammortamenti e svalut', 'D&A'],
+  ['dotations aux amortissements', 'D&A'],
+  ['amortissements et provisions', 'D&A'],
+  ['ammortamenti', 'D&A'],
   ['depreciation', 'D&A'],
   ['amortization', 'D&A'],
+  ['risultato prima delle imposte', 'Pre-Tax Income'],
+  ['utile prima delle imposte', 'Pre-Tax Income'],
+  ['resultat avant impots', 'Pre-Tax Income'],
+  ['resultat avant impot', 'Pre-Tax Income'],
+  ['totale imposte sul reddito', 'Income Taxes'],
+  ['imposte correnti', 'Income Taxes'],
+  ['imposte sul reddito', 'Income Taxes'],
+  ['impots sur les benefices', 'Income Taxes'],
+  ['impot sur les benefices', 'Income Taxes'],
+  ['impot sur les societes', 'Income Taxes'],
+  ['charge d impot', 'Income Taxes'],
   ['tax rate', 'Tax Rate'],
+  ['taux d impot', 'Tax Rate'],
   ['tax', 'Tax Rate'],
+  ['croissance du chiffre d affaires', 'Revenue Growth'],
+  ['croissance des revenus', 'Revenue Growth'],
+  ['taux de croissance', 'Revenue Growth'],
   ['growth', 'Revenue Growth'],
   ['growth rate', 'Revenue Growth'],
+  ['marge d ebitda', 'EBITDA Margin'],
+  ['marge ebe', 'EBITDA Margin'],
   ['margin', 'EBITDA Margin'],
   ['ebitda margin', 'EBITDA Margin'],
   ['operating margin', 'EBIT Margin'],
@@ -36,20 +103,64 @@ const FINANCE_KEYWORDS = new Map([
   ['equity risk premium', 'Market Risk Premium'],
   ['terminal growth', 'Terminal Growth Rate'],
   ['perpetuity growth', 'Terminal Growth Rate'],
+  ['posizione finanziaria netta', 'Net Debt'],
+  ['indebitamento finanziario netto', 'Net Debt'],
+  ['endettement financier net', 'Net Debt'],
+  ['endettement net', 'Net Debt'],
+  ['dette financiere nette', 'Net Debt'],
+  ['dette nette', 'Net Debt'],
+  ['net financial debt', 'Net Debt'],
+  ['pfn', 'Net Debt'],
+  ['debiti verso banche', 'Total Debt'],
+  ['debiti v banche', 'Total Debt'],
+  ['debiti finanziari', 'Total Debt'],
+  ['emprunts et dettes financieres', 'Total Debt'],
+  ['dettes financieres', 'Total Debt'],
+  ['dette financiere', 'Total Debt'],
   ['debt', 'Total Debt'],
+  ['tresorerie et equivalents de tresorerie', 'Cash & Equivalents'],
+  ['tresorerie et equivalents', 'Cash & Equivalents'],
+  ['equivalents de tresorerie', 'Cash & Equivalents'],
+  ['tresorerie disponible', 'Cash & Equivalents'],
+  ['disponibilites', 'Cash & Equivalents'],
+  ['actifs liquides', 'Cash & Equivalents'],
+  ['tot dispon liquide', 'Cash & Equivalents'],
+  ['dispon liquide', 'Cash & Equivalents'],
+  ['totale disponibilita liquide', 'Cash & Equivalents'],
+  ['disponibilita liquide', 'Cash & Equivalents'],
+  ['liquidita', 'Cash & Equivalents'],
+  ['denaro in cassa', 'Cash & Equivalents'],
+  ['cassa', 'Cash & Equivalents'],
   ['cash', 'Cash & Equivalents'],
   ['shares', 'Shares Outstanding'],
   ['shares outstanding', 'Shares Outstanding'],
+  ['nombre d actions', 'Shares Outstanding'],
   ['diluted shares', 'Diluted Shares'],
+  ['actions diluees', 'Diluted Shares'],
   ['share price', 'Share Price'],
+  ['cours de l action', 'Share Price'],
   ['stock price', 'Share Price'],
   ['ev/ebitda', 'EV/EBITDA'],
   ['p/e', 'P/E'],
   ['price earnings', 'P/E'],
   ['eps', 'EPS'],
   ['book value', 'Book Value'],
+  ['totale attivita', 'Total Assets'],
+  ['totale attivo', 'Total Assets'],
+  ['attivo totale', 'Total Assets'],
+  ['total des actifs', 'Total Assets'],
+  ['total actif', 'Total Assets'],
   ['total assets', 'Total Assets'],
+  ['totale passivita', 'Total Liabilities'],
+  ['totale passivo', 'Total Liabilities'],
+  ['total des passifs', 'Total Liabilities'],
+  ['total passif', 'Total Liabilities'],
   ['total liabilities', 'Total Liabilities'],
+  ['patrimonio netto', 'Shareholders Equity'],
+  ['mezzi propri', 'Shareholders Equity'],
+  ['capitale proprio', 'Shareholders Equity'],
+  ['capitaux propres', 'Shareholders Equity'],
+  ['fonds propres', 'Shareholders Equity'],
   ['shareholders equity', 'Shareholders Equity'],
   ['equity', 'Shareholders Equity'],
   ['roi', 'ROI'],
@@ -58,36 +169,89 @@ const FINANCE_KEYWORDS = new Map([
   ['roic', 'ROIC'],
   ['return on invested capital', 'ROIC'],
   ['gross profit', 'Gross Profit'],
+  ['marge brute', 'Gross Margin'],
   ['gross margin', 'Gross Margin'],
+  ['cout des ventes', 'COGS'],
   ['cost of goods sold', 'COGS'],
   ['cogs', 'COGS'],
+  ['frais commerciaux et administratifs', 'SG&A'],
+  ['frais generaux', 'SG&A'],
   ['sg&a', 'SG&A'],
   ['rnd', 'R&D'],
+  ['recherche et developpement', 'R&D'],
   ['research and development', 'R&D'],
+  ['charges d interets', 'Interest Expense'],
   ['interest expense', 'Interest Expense'],
   ['dso', 'DSO'],
   ['dio', 'DIO'],
   ['dpo', 'DPO'],
+  ['capitale circolante netto', 'Net Working Capital'],
+  ['besoin en fonds de roulement', 'Net Working Capital'],
+  ['fonds de roulement', 'Net Working Capital'],
+  ['bfr', 'Net Working Capital'],
   ['nwc', 'Net Working Capital'],
   ['working capital', 'Net Working Capital'],
 ]);
 
 function isNumberLike(value) {
-  if (typeof value === 'number') return true;
-  if (typeof value !== 'string') return false;
-  const cleaned = value.replace(/[$%,\s]/g, '');
-  return !isNaN(parseFloat(cleaned)) && isFinite(parseFloat(cleaned));
+  return parseNumber(value) !== null;
 }
 
 function parseNumber(value) {
-  if (typeof value === 'number') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
   if (typeof value !== 'string') return null;
-  const cleaned = value.replace(/[$,%\s]/g, '');
-  const n = parseFloat(cleaned);
-  return isFinite(n) ? n : null;
+  const original = value.trim();
+  if (!original || /^#+$/.test(original) || /^(n\.?d\.?|n\.?s\.?|na|n\/a)$/i.test(original)) return null;
+
+  const hasPercent = original.includes('%');
+  const hasThousandsUnit = /\b(migl|thousand|k)\b/i.test(original);
+  const hasMillionsUnit = /\b(mln|million|mio)\b/i.test(original);
+  const hasBillionsUnit = /\b(mld|billion|bn)\b/i.test(original);
+  let cleaned = original
+    .replace(/\u00a0/g, ' ')
+    .replace(/[€$£¥%]/g, '')
+    .replace(/\b(EUR|USD|GBP|CHF|JPY|migl|thousand|million|mio|mln|mld|billion|bn|k)\b/gi, '')
+    .replace(/[^0-9,.\-()]/g, '')
+    .trim();
+  if (!cleaned || /^[-.,()]+$/.test(cleaned)) return null;
+
+  let sign = 1;
+  if (/^\(.*\)$/.test(cleaned)) {
+    sign = -1;
+    cleaned = cleaned.slice(1, -1);
+  }
+
+  const commaCount = (cleaned.match(/,/g) || []).length;
+  const dotCount = (cleaned.match(/\./g) || []).length;
+  if (commaCount > 0 && dotCount > 0) {
+    const lastComma = cleaned.lastIndexOf(',');
+    const lastDot = cleaned.lastIndexOf('.');
+    const decimalSep = lastComma > lastDot ? ',' : '.';
+    const thousandsSep = decimalSep === ',' ? '.' : ',';
+    cleaned = cleaned.split(thousandsSep).join('');
+    cleaned = cleaned.replace(decimalSep, '.');
+  } else if (commaCount > 0) {
+    if (commaCount > 1) cleaned = cleaned.replace(/,/g, '');
+    else cleaned = cleaned.replace(',', '.');
+  } else if (dotCount > 0) {
+    const parts = cleaned.split('.');
+    const last = parts[parts.length - 1];
+    if (dotCount > 1 || (last.length === 3 && parts[0].length <= 3)) {
+      cleaned = parts.join('');
+    }
+  }
+
+  let n = Number(cleaned) * sign;
+  if (!Number.isFinite(n)) return null;
+  if (hasPercent) n /= 100;
+  if (hasThousandsUnit) n *= 1000;
+  if (hasMillionsUnit) n *= 1000000;
+  if (hasBillionsUnit) n *= 1000000000;
+  return Number.isFinite(n) ? n : null;
 }
 
 function isHeaderLike(value) {
+  if (parsePeriodMeta(value)) return true;
   if (typeof value !== 'string') return false;
   const text = value.trim();
   if (text.length === 0) return false;
@@ -101,7 +265,13 @@ function isHeaderLike(value) {
 
 function normalizeLabel(text) {
   if (typeof text !== 'string') return '';
-  return text.toLowerCase().replace(/[^a-z0-9\s&]/g, '').trim();
+  return text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9&]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function classifyLabel(labelText) {
@@ -110,6 +280,81 @@ function classifyLabel(labelText) {
     if (normalized.includes(key)) return canonical;
   }
   return null;
+}
+
+function parsePeriodMeta(value) {
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 1900 && value <= 2100) {
+    return { label: String(value), year: value, order: value, isForecast: false, isActual: true };
+  }
+  if (typeof value !== 'string') return null;
+  const original = value.trim();
+  if (!original) return null;
+  const normalized = normalizeLabel(original);
+
+  const relative = normalized.match(/^n(?:\s*[-]\s*(\d+))?$/);
+  if (relative) {
+    const offset = relative[1] ? -Number(relative[1]) : 0;
+    return { label: original, year: null, order: offset, isForecast: false, isActual: true };
+  }
+
+  const yearMatch = original.match(/((?:19|20)\d{2})\s*([AaEeFfPp])?/);
+  if (!yearMatch) return null;
+  const year = Number(yearMatch[1]);
+  const suffix = (yearMatch[2] || '').toLowerCase();
+  const forecastText = /\b(e|est|estimate|forecast|budget|budgete|prevision|prevu|projete|projected|plan|guidance|bp)\b/.test(normalized);
+  const actualText = /\b(a|actual|reel|audited|historique|realise|reported)\b/.test(normalized);
+  const isForecast = ['e', 'f', 'p'].includes(suffix) || forecastText;
+  const isActual = suffix === 'a' || actualText || !isForecast;
+  const quarterMatch = normalized.match(/\bq([1-4])\b|\bt([1-4])\b/);
+  const halfMatch = normalized.match(/\bh([1-2])\b|\bs([1-2])\b/);
+  const periodFraction = quarterMatch ? Number(quarterMatch[1] || quarterMatch[2]) / 4 : (halfMatch ? Number(halfMatch[1] || halfMatch[2]) / 2 : 0);
+  return {
+    label: original,
+    year,
+    order: year + periodFraction,
+    isForecast,
+    isActual
+  };
+}
+
+function inferColumnPeriods(matrix) {
+  const candidates = [];
+  for (let r = 0; r < matrix.length; r++) {
+    const row = matrix[r] || [];
+    const metaByCol = new Map();
+    for (let c = 0; c < row.length; c++) {
+      const meta = parsePeriodMeta(row[c]);
+      if (meta) metaByCol.set(c, meta);
+    }
+    if (metaByCol.size >= 2) candidates.push({ row: r, count: metaByCol.size, metaByCol });
+  }
+  candidates.sort((a, b) => {
+    const countDelta = b.count - a.count;
+    if (countDelta) return countDelta;
+    return a.row - b.row;
+  });
+  return candidates[0]?.metaByCol || new Map();
+}
+
+function scoreCanonicalLabel(canonical, labelText) {
+  const label = normalizeLabel(labelText);
+  let score = 0;
+  if (/\btot\b|\btotale\b/.test(label)) score += 20;
+  if (/\bdi cui\b|\bsubtotale\b/.test(label)) score -= 8;
+
+  if (canonical === 'Cash & Equivalents') {
+    if (/tot.*dispon.*liquid|dispon.*liquid/.test(label)) score += 60;
+    if (/depositi bancari/.test(label)) score += 20;
+    if (/denaro in cassa/.test(label)) score -= 40;
+  }
+  if (canonical === 'Total Debt' && /totale debiti|tot debiti/.test(label)) score += 45;
+  if (canonical === 'Net Debt' && /posizione finanziaria netta|pfn/.test(label)) score += 45;
+  if (canonical === 'D&A' && /tot.*ammortamenti|ammortamenti e svalut/.test(label)) score += 45;
+  if (canonical === 'Income Taxes' && /totale imposte sul reddito/.test(label)) score += 45;
+  if (canonical === 'Pre-Tax Income' && /prima delle imposte/.test(label)) score += 45;
+  if (canonical === 'Revenue' && /ricavi delle vendite|total revenue|ricavi vendite/.test(label)) score += 30;
+  if (canonical === 'Shareholders Equity' && /totale patrimonio netto|patrimonio netto/.test(label)) score += 35;
+  return score;
 }
 
 function inferUnit(values) {
@@ -146,54 +391,70 @@ function parseSheetMatrix(matrix, sheetName = 'Sheet1') {
   const headers = [];
   const dataRows = [];
   const usedCells = new Set();
+  const columnPeriods = inferColumnPeriods(matrix);
 
-  // 1. Scansiona per coppie label/valore
+  const addInput = ({ label, canonical, value, rawValue, row, col, confidence }) => {
+    if (!canonical || value === null || value === undefined) return;
+    const key = `${canonical}:${row}:${col}`;
+    if (usedCells.has(key)) return;
+    inferredInputs.push({
+      label: String(label).trim(),
+      canonical,
+      value,
+      rawValue,
+      cell: cellAddress(sheetName, row, col),
+      confidence,
+      priority: scoreCanonicalLabel(canonical, label),
+      period: columnPeriods.get(col)?.label || null,
+      fiscalYear: columnPeriods.get(col)?.year ?? null,
+      periodOrder: columnPeriods.get(col)?.order ?? null,
+      isForecast: !!columnPeriods.get(col)?.isForecast,
+      isActual: columnPeriods.has(col) ? !!columnPeriods.get(col)?.isActual : null,
+      row,
+      col
+    });
+    usedCells.add(key);
+  };
+
+  // 1. Scansiona per righe label/valori. I financial statements spesso hanno
+  // label in colonna A e gli anni molte colonne più a destra.
   for (let r = 0; r < matrix.length; r++) {
     const row = matrix[r] || [];
     for (let c = 0; c < row.length; c++) {
       const cell = row[c];
-      const key = `${r},${c}`;
-      if (usedCells.has(key)) continue;
+      if (typeof cell !== 'string' || cell.trim().length === 0) continue;
+      const canonical = classifyLabel(cell);
+      if (!canonical) continue;
 
-      // Se è una stringa (potenziale label) e a destra c'è un numero
-      if (typeof cell === 'string' && cell.trim().length > 0 && c + 1 < maxCols) {
-        const rightCell = (matrix[r] || [])[c + 1];
-        if (isNumberLike(rightCell)) {
-          const canonical = classifyLabel(cell);
-          const value = parseNumber(rightCell);
-          inferredInputs.push({
-            label: cell.trim(),
-            canonical: canonical || cell.trim(),
-            value,
-            rawValue: rightCell,
-            cell: `${sheetName}!${colIndexToLetter(c + 1)}${r + 1}`,
-            confidence: canonical ? 'high' : 'medium',
-            row,
-            col: c + 1
-          });
-          usedCells.add(key);
-          usedCells.add(`${r},${c + 1}`);
-        }
+      let foundOnRow = false;
+      for (let valueCol = c + 1; valueCol < row.length; valueCol++) {
+        const rawValue = row[valueCol];
+        if (!isNumberLike(rawValue)) continue;
+        const value = parseNumber(rawValue);
+        addInput({
+          label: cell,
+          canonical,
+          value,
+          rawValue,
+          row: r,
+          col: valueCol,
+          confidence: 'high'
+        });
+        foundOnRow = true;
       }
 
-      // Se è una stringa e sotto c'è un numero (layout verticale)
-      if (typeof cell === 'string' && cell.trim().length > 0 && r + 1 < matrix.length) {
+      if (!foundOnRow && r + 1 < matrix.length) {
         const belowCell = (matrix[r + 1] || [])[c];
-        if (isNumberLike(belowCell) && !usedCells.has(`${r + 1},${c}`)) {
-          const canonical = classifyLabel(cell);
-          const value = parseNumber(belowCell);
-          inferredInputs.push({
-            label: cell.trim(),
-            canonical: canonical || cell.trim(),
-            value,
+        if (isNumberLike(belowCell)) {
+          addInput({
+            label: cell,
+            canonical,
+            value: parseNumber(belowCell),
             rawValue: belowCell,
-            cell: `${sheetName}!${colIndexToLetter(c)}${r + 2}`,
-            confidence: canonical ? 'high' : 'medium',
             row: r + 1,
-            col: c
+            col: c,
+            confidence: 'high'
           });
-          usedCells.add(key);
-          usedCells.add(`${r + 1},${c}`);
         }
       }
     }
@@ -232,7 +493,8 @@ function parseSheetMatrix(matrix, sheetName = 'Sheet1') {
   if (inferredInputs.length > 0) {
     lines.push(`Inferred ${inferredInputs.length} financial inputs (${unit || 'unknown unit'}):`);
     for (const inp of inferredInputs.slice(0, 20)) {
-      lines.push(`  - ${inp.canonical}: ${inp.rawValue} (${inp.confidence} confidence) at ${inp.cell}`);
+      const period = inp.period ? ` ${inp.period}` : '';
+      lines.push(`  - ${inp.canonical}${period}: ${inp.rawValue} (${inp.confidence} confidence) at ${inp.cell}`);
     }
   }
   if (headers.length > 0) {
@@ -258,6 +520,10 @@ function colIndexToLetter(colIndex) {
     n = Math.floor(n / 26);
   }
   return result;
+}
+
+function cellAddress(sheetName, rowIndex, colIndex) {
+  return `${sheetName}!${colIndexToLetter(colIndex + 1)}${rowIndex + 1}`;
 }
 
 /**
@@ -341,5 +607,8 @@ function analyzeWorkbookContext(rawContext) {
 module.exports = {
   parseSheetMatrix,
   analyzeWorkbookContext,
+  parseNumber,
+  classifyLabel,
+  scoreCanonicalLabel,
   FINANCE_KEYWORDS
 };

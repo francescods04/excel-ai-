@@ -5,6 +5,19 @@ The Discounted Cash Flow (DCF) model values a company by projecting its future c
 
 ## Structure
 
+## Analyst Depth Standard
+
+The model must not only create a DCF layout. Each section must show the reasoning path an analyst would use:
+- **Sources** — map every major input to workbook data, filings, market data, or an explicit analyst fallback.
+- **Assumptions** — derive operating drivers from local evidence when possible and expose fallback assumptions for review.
+- **WACC** — triangulate discount rate from risk-free rate, ERP, cost of debt, capital structure, and beta evidence.
+- **DCF** — build operating forecasts step-by-step before terminal value and equity bridge.
+- **Sensitivity / Scenarios** — show range of outcomes and driver interaction, not just a single implied price.
+- **Summary** — link every committee-facing number back to the model.
+- **Audit** — check source coverage, formula integrity, valuation mechanics, range analysis, and remaining analyst work.
+
+Audit status must be earned, not assumed. The model should flag cash/revenue scale problems, unsupported WACC inputs, missing sources, and private-company outputs that pretend to have a public share price.
+
 ### 1. Assumptions Sheet
 Contains all inputs that drive the model. Organized in sections:
 
@@ -12,6 +25,23 @@ Contains all inputs that drive the model. Organized in sections:
 - Revenue ($M) — base year actual or estimate
 - Revenue Growth (%) — year-over-year growth rate
 - EBITDA Margin (%) — EBITDA / Revenue
+
+Every assumption row must have side-by-side explanation columns:
+- **How Derived** — method used, such as workbook mapping, ratio calculation, forecast fade path, market-data pull, or analyst fallback.
+- **Source / Review** — source reference or review flag, such as workbook cell, market-data source, filing support, or "Review" when the value is a fallback.
+
+Workbook-first extraction must prefer complete statement totals over line items. For example, cash should use total cash / liquid assets before petty cash, and private-company models must show equity value on a 100% ownership basis unless a real share count and reference price are available.
+
+Workbook understanding should be AI-first, not glossary-first. The LLM maps workbook rows, periods, language, reporting units, and source cells into canonical finance concepts; deterministic label matching is only a fallback/validator. The model must support non-English statements such as French `chiffre d'affaires`, `EBE`, `BFR`, `trésorerie`, and layouts where historical years run left-to-right or right-to-left.
+
+Revenue growth assumptions must show the historical bridge beside the forecast:
+- latest actual revenue series used
+- YoY growth rates by period
+- historical CAGR
+- median YoY growth
+- selected starting growth and fade path
+
+Never make growth look like a magical assumption when the workbook contains historical revenue.
 
 **Tax & Capital**
 - Tax Rate (%) — marginal effective tax rate

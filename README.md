@@ -111,7 +111,7 @@ GET  /api/turn/:turnId
    - *"Fai la somma della colonna A"*
    - *"Crea un forecast per i prossimi 3 mesi basato sui dati in B1:B12"*
    - *"Formatta il range A1:D10 come tabella con bordi e intestazioni in grassetto"*
-3. L'AI risponderà ed eseguirà automaticamente le azioni sul tuo foglio.
+3. L'agente genera un piano, chiede conferma per le modifiche al workbook e poi applica le azioni approvate.
 
 ## Configurazione AI
 
@@ -234,7 +234,7 @@ L'AI può generare questi tipi di azioni:
 
 ## Sviluppo
 
-- **Frontend**: `src/taskpane.html`, `src/taskpane.css`, `src/taskpane.js`
+- **Frontend attivo**: `src/taskpane.html`, `src/main.js`, moduli in `src/ui`, `src/excel`, `src/api`
 - **Backend**: `server/server.js`
 - **Runtime agentico nuovo**: `server/runtime/turns.js`
 - **Manifest**: `manifest.xml`
@@ -244,9 +244,23 @@ L'AI può generare questi tipi di azioni:
 ```bash
 npm run dev     # Avvia server con nodemon (hot reload)
 npm start       # Avvia server in produzione
+npm run build   # Rigenera src/taskpane.bundle.js da src/main.js
+npm test        # Esegue i test unitari principali
+npm run check   # Test + build frontend
 npm run serve   # Alias di npm start: avvia il backend completo
 npm run serve:static  # Solo file statici; non usare per l'add-in agentico
 ```
+
+### Manifest production
+
+`manifest.xml` resta configurato per sviluppo locale. Per generare un manifest HTTPS pronto per validazione/deploy:
+
+```bash
+ADDIN_BASE_URL=https://app.example.com npm run manifest:prod
+ADDIN_BASE_URL=https://app.example.com npm run validate:manifest:prod
+```
+
+Il file generato finisce in `dist/manifest.xml` e sostituisce gli URL `localhost` con l'origine pubblica indicata.
 
 ## Troubleshooting
 

@@ -5,6 +5,7 @@ const logger = require('../utils/logger');
 // Cattura riferimenti A1 con foglio: SheetName!A1, 'Sheet Name'!A1, Sheet!B5:C10
 // NOTA: NO flag /g — deve essere stateless per test() e exec() deterministici
 const RE_A1_REF = /(?:'([^']+)'|([A-Za-z_]\w*))!\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?/i;
+const RE_A1_REF_GLOBAL = /(?:'([^']+)'|([A-Za-z_]\w*))!\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?/gi;
 
 // Cattura riferimenti A1 semplici (senza foglio): A1, $A$1, B5:C10, $B$5:$C$10
 const RE_A1_SIMPLE = /^\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?$/;
@@ -95,7 +96,7 @@ function validateFormula(formulaString, layout = {}) {
   }
 
   // Estrai riferimenti A1
-  for (const match of formulaString.matchAll(RE_A1_REF)) {
+  for (const match of formulaString.matchAll(RE_A1_REF_GLOBAL)) {
     refs.push(match[0]);
   }
 
@@ -372,9 +373,31 @@ function validateTaskOutput(taskOutput, layout = {}) {
   }
 
   // 4. Conta formule in actions
-  const formulaCount = (taskOutput.actions || []).filter(a => a.type === 'runFormula').length;
+  const formulaCount = (taskOutput.actions || []).reduce((count, action) => {
+    if (!action || typeof action !== 'object') return count;
+    if (action.type === 'runFormula') return count + 1;
+    if (action.type === 'setCellRange' && action.cells && typeof action.cells === 'object') {
+      return count + Object.values(action.cells).filter(spec => spec?.formula).length;
+    }
+    if (action.type === 'writeRange' && Array.isArray(action.formulas)) {
+      return count + action.formulas.flat().filter(Boolean).length;
+    }
+    return count;
+  }, 0);
   const mutationCount = (taskOutput.actions || []).filter(
-    a => a.type === 'runFormula' || a.type === 'fillRange' || a.type === 'writeRange' || a.type === 'createSheet'
+    a => [
+      'runFormula',
+      'fillRange',
+      'writeRange',
+      'createSheet',
+      'setCellValue',
+      'setCellRange',
+      'setCellFormat',
+      'addConditionalFormat',
+      'createChart',
+      'createNamedRange',
+      'copyRange'
+    ].includes(a.type)
   ).length;
 
   if (formulaCount > 0 && layout.sheets?.length === 0) {
@@ -397,5 +420,6 @@ module.exports = {
   validateTaskOutput,
   explainFormula,
   RE_A1_REF,
+  RE_A1_REF_GLOBAL,
   BUILTIN_FUNCTIONS
 };

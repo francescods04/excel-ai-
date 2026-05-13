@@ -41,6 +41,16 @@ function isMutationAction(action) {
   return action && MUTATION_TYPES.has(action.type);
 }
 
+function isRunJavaScriptEnabled() {
+  if (typeof window === 'undefined') return false;
+  if (window.EXCEL_AI_ALLOW_RUN_JAVASCRIPT === true) return true;
+  try {
+    return window.localStorage?.getItem('excelAi.allowRunJavaScript') === 'true';
+  } catch (err) {
+    return false;
+  }
+}
+
 function extractSnapshotTargets(actions) {
   const targets = []; // { sheet, target, actionType }
   for (const action of actions) {
@@ -256,6 +266,12 @@ async function executeActions(actions, updateStepsPanel) {
           case 'runJavaScript':
             await execRunJavaScript(context, action);
             break;
+          case 'suspendCalculation':
+            await execSuspendCalculation(context);
+            break;
+          case 'resumeCalculation':
+            await execResumeCalculation(context);
+            break;
           case 'addConditionalFormat':
             await execAddConditionalFormat(context, sheetCache, defaultSheet, action);
             break;
@@ -308,13 +324,61 @@ async function execRunFormula(context, sheetCache, defaultSheet, action) {
 async function execSetCellFormat(context, sheetCache, defaultSheet, action) {
   const { sheet, target } = await resolveSheetAndTarget(context, sheetCache, defaultSheet, action);
   const range = sheet.getRange(target);
-  const fmt = action.options || {};
+  applyRangeFormat(range, action.options || {});
+}
+
+function enumValue(enumObject, candidates, fallback) {
+  if (!enumObject) return fallback;
+  for (const candidate of candidates) {
+    if (candidate && enumObject[candidate] !== undefined) return enumObject[candidate];
+  }
+  return fallback;
+}
+
+function applyBorder(range, edge, spec = {}) {
+  try {
+    const borderIndex = {
+      top: enumValue(Excel.BorderIndex, ['edgeTop', 'EdgeTop'], 'EdgeTop'),
+      bottom: enumValue(Excel.BorderIndex, ['edgeBottom', 'EdgeBottom'], 'EdgeBottom'),
+      left: enumValue(Excel.BorderIndex, ['edgeLeft', 'EdgeLeft'], 'EdgeLeft'),
+      right: enumValue(Excel.BorderIndex, ['edgeRight', 'EdgeRight'], 'EdgeRight'),
+      insideHorizontal: enumValue(Excel.BorderIndex, ['insideHorizontal', 'InsideHorizontal'], 'InsideHorizontal'),
+      insideVertical: enumValue(Excel.BorderIndex, ['insideVertical', 'InsideVertical'], 'InsideVertical')
+    };
+    const border = range.format.borders.getItem(borderIndex[edge] || edge);
+    const style = String(spec.style || 'continuous').toLowerCase();
+    border.style = enumValue(Excel.BorderLineStyle, [style, spec.style, 'continuous'], spec.style || 'Continuous');
+    if (spec.color) border.color = spec.color;
+    if (spec.weight) {
+      const weight = String(spec.weight).toLowerCase();
+      border.weight = enumValue(Excel.BorderWeight, [weight, spec.weight], spec.weight);
+    }
+  } catch (err) {
+    console.warn('Border format not applied', edge, err);
+  }
+}
+
+function applyRangeFormat(range, fmt = {}) {
   if (fmt.backgroundColor) range.format.fill.color = fmt.backgroundColor;
   if (fmt.fontColor) range.format.font.color = fmt.fontColor;
   if (fmt.bold !== undefined) range.format.font.bold = fmt.bold;
   if (fmt.italic !== undefined) range.format.font.italic = fmt.italic;
+  if (fmt.fontSize !== undefined) range.format.font.size = Number(fmt.fontSize);
+  if (fmt.fontName) range.format.font.name = fmt.fontName;
   if (fmt.numberFormat) range.numberFormat = [[fmt.numberFormat]];
   if (fmt.horizontalAlignment) range.format.horizontalAlignment = fmt.horizontalAlignment;
+  if (fmt.verticalAlignment) range.format.verticalAlignment = fmt.verticalAlignment;
+  if (fmt.wrapText !== undefined) range.format.wrapText = !!fmt.wrapText;
+  if (fmt.columnWidth !== undefined) range.format.columnWidth = Number(fmt.columnWidth);
+  if (fmt.rowHeight !== undefined) range.format.rowHeight = Number(fmt.rowHeight);
+
+  if (fmt.borderBottomColor) applyBorder(range, 'bottom', { color: fmt.borderBottomColor, style: 'continuous', weight: fmt.borderBottomWeight || 'Thin' });
+  if (fmt.borderTopColor) applyBorder(range, 'top', { color: fmt.borderTopColor, style: 'continuous', weight: fmt.borderTopWeight || 'Thin' });
+  if (fmt.borders && typeof fmt.borders === 'object') {
+    for (const [edge, spec] of Object.entries(fmt.borders)) {
+      applyBorder(range, edge, spec || {});
+    }
+  }
 }
 
 async function execFillRange(context, sheetCache, defaultSheet, action) {
@@ -344,6 +408,9 @@ async function execWriteRange(context, sheetCache, defaultSheet, action) {
 async function execRunJavaScript(context, action) {
   const code = action.code;
   if (!code || typeof code !== 'string') throw new Error('runJavaScript requires a "code" string');
+  if (!isRunJavaScriptEnabled()) {
+    throw new Error('runJavaScript is disabled. Enable localStorage excelAi.allowRunJavaScript=true only in dev mode.');
+  }
   // Use AsyncFunction to support await — new Function() creates synchronous functions
   const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
   const fn = new AsyncFunction('context', code);
@@ -397,15 +464,10 @@ async function execSetCellRange(context, sheetCache, defaultSheet, action) {
     } else if (spec.value !== undefined) {
       cell.values = [[spec.value]];
     }
-    if (spec.note) {
-      cell.comments.add(spec.note);
-    }
+    // Excel comments can fail late during context.sync and abort the whole batch.
+    // Keep notes out of the write path until comments have a dedicated safe action.
     if (spec.cellStyles) {
-      const fmt = spec.cellStyles;
-      if (fmt.fontColor) cell.format.font.color = fmt.fontColor;
-      if (fmt.backgroundColor) cell.format.fill.color = fmt.backgroundColor;
-      if (fmt.bold !== undefined) cell.format.font.bold = fmt.bold;
-      if (fmt.numberFormat) cell.numberFormat = [[fmt.numberFormat]];
+      applyRangeFormat(cell, spec.cellStyles);
     }
   }
 
@@ -485,6 +547,15 @@ async function execCreateNamedRange(context, sheetCache, action) {
   const refersTo = action.refersTo || `=${action.sheet}!${action.target}`;
   if (!name) throw new Error('createNamedRange requires a name');
   context.workbook.names.add(name, refersTo);
+}
+
+async function execSuspendCalculation(context) {
+  context.application.calculationMode = Excel.CalculationMode.manual;
+}
+
+async function execResumeCalculation(context) {
+  context.application.calculationMode = Excel.CalculationMode.automatic;
+  context.application.calculate(Excel.CalculationType.full);
 }
 
 async function execAddConditionalFormat(context, sheetCache, defaultSheet, action) {

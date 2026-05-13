@@ -1,7 +1,11 @@
 const Ajv = require('ajv');
 const yahoo = require('../tools/yahoo');
+const { buildDcfSectionAi } = require('../models/dcfAiBuilder');
+const { buildWorkbookGraph } = require('../models/workbookGraph');
+const { understandWorkbook } = require('../models/workbookUnderstanding');
 const { runLayoutAgent, runFormulaAgent, runFormatAgent } = require('../agents/specialists');
 const { searchTools } = require('../utils/toolSearch');
+const SHARED_SCHEMAS = require('./schemas');
 
 const ajv = new Ajv({ removeAdditional: 'failing', useDefaults: true, coerceTypes: 'array' });
 
@@ -203,6 +207,30 @@ function attachSheetToActions(actions, sheet) {
   ));
 }
 
+function resolveWorkbookGraphInput(params, memory) {
+  const sourceResultId = params?.fromResult || params?.resultId || params?.planRef;
+  if (sourceResultId && memory?.results?.[sourceResultId]) {
+    return memory.results[sourceResultId];
+  }
+  if (params?.snapshot) return params.snapshot;
+  if (params?.workbook) return params.workbook;
+  if (memory?.context) return memory.context;
+  return null;
+}
+
+function hasWorkbookGraphInput(input) {
+  if (!input || typeof input !== 'object') return false;
+  if (input.data && typeof input.data === 'object') return hasWorkbookGraphInput(input.data);
+  if (input.result && typeof input.result === 'object') return hasWorkbookGraphInput(input.result);
+  return Boolean(
+    Array.isArray(input.sheets) ||
+    input.allSheetsData ||
+    input.values ||
+    input.preview ||
+    input.selectedValues
+  );
+}
+
 /* ========== Tool definitions (con schema JSON) ========== */
 
 registerTool('yahoo.quote', async (params) => {
@@ -257,6 +285,32 @@ registerTool('yahoo.fundamentals', async (params) => {
   costHint: 'low'
 });
 
+registerTool('finance.dcf.buildSection', async (params, memory) => {
+  return buildDcfSectionAi(params, memory);
+}, {
+  description: 'Costruisce una sezione AI-assisted di un DCF completo (shell, sources, assumptions, WACC, DCF, sensitivity, scenarios, summary, audit, format) con formule Excel istituzionali e fallback deterministico.',
+  inputs: ['section', 'ticker', 'companyName'],
+  schema: {
+    type: 'object',
+    required: ['section'],
+    properties: {
+      section: {
+        type: 'string',
+        enum: ['shell', 'sources', 'source', 'research', 'assumptions', 'wacc', 'dcf', 'projection', 'sensitivity', 'scenarios', 'scenario', 'summary', 'output', 'audit', 'checks', 'format', 'formatting', 'all']
+      },
+      ticker: { type: 'string', minLength: 1, maxLength: 12 },
+      companyName: { type: 'string' },
+      objective: { type: 'string' },
+      projectionYears: { type: 'integer', minimum: 5, maximum: 5 },
+      mode: { type: 'string', enum: ['ai_assisted', 'template'] },
+      usesResults: { type: 'array', items: { type: 'string' } }
+    }
+  },
+  category: 'mutation',
+  costHint: 'low',
+  requiresApproval: 'always'
+});
+
 registerTool('llm.planLayout', async (params, memory) => {
   const result = await runLayoutAgent(params, memory);
   return { data: result, actions: [] };
@@ -303,9 +357,14 @@ registerTool('llm.writeFormulas', async (params, memory) => {
 registerTool('llm.planFormat', async (params, memory) => {
   const result = await runFormatAgent(params, memory);
   const defaultSheet = params.sheet || (Array.isArray(params.sheets) && params.sheets.length === 1 ? params.sheets[0] : undefined);
+  const plannedActions = attachSheetToActions(result.actions || [], defaultSheet);
   return {
-    data: result,
-    actions: attachSheetToActions(result.actions || [], defaultSheet)
+    data: {
+      ...(result.data || {}),
+      actions: plannedActions,
+      actionCount: plannedActions.length
+    },
+    actions: []
   };
 }, {
   description: 'Pianifica la formattazione Excel: colori, font, bordi, number format, conditional formatting. Output: azioni setCellFormat/addConditionalFormat',
@@ -315,12 +374,23 @@ registerTool('llm.planFormat', async (params, memory) => {
     required: ['sheet'],
     properties: {
       sheet: SCHEMA_SHEET_NAME,
+      sheets: { type: 'array', items: SCHEMA_SHEET_NAME },
+      targetSheets: { type: 'array', items: SCHEMA_SHEET_NAME },
       formatType: { type: 'string', 'enum': ['headers', 'conditional', 'full', 'numbers', 'percents', 'currency'] },
       section: { type: 'string' },
-      model: { type: 'string', 'enum': ['dcf', 'lbo', 'comps', 'ddm', 'wacc', 'three_statement', 'custom'] }
+      model: { type: 'string', 'enum': ['dcf', 'lbo', 'comps', 'ddm', 'wacc', 'three_statement', 'custom'] },
+      objective: { type: 'string' },
+      mode: { type: 'string' },
+      scope: { type: 'string', enum: ['sheet', 'workbook'] },
+      theme: { type: 'string' },
+      usesResults: { type: 'array', items: { type: 'string' } },
+      workbookUnderstanding: { type: 'string' },
+      analysisDepth: { type: 'string' },
+      analystDepth: { type: 'object' },
+      sourcePriority: { type: 'string' }
     }
   },
-  category: 'mutation',
+  category: 'analysis',
   costHint: 'low'
 });
 
@@ -421,7 +491,8 @@ registerTool('excel.addChart', async (params) => {
 
 registerTool('excel.applyFormat', async (params, memory) => {
   const sourceResultId = params.fromResult || params.planRef;
-  const actions = params.actions || (sourceResultId && memory.results[sourceResultId]?.actions) || [];
+  const source = sourceResultId && memory.results[sourceResultId];
+  const actions = params.actions || source?.data?.actions || source?.actions || [];
   return {
     data: { count: actions.length },
     actions: attachSheetToActions(actions, params.sheet)
@@ -431,11 +502,11 @@ registerTool('excel.applyFormat', async (params, memory) => {
   inputs: ['sheet', 'fromResult'],
   schema: {
     type: 'object',
-    required: ['sheet'],
     properties: {
       sheet: SCHEMA_SHEET_NAME,
       fromResult: { type: 'string', description: 'ID del task planFormat precedente' },
-      planRef: { type: 'string', description: 'Riferimento alternativo al piano' }
+      planRef: { type: 'string', description: 'Riferimento alternativo al piano' },
+      actions: { type: 'array', items: { type: 'object' } }
     }
   },
   category: 'mutation',
@@ -487,6 +558,105 @@ registerTool('workbook.readWorkbook', async (params, memory) => {
 }, {
   description: 'Legge lo stato completo del workbook dal client Excel',
   inputs: ['maxRows', 'maxCols'],
+  category: 'read',
+  costHint: 'medium',
+  requiresApproval: 'never'
+});
+
+registerTool('workbook.buildGraph', async (params, memory = {}) => {
+  let input = resolveWorkbookGraphInput(params, memory);
+  if (!hasWorkbookGraphInput(input) && memory.runtime?.requestClientTool) {
+    input = await memory.runtime.requestClientTool('workbook.readWorkbook', {
+      maxRows: params.maxRows || 80,
+      maxCols: params.maxCols || 30,
+      includeFormulas: params.includeFormulas !== false,
+      includeNumberFormats: !!params.includeNumberFormats
+    });
+  }
+
+  const graph = buildWorkbookGraph(input || {}, {
+    workbookId: params.workbookId,
+    workbookName: params.workbookName,
+    source: params.source || 'excel'
+  });
+  return { data: graph, actions: [] };
+}, {
+  description: 'Costruisce un grafo semantico del workbook: fogli, ruoli, formule, dipendenze cross-sheet, tabelle, errori e oggetti finanziari',
+  inputs: ['fromResult', 'maxRows', 'maxCols'],
+  schema: {
+    type: 'object',
+    properties: {
+      fromResult: { type: 'string', description: 'ID del task workbook.readWorkbook precedente' },
+      resultId: { type: 'string' },
+      workbookId: { type: 'string' },
+      workbookName: { type: 'string' },
+      source: { type: 'string' },
+      maxRows: { type: 'integer', minimum: 1, maximum: 10000 },
+      maxCols: { type: 'integer', minimum: 1, maximum: 200 },
+      includeFormulas: { type: 'boolean' },
+      includeNumberFormats: { type: 'boolean' },
+      snapshot: { type: 'object' },
+      workbook: { type: 'object' }
+    }
+  },
+  category: 'read',
+  costHint: 'low',
+  requiresApproval: 'never'
+});
+
+registerTool('workbook.understand', async (params, memory = {}) => {
+  return understandWorkbook(params, memory);
+}, {
+  description: 'AI-first, domain-agnostic workbook understanding: identifies purpose, sheet roles, tables, measures, dimensions, key cells, formula zones, risks and next actions with validated cell/range grounding.',
+  inputs: ['fromResult', 'objective', 'maxRows', 'maxCols'],
+  schema: {
+    type: 'object',
+    properties: {
+      fromResult: { type: 'string', description: 'ID di un task workbook.readWorkbook/workbook.readSheet precedente' },
+      resultId: { type: 'string' },
+      objective: { type: 'string' },
+      maxRows: { type: 'integer', minimum: 1, maximum: 10000 },
+      maxCols: { type: 'integer', minimum: 1, maximum: 200 },
+      snapshot: { type: 'object' },
+      workbook: { type: 'object' }
+    }
+  },
+  category: 'read',
+  costHint: 'high',
+  requiresApproval: 'never'
+});
+
+registerTool('workbook.scanDeep', async (params, memory = {}) => {
+  if (!memory.runtime?.requestClientTool) {
+    throw new Error('Runtime workbook non disponibile per workbook.scanDeep');
+  }
+  const snapshot = await memory.runtime.requestClientTool('workbook.readWorkbook', {
+    maxRows: params.maxRows || 160,
+    maxCols: params.maxCols || 50,
+    includeFormulas: params.includeFormulas !== false,
+    includeNumberFormats: !!params.includeNumberFormats
+  });
+  const graph = buildWorkbookGraph(snapshot, {
+    workbookId: params.workbookId,
+    workbookName: params.workbookName,
+    source: params.source || 'excel.deep_scan'
+  });
+  return { data: graph, actions: [] };
+}, {
+  description: 'Esegue una scansione profonda del workbook corrente e restituisce il WorkbookGraph per analisi multi-foglio',
+  inputs: ['maxRows', 'maxCols'],
+  schema: {
+    type: 'object',
+    properties: {
+      workbookId: { type: 'string' },
+      workbookName: { type: 'string' },
+      source: { type: 'string' },
+      maxRows: { type: 'integer', minimum: 1, maximum: 10000 },
+      maxCols: { type: 'integer', minimum: 1, maximum: 200 },
+      includeFormulas: { type: 'boolean' },
+      includeNumberFormats: { type: 'boolean' }
+    }
+  },
   category: 'read',
   costHint: 'medium',
   requiresApproval: 'never'
@@ -623,28 +793,7 @@ registerTool('excel.setCellRange', async (params) => {
 }, {
   description: 'Scrive celle usando una mappa A1 -> {value, formula, note, cellStyles, borderStyles}. Supporta copyToRange e allow_overwrite.',
   inputs: ['sheet', 'cells'],
-  schema: {
-    type: 'object',
-    required: ['sheet', 'cells'],
-    properties: {
-      sheet: SCHEMA_SHEET_NAME,
-      cells: {
-        type: 'object',
-        additionalProperties: {
-          type: 'object',
-          properties: {
-            value: {},
-            formula: { type: 'string' },
-            note: { type: 'string' },
-            cellStyles: { type: 'object' },
-            borderStyles: { type: 'object' }
-          }
-        }
-      },
-      copyToRange: { type: 'string' },
-      allow_overwrite: { type: 'boolean' }
-    }
-  },
+  schema: SHARED_SCHEMAS.SET_CELL_RANGE,
   category: 'mutation',
   costHint: 'low',
   requiresApproval: 'always'
