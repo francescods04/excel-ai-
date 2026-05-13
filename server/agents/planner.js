@@ -6,8 +6,8 @@ const { analyzeWorkbookContext } = require('../utils/sheetParser');
 const { inferEquityIntent } = require('../utils/equityIntent');
 const { getAnalystDepth } = require('../models/analystDepth');
 
-const PLANNER_TIMEOUT_MS = Number(process.env.PLANNER_TIMEOUT_MS) || 150000;
-const PLANNER_FALLBACK_TIMEOUT_MS = Number(process.env.PLANNER_FALLBACK_TIMEOUT_MS) || 60000;
+const PLANNER_TIMEOUT_MS = Number(process.env.PLANNER_TIMEOUT_MS) || 300000;
+const PLANNER_FALLBACK_TIMEOUT_MS = Number(process.env.PLANNER_FALLBACK_TIMEOUT_MS) || 180000;
 const PLANNER_MODEL = process.env.PLANNER_MODEL || process.env.OPENROUTER_PLANNER_MODEL || '';
 const PLANNER_FALLBACK_MODEL = process.env.PLANNER_FALLBACK_MODEL || '';
 
@@ -1523,6 +1523,7 @@ async function plan(objective, context, turnId, options = {}) {
       const accumulated = await callLLMStreaming({
         system: PLANNER_SYSTEM_PROMPT,
         userText: userPromptBase,
+        timeoutMs: PLANNER_TIMEOUT_MS,
         modelOverride: plannerModel,
         label: 'Planner LLM stream',
         onChunk: (delta, text, isDone) => {

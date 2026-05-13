@@ -54,11 +54,12 @@ function getLLMConfig() {
   return { ...dynamicConfig };
 }
 
-const DEFAULT_LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS) || 90000;
-const DEFAULT_LLM_FALLBACK_TIMEOUT_MS = Number(process.env.LLM_FALLBACK_TIMEOUT_MS) || 45000;
+const DEFAULT_LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS) || 300000;
+const DEFAULT_LLM_FALLBACK_TIMEOUT_MS = Number(process.env.LLM_FALLBACK_TIMEOUT_MS) || 180000;
 
 const LLM_JSON_MODE = process.env.LLM_JSON_MODE !== 'false';
-const MAX_TOKENS = Number(process.env.MAX_TOKENS) || 16384;
+const MAX_TOKENS = Number(process.env.MAX_TOKENS) || 131072;
+const DEFAULT_LLM_STREAM_MAX_MS = Number(process.env.LLM_STREAM_MAX_MS) || DEFAULT_LLM_TIMEOUT_MS;
 
 /* ---------- Cache optimization ---------- */
 const CACHE_BREAKPOINT_ENABLED = process.env.CACHE_BREAKPOINT_ENABLED !== 'false';
@@ -500,6 +501,7 @@ async function callDeepSeekStream(messages, options = {}, onChunk) {
     model,
     messages,
     temperature: 0.2,
+    max_tokens: MAX_TOKENS,
     stream: true
   };
   if (jsonMode) body.response_format = { type: 'json_object' };
@@ -845,6 +847,7 @@ async function callOpenRouterAIStream(messages, options = {}, onChunk) {
     model,
     messages,
     temperature: 0.2,
+    max_tokens: MAX_TOKENS,
     stream: true
   };
   if (jsonMode) body.response_format = { type: 'json_object' };
@@ -938,6 +941,7 @@ async function callOpenAICompatStream(messages, options = {}, onChunk) {
     model,
     messages,
     temperature: 0.2,
+    max_tokens: MAX_TOKENS,
     stream: true
   };
   if (jsonMode) body.response_format = { type: 'json_object' };
@@ -1002,6 +1006,7 @@ async function callLLMStreaming({
   system,
   messages,
   userText,
+  timeoutMs = DEFAULT_LLM_TIMEOUT_MS,
   modelOverride,
   label = 'LLM stream',
   onChunk,
@@ -1043,15 +1048,16 @@ async function callLLMStreaming({
     }
     logger.info(`[LLM] ${label} stream start → [${provider}] ${primaryModel}`);
     const start = Date.now();
-    const maxStreamMs = Number(process.env.LLM_STREAM_MAX_MS) || 30000;
+    const maxStreamMs = Number(process.env.LLM_STREAM_MAX_MS) || timeoutMs || DEFAULT_LLM_STREAM_MAX_MS;
     try {
       let accumulated;
       if (provider === 'openrouter') {
-        accumulated = await callOpenRouterAIStream(finalMessages, { model: primaryModel, maxTotalMs: maxStreamMs }, onChunk);
+        accumulated = await callOpenRouterAIStream(finalMessages, { model: primaryModel, maxTotalMs: maxStreamMs, requestTimeoutMs: maxStreamMs }, onChunk);
       } else if (provider === 'deepseek') {
         accumulated = await callDeepSeekStream(finalMessages, {
           model: primaryModel,
           maxTotalMs: maxStreamMs,
+          requestTimeoutMs: maxStreamMs,
           apiUrl: dynamicConfig.apiUrl || DEEPSEEK_API_URL,
           apiKey: dynamicConfig.apiKey || DEEPSEEK_API_KEY,
           thinkingDisabled,
@@ -1061,6 +1067,7 @@ async function callLLMStreaming({
         accumulated = await callOpenAICompatStream(finalMessages, {
           model: primaryModel,
           maxTotalMs: maxStreamMs,
+          requestTimeoutMs: maxStreamMs,
           apiUrl: provider === 'xiaomi' ? XIAOMI_API_URL : undefined,
           apiKey: provider === 'xiaomi' ? (dynamicConfig.apiKey || XIAOMI_API_KEY) : undefined,
           thinkingDisabled: provider === 'xiaomi'

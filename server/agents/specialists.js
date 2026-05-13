@@ -4,14 +4,14 @@ const { getWikiContextForPrompt } = require('../wiki/loader');
 const { buildProfessionalFormatPlan, classifyFormatIntent } = require('../models/formatTemplate');
 const { getAnalystDepth } = require('../models/analystDepth');
 
-const LAYOUT_TIMEOUT_MS = Number(process.env.LAYOUT_TIMEOUT_MS) || 60000;
-const LAYOUT_FALLBACK_TIMEOUT_MS = Number(process.env.LAYOUT_FALLBACK_TIMEOUT_MS) || 35000;
-const FORMULA_TIMEOUT_MS = Number(process.env.FORMULA_TIMEOUT_MS) || 90000;
-const FORMULA_FALLBACK_TIMEOUT_MS = Number(process.env.FORMULA_FALLBACK_TIMEOUT_MS) || 45000;
-const FORMULA_SECTION_TIMEOUT_MS = Number(process.env.FORMULA_SECTION_TIMEOUT_MS) || 90000;
-const FORMULA_SECTION_FALLBACK_TIMEOUT_MS = Number(process.env.FORMULA_SECTION_FALLBACK_TIMEOUT_MS) || 45000;
-const FORMAT_TIMEOUT_MS = Number(process.env.FORMAT_TIMEOUT_MS) || 60000;
-const FORMAT_FALLBACK_TIMEOUT_MS = Number(process.env.FORMAT_FALLBACK_TIMEOUT_MS) || 35000;
+const LAYOUT_TIMEOUT_MS = Number(process.env.LAYOUT_TIMEOUT_MS) || 240000;
+const LAYOUT_FALLBACK_TIMEOUT_MS = Number(process.env.LAYOUT_FALLBACK_TIMEOUT_MS) || 150000;
+const FORMULA_TIMEOUT_MS = Number(process.env.FORMULA_TIMEOUT_MS) || 300000;
+const FORMULA_FALLBACK_TIMEOUT_MS = Number(process.env.FORMULA_FALLBACK_TIMEOUT_MS) || 180000;
+const FORMULA_SECTION_TIMEOUT_MS = Number(process.env.FORMULA_SECTION_TIMEOUT_MS) || 300000;
+const FORMULA_SECTION_FALLBACK_TIMEOUT_MS = Number(process.env.FORMULA_SECTION_FALLBACK_TIMEOUT_MS) || 180000;
+const FORMAT_TIMEOUT_MS = Number(process.env.FORMAT_TIMEOUT_MS) || 240000;
+const FORMAT_FALLBACK_TIMEOUT_MS = Number(process.env.FORMAT_FALLBACK_TIMEOUT_MS) || 150000;
 
 function summarizeValue(value, depth = 0) {
   if (depth > 2) return '[depth-limit]';

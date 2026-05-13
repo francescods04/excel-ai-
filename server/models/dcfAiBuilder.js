@@ -5,8 +5,8 @@ const { getWikiContextForPrompt } = require('../wiki/loader');
 const { buildDcfSection, inferDcfInputs } = require('./dcfTemplate');
 const { formatAnalystDepthForPrompt, getAnalystDepth } = require('./analystDepth');
 
-const DCF_AI_TIMEOUT_MS = Number(process.env.DCF_AI_TIMEOUT_MS) || 90000;
-const DCF_AI_FALLBACK_TIMEOUT_MS = Number(process.env.DCF_AI_FALLBACK_TIMEOUT_MS) || 45000;
+const DCF_AI_TIMEOUT_MS = Number(process.env.DCF_AI_TIMEOUT_MS) || 300000;
+const DCF_AI_FALLBACK_TIMEOUT_MS = Number(process.env.DCF_AI_FALLBACK_TIMEOUT_MS) || 180000;
 
 const DCF_SHEETS = ['Assumptions', 'WACC', 'DCF', 'Sensitivity'];
 const AI_SECTIONS = new Set(['assumptions', 'wacc', 'dcf', 'projection', 'sensitivity']);

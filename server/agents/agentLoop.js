@@ -9,8 +9,9 @@ const streaming = require('./streaming');
 const { initializeTools } = require('../utils/toolSearch');
 const { detectSkills } = require('../utils/skillSuggest');
 
-const AGENT_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT_AGENT || 'low';
+const AGENT_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT_AGENT || 'high';
 const AGENT_THINKING_FIRST_ITER = process.env.AGENT_THINKING_FIRST_ITER !== 'false';
+const AGENT_THINKING_EVERY_ITER = process.env.AGENT_THINKING_EVERY_ITER !== 'false';
 const AGENT_USE_STREAMING = process.env.AGENT_USE_STREAMING !== 'false';
 
 /* ---------- Message ID helpers for context_snip targeting ---------- */
@@ -149,10 +150,15 @@ SKILLS RULES:
 LIMITATIONS — What You Cannot Do:
 - You cannot execute VBA macros.
 - You cannot download files from the internet to the user's disk.
-- You cannot access external APIs other than the provided financial data tools.
+- You cannot access external APIs or websites except through the provided tools.
 - You cannot create PivotTables or Power Query connections (not yet supported).`;
 
-AGENT_SYSTEM_PROMPT += AGENT_SYSTEM_PROMPT_SUFFIX;
+const ACTIVE_AGENT_SYSTEM_PROMPT_SUFFIX = AGENT_SYSTEM_PROMPT_SUFFIX.replace(
+  '- Search/fetch the web only when the user asks for current source material or when a required data point is unavailable from the provided finance tools.',
+  '- Search/fetch the web whenever current source material can improve accuracy, especially for mutable market, company, regulatory, pricing, filing, rate, benchmark, or news inputs.'
+);
+
+AGENT_SYSTEM_PROMPT += ACTIVE_AGENT_SYSTEM_PROMPT_SUFFIX;
 
 function getSystemPrompt(variant) {
   const v = variant || DEFAULT_PROMPT_VARIANT;
@@ -162,7 +168,7 @@ function getSystemPrompt(variant) {
   // Prepend available skills to the prompt (lightweight index, not full content)
   const skillsPrefix = skillsBlock ? skillsBlock + '\n\n' : '';
   const instructionsPrefix = instructionsBlock ? instructionsBlock + '\n\n' : '';
-  return skillsPrefix + instructionsPrefix + base + AGENT_SYSTEM_PROMPT_SUFFIX;
+  return skillsPrefix + instructionsPrefix + base + ACTIVE_AGENT_SYSTEM_PROMPT_SUFFIX;
 }
 
 /* ---------- Tool Definitions (OpenAI function calling schema) ---------- */
@@ -996,8 +1002,8 @@ function tryAutoAnswer(questionData, context, objective) {
 async function runAgentLoop(objective, context, options = {}) {
   const maxIterations = options.maxIterations || Number(process.env.AGENT_MAX_ITER) || 200;
   const maxConsecutiveErrors = options.maxConsecutiveErrors || 4;
-  const timeoutMs = options.timeoutMs || 180000;
-  const fallbackTimeoutMs = options.fallbackTimeoutMs || 90000;
+  const timeoutMs = options.timeoutMs || Number(process.env.AGENT_LLM_TIMEOUT_MS) || 300000;
+  const fallbackTimeoutMs = options.fallbackTimeoutMs || Number(process.env.AGENT_LLM_FALLBACK_TIMEOUT_MS) || 180000;
   const onEvent = options.onEvent || (() => {});
 
   const FATAL_ERROR_PATTERNS = [
@@ -1018,7 +1024,7 @@ async function runAgentLoop(objective, context, options = {}) {
   let userPrompt = `Goal: ${objective}\n\n${overview}\n\nWorkbook context (compact JSON):\n${JSON.stringify(compactCtx, null, 2)}\n\nProceed step by step. When writing, ALWAYS pass an explicit "sheet" parameter — the active sheet at task start may NOT be where the user wants the data.`;
   const lowerObjective = objective.toLowerCase();
   if (lowerObjective.includes('apple') || lowerObjective.includes('aapl')) {
-    userPrompt += `\n\nHINT — Use these publicly known Apple FY2024 figures (build the model with these; no need to search):\n- Revenue: ~$394B\n- Net Income: ~$97B\n- EBITDA: ~$120B\n- CapEx: ~$10B\n- D&A: ~$12B\n- Shares Outstanding: ~15.5B\n- Cash & Equivalents: ~$70B\n- Total Debt: ~$110B\n- Tax Rate: ~16%\nStart immediately with todo_write to plan the DCF, then build it.`;
+    userPrompt += `\n\nHINT — These publicly known Apple FY2024 figures are rough sanity-check anchors, not live sources:\n- Revenue: ~$394B\n- Net Income: ~$97B\n- EBITDA: ~$120B\n- CapEx: ~$10B\n- D&A: ~$12B\n- Shares Outstanding: ~15.5B\n- Cash & Equivalents: ~$70B\n- Total Debt: ~$110B\n- Tax Rate: ~16%\nVerify or update current market/filing inputs with tools when available, then build the model with visible sources and review flags.`;
   }
 
   const promptVariant = options.promptVariant || DEFAULT_PROMPT_VARIANT;
@@ -1052,7 +1058,7 @@ async function runAgentLoop(objective, context, options = {}) {
   onEvent('agentStarted', { objective, iteration });
 
   let webSearchCount = 0;
-  const MAX_WEB_SEARCH = Number(process.env.AGENT_MAX_WEB_SEARCH) || 8;
+  const MAX_WEB_SEARCH = Number(process.env.AGENT_MAX_WEB_SEARCH) || 20;
   let consecutiveErrors = 0;
   let lastErrorMessage = '';
   let aborted = false;
@@ -1064,8 +1070,8 @@ async function runAgentLoop(objective, context, options = {}) {
     onEvent('iterationStart', { iteration, maxIterations });
 
     try {
-      // Adaptive thinking: enable only on first iter (planning), disable for tool execution
-      const useThinking = AGENT_THINKING_FIRST_ITER && iteration === 1;
+      // DeepSeek calls are cheap enough that quality wins: keep thinking enabled by default.
+      const useThinking = AGENT_THINKING_EVERY_ITER || (AGENT_THINKING_FIRST_ITER && iteration === 1);
       const turnId = options.turnId || options.agentId;
       const callOpts = {
         messages,
@@ -1285,9 +1291,9 @@ async function runAgentLoop(objective, context, options = {}) {
       onEvent('toolResult', { iteration, tool: toolName, result: toolResult });
 
       // Auto-compact context if too large (LLM should also call context_snip explicitly)
-      const AUTO_COMPACT_LIMIT = Number(process.env.AGENT_AUTO_COMPACT_LIMIT) || 18;
+      const AUTO_COMPACT_LIMIT = Number(process.env.AGENT_AUTO_COMPACT_LIMIT) || 80;
       if (messages.length > AUTO_COMPACT_LIMIT) {
-        const keepCount = 6;
+        const keepCount = Number(process.env.AGENT_AUTO_COMPACT_KEEP) || 12;
         const toCompact = messages.slice(1, messages.length - keepCount);
         // Find first and last user message IDs in the range for snipContext
         const userMsgs = toCompact.filter(m => m.role === 'user');

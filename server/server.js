@@ -36,6 +36,11 @@ app.get('/api/health', (req, res) => {
     || (llmCfg.provider === 'deepseek' ? process.env.DEEPSEEK_MODEL : null)
     || process.env.AI_MODEL
     || 'kimi-k2.6';
+  const fallbackModel = llmCfg.fallbackModel
+    || (llmCfg.provider === 'openrouter' ? process.env.OPENROUTER_FALLBACK_MODEL : null)
+    || (llmCfg.provider === 'deepseek' ? process.env.DEEPSEEK_FALLBACK_MODEL : null)
+    || process.env.AI_FALLBACK_MODEL
+    || '';
 
   res.json({
     ok: true,
@@ -46,8 +51,8 @@ app.get('/api/health', (req, res) => {
     model: {
       provider: llmCfg.provider,
       primary: activeModel,
-      fallback: llmCfg.fallbackModel || process.env.AI_FALLBACK_MODEL || '',
-      maxTokens: Number(process.env.MAX_TOKENS) || 16384
+      fallback: fallbackModel,
+      maxTokens: Number(process.env.MAX_TOKENS) || 131072
     },
     tools: {
       count: TOOL_DEFINITIONS.length,
@@ -72,7 +77,7 @@ app.get('/api/health', (req, res) => {
     env: {
       nodeEnv: process.env.NODE_ENV || 'development',
       cacheBreakpointEnabled: process.env.CACHE_BREAKPOINT_ENABLED !== 'false',
-      autoCompactLimit: Number(process.env.AGENT_AUTO_COMPACT_LIMIT) || 18
+      autoCompactLimit: Number(process.env.AGENT_AUTO_COMPACT_LIMIT) || 80
     }
   });
 });
