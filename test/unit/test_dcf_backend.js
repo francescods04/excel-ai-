@@ -5,6 +5,7 @@ const { buildDcfSectionAi, normalizeActions, validateDcfSectionContract } = requ
 const { buildProfessionalFormatPlan } = require('../../server/models/formatTemplate');
 const { validateFormula, validateTaskOutput } = require('../../server/agents/critic');
 const { inferEquityIntent } = require('../../server/utils/equityIntent');
+const { parseSheetMatrix } = require('../../server/utils/sheetParser');
 const { executeTool } = require('../../server/tools/registry');
 
 async function test(name, fn) {
@@ -43,6 +44,44 @@ const mockMemory = {
         }
       },
       actions: []
+    }
+  }
+};
+
+function wideFinancialRow(label, value2024, value2023 = null, value2022 = null) {
+  const row = new Array(38).fill('');
+  row[0] = label;
+  row[18] = value2024;
+  if (value2023 !== null) row[26] = value2023;
+  if (value2022 !== null) row[37] = value2022;
+  return row;
+}
+
+const localItalianFinancialSheet = [
+  ['ZUCCHETTI SPA'],
+  ['Società privata', 'EUR'],
+  ['Bilancio non consolidato'],
+  wideFinancialRow('Ricavi delle vendite', 422084200, 384293950, 335110795),
+  wideFinancialRow('EBITDA', 144455481, 137397815, 109040566),
+  wideFinancialRow('Utile Netto', 98659837, 92640625, 73452441),
+  wideFinancialRow('Totale Attività', 1877404039, 1392953646, 1124782656),
+  wideFinancialRow('Patrimonio Netto', 796074921, 698199348, 608235999),
+  wideFinancialRow('Posizione finanziaria netta', '##########', 278255159, 281083500),
+  wideFinancialRow('EBITDA/Vendite (%)', 33.67, 34.66, 31.82),
+  wideFinancialRow('Redditività delle vendite (ROS) (%)', 27.9, 28.1, 26.4),
+  wideFinancialRow('Debt/Equity ratio', 0.8, 0.9, 1.0)
+];
+
+const localItalianContext = {
+  activeSheet: 'Sheet1',
+  workbookSheets: ['Sheet1'],
+  allSheetsData: {
+    Sheet1: {
+      isActive: true,
+      usedRange: 'Sheet1!A1:AL12',
+      rowCount: 12,
+      columnCount: 38,
+      preview: localItalianFinancialSheet
     }
   }
 };
@@ -154,6 +193,84 @@ async function main() {
     assert.ok(inputs.baseRevenueMillions > 390000);
     assert.ok(inputs.ebitdaMargin > 0.30 && inputs.ebitdaMargin < 0.40);
     assert.ok(inputs.sharesMillions > 15000);
+  });
+
+  await test('sheet parser extracts Italian financial rows and European numbers', () => {
+    const parsed = parseSheetMatrix(localItalianFinancialSheet, 'Sheet1');
+    const revenue = parsed.inferredInputs.find(input => input.canonical === 'Revenue');
+    const ebitda = parsed.inferredInputs.find(input => input.canonical === 'EBITDA');
+    const netIncome = parsed.inferredInputs.find(input => input.canonical === 'Net Income');
+    const margin = parsed.inferredInputs.find(input => input.canonical === 'EBITDA Margin');
+    const netDebt = parsed.inferredInputs.find(input => input.canonical === 'Net Debt');
+    const ros = parsed.inferredInputs.find(input => input.label.includes('ROS'));
+
+    assert.strictEqual(revenue.value, 422084200);
+    assert.strictEqual(revenue.cell, 'Sheet1!S4');
+    assert.strictEqual(ebitda.value, 144455481);
+    assert.strictEqual(netIncome.value, 98659837);
+    assert.strictEqual(margin.value, 33.67);
+    assert.strictEqual(netDebt.value, 278255159);
+    assert.strictEqual(ros.canonical, 'EBIT Margin');
+  });
+
+  await test('DCF template prefers local workbook financials over external/default data', () => {
+    const inputs = inferDcfInputs({}, {
+      context: localItalianContext,
+      results: mockMemory.results
+    });
+
+    assert.strictEqual(inputs.companyName, 'ZUCCHETTI SPA');
+    assert.strictEqual(inputs.ticker, 'PRIVATE');
+    assert.strictEqual(inputs.currency, 'EUR');
+    assert.strictEqual(inputs.sourceType, 'workbook');
+    assert.ok(Math.abs(inputs.baseRevenueMillions - 422.0842) < 0.0001);
+    assert.ok(Math.abs(inputs.ebitdaMargin - (144455481 / 422084200)) < 0.0001);
+    assert.ok(Math.abs(inputs.debtMillions - 278.255159) < 0.0001);
+    assert.strictEqual(inputs.sharesMillions, 1);
+
+    const assumptions = buildDcfSection({ section: 'assumptions' }, {
+      context: localItalianContext,
+      results: mockMemory.results
+    });
+    assert.strictEqual(assumptions.actions[0].cells.B6.value, 'EUR');
+    assert.strictEqual(assumptions.actions[0].cells.B8.value, 'Workbook local data');
+    assert.ok(Math.abs(assumptions.actions[0].cells.B10.value - 422.0842) < 0.0001);
+  });
+
+  await test('planner workbook-first guardrail removes invented external company data tasks', () => {
+    const parsed = parseSheetMatrix(localItalianFinancialSheet, 'Sheet1');
+    const planningContext = {
+      activeSheet: 'Sheet1',
+      workbookSheets: ['Sheet1'],
+      allSheetsData: localItalianContext.allSheetsData,
+      inferredData: {
+        highConfidenceInputs: parsed.inferredInputs.map(input => ({
+          canonical: input.canonical,
+          value: input.value,
+          cell: input.cell,
+          sheet: 'Sheet1'
+        })),
+        summary: parsed.summary
+      }
+    };
+    const rawPlan = {
+      objective: 'analizza questa azienda',
+      tasks: [
+        { id: 't1', agent: 'data', tool: 'workbook.scanDeep', description: 'scan', params: {}, deps: [], requiresApproval: false },
+        { id: 't2', agent: 'data', tool: 'openbb.equity.profile', description: 'invented profile', params: { symbol: 'ZUCN.MI' }, deps: [], requiresApproval: false },
+        { id: 't3', agent: 'data', tool: 'yahoo.fundamentals', description: 'invented fundamentals', params: { ticker: 'ZUCN.MI' }, deps: [], requiresApproval: false },
+        { id: 't4', agent: 'formula', tool: 'finance.dcf.buildSection', description: 'build assumptions', params: { section: 'assumptions', ticker: 'ZUCN.MI', usesResults: ['t1', 't2', 't3'] }, deps: ['t1', 't2', 't3'], requiresApproval: false }
+      ]
+    };
+
+    const guarded = planner.enforceWorkbookFirstPlan(rawPlan, planningContext, 'analizza questa azienda');
+    assert.ok(!guarded.tasks.some(task => task.tool === 'openbb.equity.profile'));
+    assert.ok(!guarded.tasks.some(task => task.tool === 'yahoo.fundamentals'));
+    const dcfTask = guarded.tasks.find(task => task.tool === 'finance.dcf.buildSection');
+    assert.deepStrictEqual(dcfTask.deps, ['t1']);
+    assert.deepStrictEqual(dcfTask.params.usesResults, ['t1']);
+    assert.strictEqual(dcfTask.params.ticker, undefined);
+    assert.strictEqual(dcfTask.params.sourcePriority, 'workbook_first');
   });
 
   await test('DCF template creates formulas for valuation and sensitivity', () => {

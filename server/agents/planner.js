@@ -122,6 +122,8 @@ CRITICAL RULES:
 - EVERY data row MUST have a descriptive label in Column A. Never output naked numbers.
 - Formulas must reference other sheets (e.g., =Assumptions!B3) — never hardcode constants.
 - If the user already has financial data in the active sheet (EBITDA, Revenue, etc.), USE IT. Do NOT ask for input. The system automatically extracts known financial labels and values from the workbook.
+- WORKBOOK-FIRST DATA POLICY: if inferredData.highConfidenceInputs contains Revenue plus EBITDA/EBITDA Margin/Net Income, treat workbook data as the primary source. Do not invent a ticker, Yahoo task, or OpenBB equity task for that company unless the user explicitly named a public ticker/company. External data is only supplemental for missing macro/market assumptions.
+- For private/unlisted/local-company contexts, build the model from workbook.scanDeep/workbook.buildGraph + finance.dcf.buildSection with sourcePriority:"workbook_first"; mark missing market assumptions as analyst-review items instead of forcing external data.
 - Only use requestUserInput if a critical assumption is truly missing and cannot be inferred.
 - All monetary values in millions or billions with 1 decimal place.
 - All percentages as decimals (e.g., 0.25 for 25%) formatted as 0.00%.
@@ -240,6 +242,87 @@ function compactPlanningContext(context) {
       summary: parsed.summary
     }
   };
+}
+
+function workbookHasLocalFinancials(planningContext = {}) {
+  const inputs = Array.isArray(planningContext?.inferredData?.highConfidenceInputs)
+    ? planningContext.inferredData.highConfidenceInputs
+    : [];
+  const canonicals = new Set(inputs.map(input => input.canonical));
+  return canonicals.has('Revenue') &&
+    (canonicals.has('EBITDA') || canonicals.has('EBITDA Margin') || canonicals.has('Net Income'));
+}
+
+function workbookLooksPrivate(planningContext = {}) {
+  const haystack = JSON.stringify({
+    sheets: planningContext.workbookSheets || [],
+    inferred: planningContext.inferredData || {},
+    active: planningContext.activeSheet,
+    usedRange: planningContext.usedRange,
+    allSheetsData: planningContext.allSheetsData || {}
+  });
+  return /\b(private|privata|non quotata|unlisted)\b/i.test(haystack);
+}
+
+function isCompanyExternalDataTask(task = {}) {
+  const tool = String(task.tool || '');
+  if (tool.startsWith('yahoo.')) return true;
+  if (tool.startsWith('openbb.equity.')) return true;
+  if (tool.startsWith('openbb.etf.') || tool.startsWith('openbb.index.') || tool.startsWith('openbb.crypto.')) return true;
+  return false;
+}
+
+function enforceWorkbookFirstPlan(normalized, planningContext = {}, objective = '') {
+  if (!normalized || !Array.isArray(normalized.tasks)) return normalized;
+  const hasLocalFinancials = workbookHasLocalFinancials(planningContext);
+  if (!hasLocalFinancials) return normalized;
+
+  const explicitEquityIntent = inferEquityIntent(objective);
+  const explicitPublicTarget = !!explicitEquityIntent?.ticker || !!explicitEquityIntent?.isPublicCompanyTarget;
+  const localPrivate = workbookLooksPrivate(planningContext);
+  if (explicitPublicTarget && !localPrivate) return normalized;
+
+  const removedIds = new Set(
+    normalized.tasks
+      .filter(isCompanyExternalDataTask)
+      .map(task => task.id)
+  );
+  if (removedIds.size === 0) {
+    return {
+      ...normalized,
+      tasks: normalized.tasks.map(task => patchWorkbookFirstTask(task, removedIds, explicitPublicTarget, localPrivate))
+    };
+  }
+
+  const tasks = normalized.tasks
+    .filter(task => !removedIds.has(task.id))
+    .map(task => patchWorkbookFirstTask(task, removedIds, explicitPublicTarget, localPrivate));
+
+  logger.info(`[Planner] Workbook-first guardrail removed ${removedIds.size} external company-data tasks`);
+  return { ...normalized, tasks };
+}
+
+function patchWorkbookFirstTask(task, removedIds, explicitPublicTarget, localPrivate) {
+  const params = task.params && typeof task.params === 'object' ? { ...task.params } : {};
+  const deps = Array.isArray(task.deps) ? task.deps.filter(dep => !removedIds.has(dep)) : [];
+  if (Array.isArray(params.usesResults)) {
+    params.usesResults = params.usesResults.filter(id => !removedIds.has(id));
+  }
+  if (params.context && typeof params.context === 'object' && Array.isArray(params.context.externalData)) {
+    params.context = {
+      ...params.context,
+      externalData: params.context.externalData.filter(id => !removedIds.has(id))
+    };
+  }
+  if (task.tool === 'finance.dcf.buildSection') {
+    params.sourcePriority = 'workbook_first';
+    if (!explicitPublicTarget) delete params.ticker;
+    if (localPrivate && !explicitPublicTarget) params.localCompanyType = 'private';
+  }
+  if (['llm.planLayout', 'llm.writeFormulas', 'llm.planFormat'].includes(task.tool)) {
+    params.sourcePriority = 'workbook_first';
+  }
+  return { ...task, params, deps };
 }
 
 function findSheetPreview(context, sheetName) {
@@ -1259,7 +1342,9 @@ async function plan(objective, context, turnId, options = {}) {
       logger.info(`[Planner] LLM stream done in ${elapsed}ms (${accumulated.length} chars)`);
 
       let result = tryParsePlan(accumulated);
-      const normalized = normalizeAndValidatePlan(result);
+      let normalized = normalizeAndValidatePlan(result);
+      normalized = enforceWorkbookFirstPlan(normalized, planningContext, objective);
+      ensureNoCycles(normalized.tasks);
       if (isWeakFinancePlan(normalized, domainPlan)) {
         logger.warn('[Planner] Piano LLM finance troppo debole; uso il domain playbook agentico');
         return normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens);
@@ -1295,7 +1380,9 @@ async function plan(objective, context, turnId, options = {}) {
         result = tryParsePlan(result);
       }
 
-      const normalized = normalizeAndValidatePlan(result);
+      let normalized = normalizeAndValidatePlan(result);
+      normalized = enforceWorkbookFirstPlan(normalized, planningContext, objective);
+      ensureNoCycles(normalized.tasks);
       if (isWeakFinancePlan(normalized, domainPlan)) {
         logger.warn('[Planner] Piano LLM finance troppo debole; uso il domain playbook agentico');
         return normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens);
@@ -1318,4 +1405,8 @@ async function plan(objective, context, turnId, options = {}) {
   throw lastError;
 }
 
-module.exports = { plan };
+module.exports = {
+  plan,
+  enforceWorkbookFirstPlan,
+  workbookHasLocalFinancials
+};

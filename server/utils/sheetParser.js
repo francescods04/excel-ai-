@@ -4,12 +4,37 @@
  */
 
 const FINANCE_KEYWORDS = new Map([
+  ['ebitda vendite', 'EBITDA Margin'],
+  ['ebitda revenue', 'EBITDA Margin'],
+  ['ebitda margin', 'EBITDA Margin'],
+  ['debt equity', 'Debt / Equity'],
+  ['debt ebitda', 'Debt / EBITDA'],
+  ['ev ebitda', 'EV/EBITDA'],
+  ['p e', 'P/E'],
+  ['redditivita delle vendite', 'EBIT Margin'],
+  ['ros', 'EBIT Margin'],
+  ['redditivita del totale attivo', 'ROA'],
+  ['roa', 'ROA'],
+  ['redditivita del capitale proprio', 'ROE'],
+  ['roe', 'ROE'],
+  ['ricavi delle vendite', 'Revenue'],
+  ['ricavi vendite', 'Revenue'],
+  ['ricavi', 'Revenue'],
+  ['fatturato', 'Revenue'],
+  ['vendite', 'Revenue'],
+  ['valore della produzione', 'Revenue'],
   ['revenue', 'Revenue'],
   ['sales', 'Revenue'],
   ['total revenue', 'Revenue'],
+  ['margine operativo lordo', 'EBITDA'],
+  ['mol', 'EBITDA'],
   ['ebitda', 'EBITDA'],
+  ['risultato operativo', 'EBIT'],
+  ['reddito operativo', 'EBIT'],
   ['operating income', 'EBIT'],
   ['ebit', 'EBIT'],
+  ['utile netto', 'Net Income'],
+  ['risultato netto', 'Net Income'],
   ['net income', 'Net Income'],
   ['net profit', 'Net Income'],
   ['profit', 'Net Income'],
@@ -36,7 +61,17 @@ const FINANCE_KEYWORDS = new Map([
   ['equity risk premium', 'Market Risk Premium'],
   ['terminal growth', 'Terminal Growth Rate'],
   ['perpetuity growth', 'Terminal Growth Rate'],
+  ['posizione finanziaria netta', 'Net Debt'],
+  ['indebitamento finanziario netto', 'Net Debt'],
+  ['net financial debt', 'Net Debt'],
+  ['pfn', 'Net Debt'],
+  ['debiti verso banche', 'Total Debt'],
+  ['debiti v banche', 'Total Debt'],
+  ['debiti finanziari', 'Total Debt'],
   ['debt', 'Total Debt'],
+  ['disponibilita liquide', 'Cash & Equivalents'],
+  ['liquidita', 'Cash & Equivalents'],
+  ['cassa', 'Cash & Equivalents'],
   ['cash', 'Cash & Equivalents'],
   ['shares', 'Shares Outstanding'],
   ['shares outstanding', 'Shares Outstanding'],
@@ -48,8 +83,16 @@ const FINANCE_KEYWORDS = new Map([
   ['price earnings', 'P/E'],
   ['eps', 'EPS'],
   ['book value', 'Book Value'],
+  ['totale attivita', 'Total Assets'],
+  ['totale attivo', 'Total Assets'],
+  ['attivo totale', 'Total Assets'],
   ['total assets', 'Total Assets'],
+  ['totale passivita', 'Total Liabilities'],
+  ['totale passivo', 'Total Liabilities'],
   ['total liabilities', 'Total Liabilities'],
+  ['patrimonio netto', 'Shareholders Equity'],
+  ['mezzi propri', 'Shareholders Equity'],
+  ['capitale proprio', 'Shareholders Equity'],
   ['shareholders equity', 'Shareholders Equity'],
   ['equity', 'Shareholders Equity'],
   ['roi', 'ROI'],
@@ -73,18 +116,60 @@ const FINANCE_KEYWORDS = new Map([
 ]);
 
 function isNumberLike(value) {
-  if (typeof value === 'number') return true;
-  if (typeof value !== 'string') return false;
-  const cleaned = value.replace(/[$%,\s]/g, '');
-  return !isNaN(parseFloat(cleaned)) && isFinite(parseFloat(cleaned));
+  return parseNumber(value) !== null;
 }
 
 function parseNumber(value) {
-  if (typeof value === 'number') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
   if (typeof value !== 'string') return null;
-  const cleaned = value.replace(/[$,%\s]/g, '');
-  const n = parseFloat(cleaned);
-  return isFinite(n) ? n : null;
+  const original = value.trim();
+  if (!original || /^#+$/.test(original) || /^(n\.?d\.?|n\.?s\.?|na|n\/a)$/i.test(original)) return null;
+
+  const hasPercent = original.includes('%');
+  const hasThousandsUnit = /\b(migl|thousand|k)\b/i.test(original);
+  const hasMillionsUnit = /\b(mln|million|mio)\b/i.test(original);
+  const hasBillionsUnit = /\b(mld|billion|bn)\b/i.test(original);
+  let cleaned = original
+    .replace(/\u00a0/g, ' ')
+    .replace(/[€$£¥%]/g, '')
+    .replace(/\b(EUR|USD|GBP|CHF|JPY|migl|thousand|million|mio|mln|mld|billion|bn|k)\b/gi, '')
+    .replace(/[^0-9,.\-()]/g, '')
+    .trim();
+  if (!cleaned || /^[-.,()]+$/.test(cleaned)) return null;
+
+  let sign = 1;
+  if (/^\(.*\)$/.test(cleaned)) {
+    sign = -1;
+    cleaned = cleaned.slice(1, -1);
+  }
+
+  const commaCount = (cleaned.match(/,/g) || []).length;
+  const dotCount = (cleaned.match(/\./g) || []).length;
+  if (commaCount > 0 && dotCount > 0) {
+    const lastComma = cleaned.lastIndexOf(',');
+    const lastDot = cleaned.lastIndexOf('.');
+    const decimalSep = lastComma > lastDot ? ',' : '.';
+    const thousandsSep = decimalSep === ',' ? '.' : ',';
+    cleaned = cleaned.split(thousandsSep).join('');
+    cleaned = cleaned.replace(decimalSep, '.');
+  } else if (commaCount > 0) {
+    if (commaCount > 1) cleaned = cleaned.replace(/,/g, '');
+    else cleaned = cleaned.replace(',', '.');
+  } else if (dotCount > 0) {
+    const parts = cleaned.split('.');
+    const last = parts[parts.length - 1];
+    if (dotCount > 1 || (last.length === 3 && parts[0].length <= 3)) {
+      cleaned = parts.join('');
+    }
+  }
+
+  let n = Number(cleaned) * sign;
+  if (!Number.isFinite(n)) return null;
+  if (hasPercent) n /= 100;
+  if (hasThousandsUnit) n *= 1000;
+  if (hasMillionsUnit) n *= 1000000;
+  if (hasBillionsUnit) n *= 1000000000;
+  return Number.isFinite(n) ? n : null;
 }
 
 function isHeaderLike(value) {
@@ -101,7 +186,13 @@ function isHeaderLike(value) {
 
 function normalizeLabel(text) {
   if (typeof text !== 'string') return '';
-  return text.toLowerCase().replace(/[^a-z0-9\s&]/g, '').trim();
+  return text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9&]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function classifyLabel(labelText) {
@@ -147,53 +238,62 @@ function parseSheetMatrix(matrix, sheetName = 'Sheet1') {
   const dataRows = [];
   const usedCells = new Set();
 
-  // 1. Scansiona per coppie label/valore
+  const addInput = ({ label, canonical, value, rawValue, row, col, confidence }) => {
+    if (!canonical || value === null || value === undefined) return;
+    const key = `${canonical}:${row}:${col}`;
+    if (usedCells.has(key)) return;
+    inferredInputs.push({
+      label: String(label).trim(),
+      canonical,
+      value,
+      rawValue,
+      cell: cellAddress(sheetName, row, col),
+      confidence,
+      row,
+      col
+    });
+    usedCells.add(key);
+  };
+
+  // 1. Scansiona per righe label/valori. I financial statements spesso hanno
+  // label in colonna A e gli anni molte colonne più a destra.
   for (let r = 0; r < matrix.length; r++) {
     const row = matrix[r] || [];
     for (let c = 0; c < row.length; c++) {
       const cell = row[c];
-      const key = `${r},${c}`;
-      if (usedCells.has(key)) continue;
+      if (typeof cell !== 'string' || cell.trim().length === 0) continue;
+      const canonical = classifyLabel(cell);
+      if (!canonical) continue;
 
-      // Se è una stringa (potenziale label) e a destra c'è un numero
-      if (typeof cell === 'string' && cell.trim().length > 0 && c + 1 < maxCols) {
-        const rightCell = (matrix[r] || [])[c + 1];
-        if (isNumberLike(rightCell)) {
-          const canonical = classifyLabel(cell);
-          const value = parseNumber(rightCell);
-          inferredInputs.push({
-            label: cell.trim(),
-            canonical: canonical || cell.trim(),
-            value,
-            rawValue: rightCell,
-            cell: `${sheetName}!${colIndexToLetter(c + 1)}${r + 1}`,
-            confidence: canonical ? 'high' : 'medium',
-            row,
-            col: c + 1
-          });
-          usedCells.add(key);
-          usedCells.add(`${r},${c + 1}`);
-        }
+      let foundOnRow = false;
+      for (let valueCol = c + 1; valueCol < row.length; valueCol++) {
+        const rawValue = row[valueCol];
+        if (!isNumberLike(rawValue)) continue;
+        const value = parseNumber(rawValue);
+        addInput({
+          label: cell,
+          canonical,
+          value,
+          rawValue,
+          row: r,
+          col: valueCol,
+          confidence: 'high'
+        });
+        foundOnRow = true;
       }
 
-      // Se è una stringa e sotto c'è un numero (layout verticale)
-      if (typeof cell === 'string' && cell.trim().length > 0 && r + 1 < matrix.length) {
+      if (!foundOnRow && r + 1 < matrix.length) {
         const belowCell = (matrix[r + 1] || [])[c];
-        if (isNumberLike(belowCell) && !usedCells.has(`${r + 1},${c}`)) {
-          const canonical = classifyLabel(cell);
-          const value = parseNumber(belowCell);
-          inferredInputs.push({
-            label: cell.trim(),
-            canonical: canonical || cell.trim(),
-            value,
+        if (isNumberLike(belowCell)) {
+          addInput({
+            label: cell,
+            canonical,
+            value: parseNumber(belowCell),
             rawValue: belowCell,
-            cell: `${sheetName}!${colIndexToLetter(c)}${r + 2}`,
-            confidence: canonical ? 'high' : 'medium',
             row: r + 1,
-            col: c
+            col: c,
+            confidence: 'high'
           });
-          usedCells.add(key);
-          usedCells.add(`${r + 1},${c}`);
         }
       }
     }
@@ -258,6 +358,10 @@ function colIndexToLetter(colIndex) {
     n = Math.floor(n / 26);
   }
   return result;
+}
+
+function cellAddress(sheetName, rowIndex, colIndex) {
+  return `${sheetName}!${colIndexToLetter(colIndex + 1)}${rowIndex + 1}`;
 }
 
 /**
@@ -341,5 +445,7 @@ function analyzeWorkbookContext(rawContext) {
 module.exports = {
   parseSheetMatrix,
   analyzeWorkbookContext,
+  parseNumber,
+  classifyLabel,
   FINANCE_KEYWORDS
 };

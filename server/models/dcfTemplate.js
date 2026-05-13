@@ -1,3 +1,5 @@
+const { analyzeWorkbookContext } = require('../utils/sheetParser');
+
 const DEFAULTS = {
   projectionYears: 5,
   revenueGrowth: [0.05, 0.045, 0.04, 0.035, 0.03],
@@ -66,6 +68,13 @@ function toMillions(value) {
   const n = finiteNumber(value);
   if (n == null) return null;
   return Math.abs(n) > 10000000 ? n / 1000000 : n;
+}
+
+function toRatio(value) {
+  const n = finiteNumber(value);
+  if (n == null) return null;
+  if (Math.abs(n) > 1.5 && Math.abs(n) <= 100) return n / 100;
+  return n;
 }
 
 function clamp(value, min, max, fallback) {
@@ -139,33 +148,227 @@ function firstString(chunks, keys) {
   return null;
 }
 
+function walkText(value, out = [], depth = 0, seen = new Set()) {
+  if (value == null || depth > 5 || out.length > 2500) return out;
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (text) out.push(text);
+    return out;
+  }
+  if (typeof value !== 'object' || seen.has(value)) return out;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const entry of value) walkText(entry, out, depth + 1, seen);
+    return out;
+  }
+  for (const entry of Object.values(value)) walkText(entry, out, depth + 1, seen);
+  return out;
+}
+
+function resultDataAsWorkbookContext(data) {
+  if (!data || typeof data !== 'object') return null;
+  if (data.allSheetsData || data.usedRangeData || data.selectedValues) return data;
+  if (!Array.isArray(data.sheets)) return null;
+  const allSheetsData = {};
+  for (const sheet of data.sheets) {
+    if (!sheet?.name || !Array.isArray(sheet.preview)) continue;
+    allSheetsData[sheet.name] = {
+      isActive: sheet.name === data.activeSheet,
+      usedRange: sheet.usedRange || null,
+      preview: sheet.preview
+    };
+  }
+  return Object.keys(allSheetsData).length > 0
+    ? { activeSheet: data.activeSheet, workbookSheets: data.workbookSheets, allSheetsData }
+    : null;
+}
+
+function collectWorkbookAnalyses(memory = {}) {
+  const analyses = [];
+  if (memory.context) {
+    const parsed = analyzeWorkbookContext(memory.context);
+    if (parsed.inferredInputs.length > 0) analyses.push({ parsed, context: memory.context });
+  }
+  const results = memory?.results && typeof memory.results === 'object' ? memory.results : {};
+  for (const result of Object.values(results)) {
+    if (!result || result.ok === false) continue;
+    const ctx = resultDataAsWorkbookContext(result.data ?? result);
+    if (!ctx) continue;
+    const parsed = analyzeWorkbookContext(ctx);
+    if (parsed.inferredInputs.length > 0) analyses.push({ parsed, context: ctx });
+  }
+  return analyses;
+}
+
+function findCompanyNameFromWorkbook(memory = {}, analyses = []) {
+  const textValues = [];
+  if (memory.context) textValues.push(...walkText(memory.context));
+  for (const { context } of analyses) textValues.push(...walkText(context));
+  const candidates = textValues
+    .map(text => text.replace(/\s+/g, ' ').trim())
+    .filter(text => text.length >= 3 && text.length <= 80)
+    .filter(text => !/^(sheet|scenario|actual|forecast|period|year|data|currency|units)$/i.test(text));
+
+  const legalName = candidates.find(text => /\b(SPA|S\.P\.A\.|SRL|S\.R\.L\.|SA|AG|LTD|PLC|INC|CORP|GROUP)\b/i.test(text));
+  return legalName || candidates.find(text => /^[A-Z0-9 .,&'-]{3,}$/.test(text)) || null;
+}
+
+function inferCurrencyFromWorkbook(memory = {}, analyses = []) {
+  const text = [
+    ...walkText(memory.context),
+    ...analyses.flatMap(({ context }) => walkText(context))
+  ].join(' ');
+  if (/[€]|\bEUR\b/i.test(text)) return 'EUR';
+  if (/\bGBP\b|£/i.test(text)) return 'GBP';
+  if (/\bCHF\b/i.test(text)) return 'CHF';
+  if (/\bUSD\b|\$/i.test(text)) return 'USD';
+  return null;
+}
+
+function currencySymbol(currency) {
+  const code = String(currency || 'USD').toUpperCase();
+  if (code === 'EUR') return '€';
+  if (code === 'GBP') return '£';
+  if (code === 'CHF') return 'CHF';
+  if (code === 'USD') return '$';
+  return code;
+}
+
+function currencyUnitLabel(currency) {
+  const code = String(currency || 'USD').toUpperCase();
+  return `${code} in millions except per-share data`;
+}
+
+function amountLabel(inputs) {
+  return `${inputs.currencySymbol || currencySymbol(inputs.currency)}M`;
+}
+
+function perShareLabel(inputs) {
+  return inputs.currencySymbol || currencySymbol(inputs.currency);
+}
+
+function pickWorkbookInput(inputs, canonicals) {
+  const wanted = new Set(canonicals);
+  return inputs.find(input => wanted.has(input.canonical) && finiteNumber(input.value) != null) || null;
+}
+
+function inferWorkbookDcfInputs(memory = {}) {
+  const analyses = collectWorkbookAnalyses(memory);
+  const inputs = analyses.flatMap(({ parsed }) => parsed.inferredInputs || [])
+    .filter(input => input.confidence === 'high');
+  if (inputs.length === 0) return { hasWorkbookFinancials: false, sourceRefs: {} };
+
+  const revenueInput = pickWorkbookInput(inputs, ['Revenue']);
+  const ebitdaInput = pickWorkbookInput(inputs, ['EBITDA']);
+  const ebitdaMarginInput = pickWorkbookInput(inputs, ['EBITDA Margin']);
+  const netIncomeInput = pickWorkbookInput(inputs, ['Net Income']);
+  const cashInput = pickWorkbookInput(inputs, ['Cash & Equivalents']);
+  const debtInput = pickWorkbookInput(inputs, ['Total Debt']);
+  const netDebtInput = pickWorkbookInput(inputs, ['Net Debt']);
+  const debtEquityInput = pickWorkbookInput(inputs, ['Debt / Equity']);
+  const sharesInput = pickWorkbookInput(inputs, ['Shares Outstanding', 'Diluted Shares']);
+  const sharePriceInput = pickWorkbookInput(inputs, ['Share Price']);
+
+  const sourceRefs = {};
+  for (const input of [
+    revenueInput,
+    ebitdaInput,
+    ebitdaMarginInput,
+    netIncomeInput,
+    cashInput,
+    debtInput,
+    netDebtInput,
+    debtEquityInput,
+    sharesInput,
+    sharePriceInput
+  ]) {
+    if (input?.canonical && input?.cell && !sourceRefs[input.canonical]) sourceRefs[input.canonical] = input.cell;
+  }
+
+  const workbookText = [
+    ...walkText(memory.context),
+    ...analyses.flatMap(({ context }) => walkText(context))
+  ].join(' ');
+  const isPrivateCompany = /\b(private|privata|non quotata|unlisted)\b/i.test(workbookText);
+  const hasWorkbookFinancials = !!(revenueInput && (ebitdaInput || ebitdaMarginInput || netIncomeInput));
+  return {
+    hasWorkbookFinancials,
+    companyName: findCompanyNameFromWorkbook(memory, analyses),
+    currency: inferCurrencyFromWorkbook(memory, analyses),
+    isPrivateCompany,
+    revenue: revenueInput?.value ?? null,
+    ebitda: ebitdaInput?.value ?? null,
+    ebitdaMargin: ebitdaMarginInput ? toRatio(ebitdaMarginInput.value) : null,
+    netIncome: netIncomeInput?.value ?? null,
+    cash: cashInput?.value ?? null,
+    debt: debtInput?.value ?? null,
+    netDebt: netDebtInput?.value ?? null,
+    debtEquity: debtEquityInput ? toRatio(debtEquityInput.value) : null,
+    shares: sharesInput?.value ?? null,
+    sharePrice: sharePriceInput?.value ?? null,
+    sourceRefs,
+    sourceSummary: inputs.slice(0, 12).map(input => `${input.canonical}: ${input.rawValue} at ${input.cell}`)
+  };
+}
+
 function inferDcfInputs(params = {}, memory = {}) {
   const chunks = collectResultData(memory);
-  const ticker = String(params.ticker || firstString(chunks, ['symbol']) || 'TICKER').toUpperCase();
-  const companyName = params.companyName || firstString(chunks, ['longName', 'shortName', 'displayName']) || ticker;
-  const price = firstNumber(chunks, ['regularMarketPrice', 'currentPrice', 'price', 'previousClose']);
-  const marketCap = firstNumber(chunks, ['marketCap']);
-  const shares = firstNumber(chunks, ['sharesOutstanding', 'impliedSharesOutstanding']);
-  const revenue = firstNumber(chunks, ['totalRevenue', 'revenue']);
-  const ebitda = firstNumber(chunks, ['ebitda']);
-  const beta = firstNumber(chunks, ['beta']);
-  const totalCash = firstNumber(chunks, ['totalCash', 'cash', 'cashAndCashEquivalents']);
-  const totalDebt = firstNumber(chunks, ['totalDebt', 'debt']);
+  const workbookInputs = inferWorkbookDcfInputs(memory);
+  const sourceType = workbookInputs.hasWorkbookFinancials ? 'workbook' : 'external';
+  const ticker = String(
+    params.ticker ||
+    (workbookInputs.hasWorkbookFinancials && workbookInputs.isPrivateCompany ? 'PRIVATE' : null) ||
+    firstString(chunks, ['symbol']) ||
+    'TICKER'
+  ).toUpperCase();
+  const companyName = params.companyName ||
+    workbookInputs.companyName ||
+    firstString(chunks, ['longName', 'shortName', 'displayName']) ||
+    ticker;
+  const useExternalMarketData = !(workbookInputs.hasWorkbookFinancials && workbookInputs.isPrivateCompany);
+  const price = useExternalMarketData ? firstNumber(chunks, ['regularMarketPrice', 'currentPrice', 'price', 'previousClose']) : null;
+  const marketCap = useExternalMarketData ? firstNumber(chunks, ['marketCap']) : null;
+  const shares = useExternalMarketData ? firstNumber(chunks, ['sharesOutstanding', 'impliedSharesOutstanding']) : null;
+  const revenue = workbookInputs.revenue ?? firstNumber(chunks, ['totalRevenue', 'revenue']);
+  const ebitda = workbookInputs.ebitda ?? firstNumber(chunks, ['ebitda']);
+  const beta = workbookInputs.hasWorkbookFinancials && workbookInputs.isPrivateCompany
+    ? null
+    : firstNumber(chunks, ['beta']);
+  const totalCash = workbookInputs.cash ?? firstNumber(chunks, ['totalCash', 'cash', 'cashAndCashEquivalents']);
+  const totalDebt = workbookInputs.debt ?? workbookInputs.netDebt ?? firstNumber(chunks, ['totalDebt', 'debt']);
 
   const baseRevenueMillions = toMillions(revenue) || DEFAULTS.baseRevenueMillions;
   const ebitdaMillions = toMillions(ebitda);
   const ebitdaMargin = ebitdaMillions && baseRevenueMillions
     ? clamp(ebitdaMillions / baseRevenueMillions, 0.05, 0.65, DEFAULTS.ebitdaMargin)
+    : workbookInputs.ebitdaMargin != null
+      ? clamp(workbookInputs.ebitdaMargin, 0.05, 0.65, DEFAULTS.ebitdaMargin)
     : DEFAULTS.ebitdaMargin;
   const cashMillions = Math.max(0, toMillions(totalCash) || DEFAULTS.cashMillions);
   const debtMillions = Math.max(0, toMillions(totalDebt) || DEFAULTS.debtMillions);
   const marketCapMillions = Math.max(0, toMillions(marketCap) || 0);
-  const sharePrice = Math.max(0, finiteNumber(price) || DEFAULTS.sharePrice);
-  const sharesMillions = toMillions(shares) || (marketCapMillions && sharePrice ? marketCapMillions / sharePrice : DEFAULTS.sharesMillions);
+  const sharePrice = Math.max(0, finiteNumber(workbookInputs.sharePrice) ?? finiteNumber(price) ?? DEFAULTS.sharePrice);
+  const localSharesMillions = toMillions(workbookInputs.shares);
+  const sharesMillions = localSharesMillions ||
+    toMillions(shares) ||
+    (marketCapMillions && sharePrice ? marketCapMillions / sharePrice : null) ||
+    (workbookInputs.hasWorkbookFinancials && workbookInputs.isPrivateCompany ? 1 : DEFAULTS.sharesMillions);
+  const targetDebtToEquity = workbookInputs.debtEquity != null
+    ? clamp(workbookInputs.debtEquity, 0, 1.5, DEFAULTS.targetDebtToEquity)
+    : (marketCapMillions > 0 ? clamp(debtMillions / marketCapMillions, 0, 1.5, DEFAULTS.targetDebtToEquity) : DEFAULTS.targetDebtToEquity);
+  const currency = params.currency || workbookInputs.currency || 'USD';
 
   return {
     ticker,
     companyName,
+    currency,
+    currencySymbol: currencySymbol(currency),
+    unitLabel: currencyUnitLabel(currency),
+    sourceType,
+    sourceRefs: workbookInputs.sourceRefs || {},
+    sourceSummary: workbookInputs.sourceSummary || [],
+    isPrivateCompany: !!workbookInputs.isPrivateCompany,
+    debtIsNetDebt: workbookInputs.debt == null && workbookInputs.netDebt != null,
     projectionYears: Number(params.projectionYears) || DEFAULTS.projectionYears,
     baseYear: new Date().getFullYear() - 1,
     revenueGrowth: DEFAULTS.revenueGrowth,
@@ -178,7 +381,7 @@ function inferDcfInputs(params = {}, memory = {}) {
     marketRiskPremium: DEFAULTS.marketRiskPremium,
     beta: clamp(beta, 0.4, 2.5, DEFAULTS.beta),
     preTaxCostOfDebt: DEFAULTS.preTaxCostOfDebt,
-    targetDebtToEquity: marketCapMillions > 0 ? clamp(debtMillions / marketCapMillions, 0, 1.5, DEFAULTS.targetDebtToEquity) : DEFAULTS.targetDebtToEquity,
+    targetDebtToEquity,
     terminalGrowthRate: DEFAULTS.terminalGrowthRate,
     baseRevenueMillions,
     cashMillions,
@@ -212,6 +415,10 @@ function buildAssumptionsActions(inputs) {
   const cells = {};
   const inputStyle = fmt(STYLE.input, { numberFormat: NUM_FORMATS.number });
   const pctInputStyle = fmt(STYLE.input, { numberFormat: NUM_FORMATS.percent });
+  const currency = inputs.currency || 'USD';
+  const amount = amountLabel(inputs);
+  const perShare = perShareLabel(inputs);
+  const sourceLabel = inputs.sourceType === 'workbook' ? 'Workbook local data' : 'External market data';
 
   set(cells, 'A1', cell(`${inputs.companyName} (${inputs.ticker}) - DCF Assumptions`, STYLE.title));
   set(cells, 'A3', cell('Company & Source', STYLE.section));
@@ -220,12 +427,14 @@ function buildAssumptionsActions(inputs) {
   set(cells, 'A5', cell('Ticker', STYLE.label));
   set(cells, 'B5', cell(inputs.ticker, STYLE.input));
   set(cells, 'A6', cell('Currency', STYLE.label));
-  set(cells, 'B6', cell('USD', STYLE.input));
+  set(cells, 'B6', cell(currency, STYLE.input));
   set(cells, 'A7', cell('Units', STYLE.label));
-  set(cells, 'B7', cell('$ in millions except per-share data', STYLE.input));
+  set(cells, 'B7', cell(inputs.unitLabel || currencyUnitLabel(currency), STYLE.input));
+  set(cells, 'A8', cell('Primary Data Source', STYLE.label));
+  set(cells, 'B8', cell(sourceLabel, STYLE.input));
 
   set(cells, 'A9', cell('Historical / Market Inputs', STYLE.section));
-  set(cells, 'A10', cell('Base Revenue ($M)', STYLE.label));
+  set(cells, 'A10', cell(`Base Revenue (${amount})`, STYLE.label));
   set(cells, 'B10', cell(inputs.baseRevenueMillions, fmt(inputStyle, { numberFormat: NUM_FORMATS.currency })));
   set(cells, 'A11', cell('EBITDA Margin (%)', STYLE.label));
   set(cells, 'B11', cell(inputs.ebitdaMargin, pctInputStyle));
@@ -259,15 +468,15 @@ function buildAssumptionsActions(inputs) {
   set(cells, 'B30', cell(inputs.targetDebtToEquity, fmt(inputStyle, { numberFormat: '0.00x' })));
 
   set(cells, 'A32', cell('Equity Bridge', STYLE.section));
-  set(cells, 'A33', cell('Cash & Equivalents ($M)', STYLE.label));
+  set(cells, 'A33', cell(`Cash & Equivalents (${amount})`, STYLE.label));
   set(cells, 'B33', cell(inputs.cashMillions, fmt(inputStyle, { numberFormat: NUM_FORMATS.currency })));
-  set(cells, 'A34', cell('Total Debt ($M)', STYLE.label));
+  set(cells, 'A34', cell(`${inputs.debtIsNetDebt ? 'Net Debt' : 'Total Debt'} (${amount})`, STYLE.label));
   set(cells, 'B34', cell(inputs.debtMillions, fmt(inputStyle, { numberFormat: NUM_FORMATS.currency })));
   set(cells, 'A35', cell('Shares Outstanding (M)', STYLE.label));
   set(cells, 'B35', cell(inputs.sharesMillions, fmt(inputStyle, { numberFormat: NUM_FORMATS.shares })));
-  set(cells, 'A36', cell('Current Share Price ($)', STYLE.label));
+  set(cells, 'A36', cell(`Current Share Price (${perShare})`, STYLE.label));
   set(cells, 'B36', cell(inputs.sharePrice, fmt(inputStyle, { numberFormat: NUM_FORMATS.perShare })));
-  set(cells, 'A37', cell('Current Market Cap ($M)', STYLE.label));
+  set(cells, 'A37', cell(`Current Market Cap (${amount})`, STYLE.label));
   set(cells, 'B37', formula('=B35*B36', fmt(STYLE.formula, { numberFormat: NUM_FORMATS.currency })));
 
   return [makeSetCellRangeAction('Assumptions', cells)];
@@ -320,6 +529,8 @@ function buildDcfActions(inputs) {
   const pct = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.percent });
   const totalMoney = fmt(STYLE.total, { numberFormat: NUM_FORMATS.currency });
   const totalPct = fmt(STYLE.total, { numberFormat: NUM_FORMATS.percent });
+  const amount = amountLabel(inputs);
+  const perShare = perShareLabel(inputs);
 
   set(cells, 'A1', cell(`${inputs.companyName} (${inputs.ticker}) - Discounted Cash Flow`, STYLE.title));
   set(cells, 'A2', cell('Metric', STYLE.header));
@@ -331,35 +542,35 @@ function buildDcfActions(inputs) {
 
   const labelRows = [
     [4, 'Revenue Growth (%)'],
-    [5, 'Revenue ($M)'],
+    [5, `Revenue (${amount})`],
     [6, 'EBITDA Margin (%)'],
-    [7, 'EBITDA ($M)'],
+    [7, `EBITDA (${amount})`],
     [8, 'D&A % Revenue (%)'],
-    [9, 'D&A ($M)'],
-    [10, 'EBIT ($M)'],
+    [9, `D&A (${amount})`],
+    [10, `EBIT (${amount})`],
     [11, 'Tax Rate (%)'],
-    [12, 'Tax ($M)'],
-    [13, 'NOPAT ($M)'],
+    [12, `Tax (${amount})`],
+    [13, `NOPAT (${amount})`],
     [15, 'CapEx % Revenue (%)'],
-    [16, 'CapEx ($M)'],
+    [16, `CapEx (${amount})`],
     [17, 'NWC % Revenue (%)'],
-    [18, 'Change in NWC ($M)'],
-    [20, 'Unlevered FCF ($M)'],
+    [18, `Change in NWC (${amount})`],
+    [20, `Unlevered FCF (${amount})`],
     [22, 'WACC (%)'],
     [23, 'Discount Factor'],
-    [24, 'PV of FCF ($M)'],
+    [24, `PV of FCF (${amount})`],
     [26, 'Terminal Growth Rate (%)'],
-    [27, 'Terminal Value ($M)'],
-    [28, 'PV of Terminal Value ($M)'],
-    [30, 'Enterprise Value ($M)'],
-    [31, '(+) Cash & Equivalents ($M)'],
-    [32, '(-) Total Debt ($M)'],
-    [33, 'Equity Value ($M)'],
+    [27, `Terminal Value (${amount})`],
+    [28, `PV of Terminal Value (${amount})`],
+    [30, `Enterprise Value (${amount})`],
+    [31, `(+) Cash & Equivalents (${amount})`],
+    [32, `(-) ${inputs.debtIsNetDebt ? 'Net Debt' : 'Total Debt'} (${amount})`],
+    [33, `Equity Value (${amount})`],
     [34, 'Shares Outstanding (M)'],
-    [35, 'Implied Share Price ($)'],
-    [37, 'Current Share Price ($)'],
+    [35, `Implied Share Price (${perShare})`],
+    [37, `Current Share Price (${perShare})`],
     [38, 'Premium / (Discount) to Current (%)'],
-    [40, 'EV Bridge Check ($M)']
+    [40, `EV Bridge Check (${amount})`]
   ];
   labelRows.forEach(([row, label]) => set(cells, `A${row}`, cell(label, STYLE.label)));
   [4, 5, 7, 10, 13, 20, 24, 27, 28, 30, 33, 35, 38, 40].forEach(row => {
@@ -467,6 +678,13 @@ function buildSourcesActions(inputs) {
   const pct = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.percent });
   const multiple = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.multiple });
   const number = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.number });
+  const currency = inputs.currency || 'USD';
+  const amount = amountLabel(inputs);
+  const perShare = perShareLabel(inputs);
+  const local = inputs.sourceType === 'workbook';
+  const refs = inputs.sourceRefs || {};
+  const historicalSource = local ? 'Workbook local financial data' : 'External fundamentals / workbook fallback';
+  const marketSource = local && inputs.isPrivateCompany ? 'Not in workbook; analyst fallback' : 'External market data / workbook fallback';
 
   set(cells, 'A1', cell(`${inputs.companyName} (${inputs.ticker}) - Source Book`, STYLE.title));
   set(cells, 'A3', cell('Model Scope', STYLE.section));
@@ -477,7 +695,7 @@ function buildSourcesActions(inputs) {
   set(cells, 'A6', cell('Valuation Date', STYLE.label));
   set(cells, 'B6', cell(new Date().toISOString().slice(0, 10), STYLE.input));
   set(cells, 'A7', cell('Units', STYLE.label));
-  set(cells, 'B7', cell('$ in millions except per-share data', STYLE.input));
+  set(cells, 'B7', cell(inputs.unitLabel || currencyUnitLabel(currency), STYLE.input));
 
   set(cells, 'A10', cell('Source Register', STYLE.section));
   set(cells, 'A11', cell('Input Area', STYLE.header));
@@ -485,11 +703,11 @@ function buildSourcesActions(inputs) {
   set(cells, 'C11', cell('Workbook Cell', STYLE.header));
   set(cells, 'D11', cell('Status', STYLE.header));
   [
-    ['Base Revenue', 'Yahoo fundamentals / workbook context', 'Assumptions!B10'],
-    ['EBITDA Margin', 'Yahoo fundamentals / analyst fallback', 'Assumptions!B11'],
-    ['Cash & Debt', 'Yahoo fundamentals / balance-sheet fallback', 'Assumptions!B33:B34'],
-    ['Shares & Share Price', 'Yahoo quote / key statistics', 'Assumptions!B35:B36'],
-    ['Beta', 'Yahoo statistics / analyst fallback', 'Assumptions!B28'],
+    ['Base Revenue', historicalSource, refs.Revenue || 'Assumptions!B10'],
+    ['EBITDA Margin', local ? 'Workbook EBITDA / revenue' : 'External fundamentals / analyst fallback', refs.EBITDA || refs['EBITDA Margin'] || 'Assumptions!B11'],
+    ['Cash & Debt', local ? 'Workbook balance sheet / net debt' : 'External balance-sheet fallback', refs['Cash & Equivalents'] || refs['Total Debt'] || refs['Net Debt'] || 'Assumptions!B33:B34'],
+    ['Shares & Share Price', marketSource, refs['Shares Outstanding'] || refs['Share Price'] || 'Assumptions!B35:B36'],
+    ['Beta', marketSource, 'Assumptions!B28'],
     ['WACC Assumptions', 'Market data + visible analyst assumptions', 'Assumptions!B26:B30'],
     ['Terminal Growth', 'Long-term GDP / inflation sanity range', 'Assumptions!B23']
   ].forEach(([label, source, ref], index) => {
@@ -497,7 +715,7 @@ function buildSourcesActions(inputs) {
     set(cells, `A${row}`, cell(label, STYLE.label));
     set(cells, `B${row}`, cell(source, STYLE.label));
     set(cells, `C${row}`, cell(ref, STYLE.check));
-    set(cells, `D${row}`, cell('Review', STYLE.check));
+    set(cells, `D${row}`, cell(Object.values(refs).includes(ref) ? 'Local' : 'Review', STYLE.check));
   });
 
   set(cells, 'A22', cell('Key Data Extract', STYLE.section));
@@ -505,14 +723,14 @@ function buildSourcesActions(inputs) {
   set(cells, 'B23', cell('Value', STYLE.header));
   set(cells, 'C23', cell('Used In', STYLE.header));
   const extracts = [
-    ['Revenue ($M)', '=Assumptions!$B$10', 'DCF revenue build', money],
+    [`Revenue (${amount})`, '=Assumptions!$B$10', 'DCF revenue build', money],
     ['EBITDA Margin (%)', '=Assumptions!$B$11', 'DCF operating build', pct],
     ['Tax Rate (%)', '=Assumptions!$B$12', 'NOPAT', pct],
     ['Beta', '=Assumptions!$B$28', 'CAPM', multiple],
-    ['Cash ($M)', '=Assumptions!$B$33', 'Equity bridge', money],
-    ['Debt ($M)', '=Assumptions!$B$34', 'Equity bridge', money],
+    [`Cash (${amount})`, '=Assumptions!$B$33', 'Equity bridge', money],
+    [`${inputs.debtIsNetDebt ? 'Net Debt' : 'Debt'} (${amount})`, '=Assumptions!$B$34', 'Equity bridge', money],
     ['Shares (M)', '=Assumptions!$B$35', 'Per-share value', number],
-    ['Current Share Price ($)', '=Assumptions!$B$36', 'Upside/downside', fmt(STYLE.formula, { numberFormat: NUM_FORMATS.perShare })]
+    [`Current Share Price (${perShare})`, '=Assumptions!$B$36', 'Upside/downside', fmt(STYLE.formula, { numberFormat: NUM_FORMATS.perShare })]
   ];
   extracts.forEach(([label, valueFormula, usedIn, style], index) => {
     const row = 24 + index;
@@ -541,12 +759,14 @@ function buildSourcesActions(inputs) {
   return [makeSetCellRangeAction('Sources', cells)];
 }
 
-function buildScenariosActions() {
+function buildScenariosActions(inputs = {}) {
   const cells = {};
   const pctInput = fmt(STYLE.input, { numberFormat: NUM_FORMATS.percent });
   const pctFormula = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.percent });
   const perShare = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.perShare });
   const money = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.currency });
+  const amount = amountLabel(inputs);
+  const perShareCurrency = perShareLabel(inputs);
 
   set(cells, 'A1', cell('Scenario Analysis', STYLE.title));
   set(cells, 'A3', cell('Operating Case Matrix', STYLE.section));
@@ -575,10 +795,10 @@ function buildScenariosActions() {
     set(cells, `${col(index)}12`, cell(label, STYLE.header));
   });
   const bridgeRows = [
-    ['Enterprise Value ($M)', '=IFERROR(SUM(DCF!$C$24:$G$24)*(1+B5)+DCF!$G$20*(1+C5)*(1+E5)/(D5-E5)/(1+D5)^5,0)', '=DCF!$H$30', '=IFERROR(SUM(DCF!$C$24:$G$24)*(1+B7)+DCF!$G$20*(1+C7)*(1+E7)/(D7-E7)/(1+D7)^5,0)'],
-    ['Equity Value ($M)', '=B13+DCF!$H$31-DCF!$H$32', '=DCF!$H$33', '=D13+DCF!$H$31-DCF!$H$32'],
-    ['Implied Share Price ($)', '=B14/DCF!$H$34', '=DCF!$H$35', '=D14/DCF!$H$34'],
-    ['Current Share Price ($)', '=DCF!$H$37', '=DCF!$H$37', '=DCF!$H$37'],
+    [`Enterprise Value (${amount})`, '=IFERROR(SUM(DCF!$C$24:$G$24)*(1+B5)+DCF!$G$20*(1+C5)*(1+E5)/(D5-E5)/(1+D5)^5,0)', '=DCF!$H$30', '=IFERROR(SUM(DCF!$C$24:$G$24)*(1+B7)+DCF!$G$20*(1+C7)*(1+E7)/(D7-E7)/(1+D7)^5,0)'],
+    [`Equity Value (${amount})`, '=B13+DCF!$H$31-DCF!$H$32', '=DCF!$H$33', '=D13+DCF!$H$31-DCF!$H$32'],
+    [`Implied Share Price (${perShareCurrency})`, '=B14/DCF!$H$34', '=DCF!$H$35', '=D14/DCF!$H$34'],
+    [`Current Share Price (${perShareCurrency})`, '=DCF!$H$37', '=DCF!$H$37', '=DCF!$H$37'],
     ['Premium / (Discount) (%)', '=IFERROR(B15/B16-1,0)', '=IFERROR(C15/C16-1,0)', '=IFERROR(D15/D16-1,0)']
   ];
   bridgeRows.forEach(([label, downside, base, upside], index) => {
@@ -598,6 +818,8 @@ function buildSummaryActions(inputs) {
   const money = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.currency });
   const pct = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.percent });
   const perShare = fmt(STYLE.formula, { numberFormat: NUM_FORMATS.perShare });
+  const amount = amountLabel(inputs);
+  const perShareCurrency = perShareLabel(inputs);
 
   set(cells, 'A1', cell(`${inputs.companyName} (${inputs.ticker}) - Valuation Summary`, STYLE.title));
   set(cells, 'A3', cell('Executive Valuation Output', STYLE.section));
@@ -605,10 +827,10 @@ function buildSummaryActions(inputs) {
   set(cells, 'B4', cell('Value', STYLE.header));
   set(cells, 'C4', cell('Source', STYLE.header));
   const outputs = [
-    ['Enterprise Value ($M)', '=DCF!$H$30', 'DCF!H30', money],
-    ['Equity Value ($M)', '=DCF!$H$33', 'DCF!H33', money],
-    ['Implied Share Price ($)', '=DCF!$H$35', 'DCF!H35', perShare],
-    ['Current Share Price ($)', '=DCF!$H$37', 'DCF!H37', perShare],
+    [`Enterprise Value (${amount})`, '=DCF!$H$30', 'DCF!H30', money],
+    [`Equity Value (${amount})`, '=DCF!$H$33', 'DCF!H33', money],
+    [`Implied Share Price (${perShareCurrency})`, '=DCF!$H$35', 'DCF!H35', perShare],
+    [`Current Share Price (${perShareCurrency})`, '=DCF!$H$37', 'DCF!H37', perShare],
     ['Premium / (Discount) (%)', '=DCF!$H$38', 'DCF!H38', pct],
     ['WACC (%)', '=WACC!$B$19', 'WACC!B19', pct],
     ['Terminal Growth (%)', '=Assumptions!$B$23', 'Assumptions!B23', pct]
@@ -637,7 +859,7 @@ function buildSummaryActions(inputs) {
   set(cells, 'B24', cell('Base Case', STYLE.header));
   set(cells, 'C24', cell('Model Link', STYLE.header));
   const assumptions = [
-    ['Base Revenue ($M)', '=Assumptions!$B$10', 'Assumptions!B10', money],
+    [`Base Revenue (${amount})`, '=Assumptions!$B$10', 'Assumptions!B10', money],
     ['EBITDA Margin (%)', '=Assumptions!$B$11', 'Assumptions!B11', pct],
     ['Tax Rate (%)', '=Assumptions!$B$12', 'Assumptions!B12', pct],
     ['CapEx % Revenue (%)', '=Assumptions!$B$14', 'Assumptions!B14', pct],
