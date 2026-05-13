@@ -10,7 +10,7 @@
     "serve:static": "npx http-server . -p 3000 -c-1",
     "build": "node build.js",
     "manifest:prod": "node scripts/build-production-manifest.js",
-    "test": "node test/unit/test_preflight.js && node test/unit/test_schema_drift.js && node test/unit/test_action_preview.js && node test/unit/test_dcf_backend.js && node test/unit/test_production_manifest.js",
+    "test": "node test/unit/test_preflight.js && node test/unit/test_schema_drift.js && node test/unit/test_action_preview.js && node test/unit/test_workbook_graph.js && node test/unit/test_dcf_backend.js && node test/unit/test_production_manifest.js",
     "check": "npm test && npm run build",
     "validate:manifest": "npx office-addin-manifest validate manifest.xml",
     "validate:manifest:prod": "npm run manifest:prod && npx office-addin-manifest validate -p dist/manifest.xml"

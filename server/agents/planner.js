@@ -43,7 +43,7 @@ TOOLS:
 - data (macro): openbb.fixedincome.treasury, openbb.fixedincome.yield_curve, openbb.fixedincome.effr, openbb.economy.cpi, openbb.economy.gdp_real, openbb.economy.unemployment, openbb.economy.interest_rates, openbb.economy.risk_premium, openbb.economy.money_measures, openbb.economy.gdp_forecast
 - data (market): openbb.index.snapshots, openbb.index.historical, openbb.etf.info, openbb.etf.holdings, openbb.currency.historical, openbb.crypto.historical
 - AI-assisted finance: finance.dcf.buildSection (sections: shell, sources, assumptions, wacc, dcf, sensitivity, scenarios, summary, audit, format, all; formula sections use an analyst LLM with deterministic fallback)
-- read: workbook.readWorkbook, workbook.readSheet, workbook.readRange
+- read/intelligence: workbook.readWorkbook, workbook.scanDeep, workbook.buildGraph, workbook.readSheet, workbook.readRange
 - layout: llm.planLayout
 - formula: llm.writeFormulas
 - format: llm.planFormat, excel.applyFormat
@@ -62,7 +62,8 @@ OPENBB PREFERRED OVER YAHOO — OpenBB provides real financial statements (balan
 INSTITUTIONAL DCF MODEL STRUCTURE (minimum standard):
 Sheets: Summary, Sources, Assumptions, WACC, DCF, Sensitivity, Scenarios, Audit
 
-IMPORTANT: A natural request like "voglio fare un DCF di Apple", "fammi DCF AAPL", or "build DCF for Microsoft" means FULL DCF BUILD. Do not treat it as a repair task. Use the complete sequence: workbook scan, market data, DCF shell, assumptions, WACC, DCF projection, sensitivity, formatting.
+IMPORTANT: A natural request like "voglio fare un DCF di Apple", "fammi DCF AAPL", or "build DCF for Microsoft" means FULL DCF BUILD. Do not treat it as a repair task. Use the complete sequence: workbook scan, workbook graph, market data, DCF shell, assumptions, WACC, DCF projection, sensitivity, formatting.
+For multi-sheet analysis, audits, repair, formatting or model completion, build a WorkbookGraph early with workbook.buildGraph or workbook.scanDeep so later tasks can reason over sheet roles, formula dependencies, errors and detected financial objects.
 
 1) Assumptions Sheet:
    - Section headers (grey background, white bold text)
@@ -381,20 +382,29 @@ function cleanupExpiredCache() {
 function buildAgenticDcfPlan(objective, context, equityIntent = {}) {
   const ticker = equityIntent.ticker || null;
   const companyName = equityIntent.companyName || ticker || 'Target Company';
-  const dataDeps = ['t1'];
   const tasks = [
     {
       id: 't1',
       agent: 'data',
       tool: 'workbook.readWorkbook',
       description: 'Scan workbook for existing model/data context and reusable finance inputs',
-      params: { maxRows: 45, maxCols: 24 },
+      params: { maxRows: 80, maxCols: 32, includeFormulas: true },
       deps: [],
+      requiresApproval: false
+    },
+    {
+      id: 't2',
+      agent: 'data',
+      tool: 'workbook.buildGraph',
+      description: 'Build WorkbookGraph for cross-sheet formulas, sheet roles, existing data and model risks',
+      params: { fromResult: 't1', workbookName: companyName, source: 'planner.dcf_prefetch' },
+      deps: ['t1'],
       requiresApproval: false
     }
   ];
 
-  let nextId = 2;
+  const dataDeps = ['t1', 't2'];
+  let nextId = 3;
   function addDataTask(tool, description, params, deps = []) {
     const id = `t${nextId}`;
     tasks.push({
@@ -527,20 +537,29 @@ function buildDcfCompletionPlan(objective, context, equityIntent = {}) {
     existingSheets.some(existing => existing.toLowerCase() === sheet.toLowerCase())
   );
 
-  const dataDeps = ['t1'];
   const tasks = [
     {
       id: 't1',
       agent: 'data',
       tool: 'workbook.readWorkbook',
       description: 'Read workbook before completing the DCF model',
-      params: { maxRows: 45, maxCols: 12 },
+      params: { maxRows: 80, maxCols: 32, includeFormulas: true },
       deps: [],
+      requiresApproval: false
+    },
+    {
+      id: 't2',
+      agent: 'data',
+      tool: 'workbook.buildGraph',
+      description: 'Build WorkbookGraph to locate incomplete sheets, broken formulas and reusable model inputs',
+      params: { fromResult: 't1', workbookName: companyName, source: 'planner.dcf_completion' },
+      deps: ['t1'],
       requiresApproval: false
     }
   ];
 
-  let nextId = 2;
+  const dataDeps = ['t1', 't2'];
+  let nextId = 3;
   if (ticker) {
     tasks.push({
       id: `t${nextId}`,
@@ -686,9 +705,10 @@ function buildFinanceFallbackPlan(objective, context) {
     return {
       objective,
       tasks: [
-        { id: 't1', agent: 'data', tool: 'workbook.readWorkbook', description: 'Leggi struttura e used range del workbook corrente', params: { maxRows: 80, maxCols: 20 }, deps: [], requiresApproval: false },
-        { id: 't2', agent: 'format', tool: 'llm.planFormat', description: 'Prepara formattazione professionale su tutto il workbook', params: { sheet: activeSheet, objective, mode: 'finance_cleanup', scope: 'workbook', usesResults: ['t1'] }, deps: ['t1'], requiresApproval: false },
-        { id: 't3', agent: 'format', tool: 'excel.applyFormat', description: 'Applica formattazione', params: { fromResult: 't2', sheet: activeSheet }, deps: ['t2'], requiresApproval: false }
+        { id: 't1', agent: 'data', tool: 'workbook.readWorkbook', description: 'Leggi struttura, formule e used range del workbook corrente', params: { maxRows: 120, maxCols: 40, includeFormulas: true }, deps: [], requiresApproval: false },
+        { id: 't2', agent: 'data', tool: 'workbook.buildGraph', description: 'Mappa fogli, tabelle e aree da formattare con WorkbookGraph', params: { fromResult: 't1', source: 'planner.format' }, deps: ['t1'], requiresApproval: false },
+        { id: 't3', agent: 'format', tool: 'llm.planFormat', description: 'Prepara formattazione professionale su tutto il workbook', params: { sheet: activeSheet, objective, mode: 'finance_cleanup', scope: 'workbook', usesResults: ['t1', 't2'] }, deps: ['t2'], requiresApproval: false },
+        { id: 't4', agent: 'format', tool: 'excel.applyFormat', description: 'Applica formattazione', params: { fromResult: 't3', sheet: activeSheet }, deps: ['t3'], requiresApproval: false }
       ]
     };
   }
@@ -702,22 +722,31 @@ function buildFinanceFallbackPlan(objective, context) {
         agent: 'data',
         tool: 'workbook.readWorkbook',
         description: 'Leggi lo stato attuale del workbook per modifiche incrementali',
-        params: { maxRows: 30, maxCols: 20 },
+        params: { maxRows: 100, maxCols: 32, includeFormulas: true },
         deps: [],
         requiresApproval: false
       },
       {
         id: 't2',
         agent: 'data',
+        tool: 'workbook.buildGraph',
+        description: 'Costruisci WorkbookGraph per capire dipendenze e rischi prima della modifica',
+        params: { fromResult: 't1', source: 'planner.incremental' },
+        deps: ['t1'],
+        requiresApproval: false
+      },
+      {
+        id: 't3',
+        agent: 'data',
         tool: 'workbook.readSheet',
         description: 'Leggi foglio attivo per contesto',
         params: { sheet: activeSheet, maxRows: 30, maxCols: 12 },
-        deps: ['t1'],
+        deps: ['t2'],
         requiresApproval: false
       }
     ];
-    let nextId = 3;
-    const deps = ['t2'];
+    let nextId = 4;
+    const deps = ['t2', 't3'];
 
     // If formatting-related modification, only run format agent
     if (['formatta', 'format', 'stile', 'colore', 'color', 'riformatta'].some(k => lowerObjective.includes(k))) {
@@ -726,8 +755,8 @@ function buildFinanceFallbackPlan(objective, context) {
         agent: 'format',
         tool: 'llm.planFormat',
         description: `Aggiorna formattazione: ${objective}`,
-        params: { sheet: activeSheet, objective, mode: 'finance_cleanup', scope: 'workbook', usesResults: ['t1', 't2'] },
-        deps: ['t2'],
+        params: { sheet: activeSheet, objective, mode: 'finance_cleanup', scope: 'workbook', usesResults: ['t1', 't2', 't3'] },
+        deps,
         requiresApproval: false
       });
       tasks.push({
@@ -746,8 +775,8 @@ function buildFinanceFallbackPlan(objective, context) {
         agent: 'formula',
         tool: 'llm.writeFormulas',
         description: `Modifica modello esistente: ${objective}`,
-        params: { sheet: activeSheet, objective, mode: 'repair_existing_model', section: 'full_model_review' },
-        deps: ['t2'],
+        params: { sheet: activeSheet, objective, mode: 'repair_existing_model', section: 'full_model_review', usesResults: ['t1', 't2', 't3'] },
+        deps,
         requiresApproval: false
       });
       tasks.push({
@@ -755,7 +784,7 @@ function buildFinanceFallbackPlan(objective, context) {
         agent: 'format',
         tool: 'llm.planFormat',
         description: 'Mantieni/pulisci formattazione dopo modifica',
-        params: { sheet: activeSheet, objective, mode: 'finance_cleanup', scope: 'workbook', usesResults: ['t1', 't2'] },
+        params: { sheet: activeSheet, objective, mode: 'finance_cleanup', scope: 'workbook', usesResults: ['t1', 't2', 't3'] },
         deps: [`t${nextId}`],
         requiresApproval: false
       });
@@ -932,44 +961,53 @@ function buildFinanceFallbackPlan(objective, context) {
         agent: 'data',
         tool: 'workbook.readWorkbook',
         description: 'Leggi la panoramica del workbook corrente',
-        params: { maxRows: 12, maxCols: 8 },
+        params: { maxRows: 100, maxCols: 32, includeFormulas: true },
         deps: [],
         requiresApproval: false
       },
       {
         id: 't2',
         agent: 'data',
-        tool: 'workbook.readSheet',
-        description: `Leggi il foglio attivo ${activeSheet}`,
-        params: { sheet: activeSheet, maxRows: 30, maxCols: 12 },
+        tool: 'workbook.buildGraph',
+        description: 'Costruisci WorkbookGraph per analisi multi-foglio e dipendenze formule',
+        params: { fromResult: 't1', source: 'planner.generic_repair' },
         deps: ['t1'],
         requiresApproval: false
       },
       {
         id: 't3',
-        agent: 'formula',
-        tool: 'llm.writeFormulas',
-        description: 'Analizza e correggi formule e riferimenti del modello nel foglio attivo',
-        params: { sheet: activeSheet, objective, mode: 'repair_existing_model', section: 'full_model_review' },
+        agent: 'data',
+        tool: 'workbook.readSheet',
+        description: `Leggi il foglio attivo ${activeSheet}`,
+        params: { sheet: activeSheet, maxRows: 30, maxCols: 12 },
         deps: ['t2'],
         requiresApproval: false
       },
       {
         id: 't4',
-        agent: 'format',
-        tool: 'llm.planFormat',
-        description: 'Prepara una pulizia visiva professionale del modello',
-        params: { sheet: activeSheet, objective, mode: 'finance_cleanup', scope: 'workbook', usesResults: ['t1', 't2', 't3'] },
+        agent: 'formula',
+        tool: 'llm.writeFormulas',
+        description: 'Analizza e correggi formule e riferimenti del modello nel foglio attivo',
+        params: { sheet: activeSheet, objective, mode: 'repair_existing_model', section: 'full_model_review', usesResults: ['t1', 't2', 't3'] },
         deps: ['t3'],
         requiresApproval: false
       },
       {
         id: 't5',
         agent: 'format',
+        tool: 'llm.planFormat',
+        description: 'Prepara una pulizia visiva professionale del modello',
+        params: { sheet: activeSheet, objective, mode: 'finance_cleanup', scope: 'workbook', usesResults: ['t1', 't2', 't3', 't4'] },
+        deps: ['t4'],
+        requiresApproval: false
+      },
+      {
+        id: 't6',
+        agent: 'format',
         tool: 'excel.applyFormat',
         description: 'Applica la formattazione proposta',
-        params: { fromResult: 't4', sheet: activeSheet },
-        deps: ['t4'],
+        params: { fromResult: 't5', sheet: activeSheet },
+        deps: ['t5'],
         requiresApproval: false
       }
     ]
@@ -980,7 +1018,7 @@ function inferAgent(toolName) {
   if (toolName.startsWith('yahoo.')) return 'data';
   if (toolName.startsWith('openbb.')) return 'data';
   if (toolName.startsWith('finance.dcf.')) return 'formula';
-  if (toolName.startsWith('workbook.read') || toolName === 'requestUserInput' || toolName === 'requestPermissions') return 'data';
+  if (toolName.startsWith('workbook.') || toolName === 'requestUserInput' || toolName === 'requestPermissions') return 'data';
   if (toolName === 'llm.planLayout' || toolName === 'excel.createSheet' || toolName === 'excel.renameSheet' || toolName === 'excel.deleteSheet' || toolName === 'excel.duplicateSheet' || toolName === 'excel.createNamedRange') return 'layout';
   if (toolName === 'llm.planFormat' || toolName === 'excel.applyFormat' || toolName === 'excel.setConditionalFormat') return 'format';
   if (toolName === 'llm.writeFormulas' || toolName.startsWith('excel.set') || toolName === 'excel.copyRange') return 'formula';
@@ -1051,6 +1089,9 @@ function normalizeToolName(toolName) {
     'conditionalformat': 'excel.setConditionalFormat',
     'writerange': 'workbook.writeRange',
     'readworkbook': 'workbook.readWorkbook',
+    'buildgraph': 'workbook.buildGraph',
+    'workbookgraph': 'workbook.buildGraph',
+    'scandeep': 'workbook.scanDeep',
     'readsheet': 'workbook.readSheet',
     'readrange': 'workbook.readRange'
   };

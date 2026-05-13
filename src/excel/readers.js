@@ -16,6 +16,8 @@ async function readWorkbookSnapshot(params) {
   const options = params || {};
   const maxRows = Number(options.maxRows) || 20;
   const maxCols = Number(options.maxCols) || 10;
+  const includeFormulas = options.includeFormulas !== false;
+  const includeNumberFormats = options.includeNumberFormats === true;
 
   return Excel.run(async (context) => {
     const worksheets = context.workbook.worksheets;
@@ -41,7 +43,10 @@ async function readWorkbookSnapshot(params) {
         Math.min(ref.usedRange.rowCount, maxRows),
         Math.min(ref.usedRange.columnCount, maxCols)
       );
-      ref.previewRange.load('values');
+      const loadProps = ['values'];
+      if (includeFormulas) loadProps.push('formulas');
+      if (includeNumberFormats) loadProps.push('numberFormat');
+      ref.previewRange.load(loadProps.join(','));
     }
     await context.sync();
 
@@ -56,7 +61,9 @@ async function readWorkbookSnapshot(params) {
         usedRange: usedRange.isNullObject ? null : usedRange.address,
         rowCount: usedRange.isNullObject ? 0 : usedRange.rowCount,
         columnCount: usedRange.isNullObject ? 0 : usedRange.columnCount,
-        preview: usedRange.isNullObject || !previewRange ? [] : previewRange.values
+        preview: usedRange.isNullObject || !previewRange ? [] : previewRange.values,
+        formulas: usedRange.isNullObject || !previewRange || !includeFormulas ? [] : previewRange.formulas,
+        numberFormat: usedRange.isNullObject || !previewRange || !includeNumberFormats ? [] : previewRange.numberFormat
       }))
     };
   });

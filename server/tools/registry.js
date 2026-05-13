@@ -1,6 +1,7 @@
 const Ajv = require('ajv');
 const yahoo = require('../tools/yahoo');
 const { buildDcfSectionAi } = require('../models/dcfAiBuilder');
+const { buildWorkbookGraph } = require('../models/workbookGraph');
 const { runLayoutAgent, runFormulaAgent, runFormatAgent } = require('../agents/specialists');
 const { searchTools } = require('../utils/toolSearch');
 const SHARED_SCHEMAS = require('./schemas');
@@ -203,6 +204,30 @@ function attachSheetToActions(actions, sheet) {
       ? { ...action, sheet }
       : action
   ));
+}
+
+function resolveWorkbookGraphInput(params, memory) {
+  const sourceResultId = params?.fromResult || params?.resultId || params?.planRef;
+  if (sourceResultId && memory?.results?.[sourceResultId]) {
+    return memory.results[sourceResultId];
+  }
+  if (params?.snapshot) return params.snapshot;
+  if (params?.workbook) return params.workbook;
+  if (memory?.context) return memory.context;
+  return null;
+}
+
+function hasWorkbookGraphInput(input) {
+  if (!input || typeof input !== 'object') return false;
+  if (input.data && typeof input.data === 'object') return hasWorkbookGraphInput(input.data);
+  if (input.result && typeof input.result === 'object') return hasWorkbookGraphInput(input.result);
+  return Boolean(
+    Array.isArray(input.sheets) ||
+    input.allSheetsData ||
+    input.values ||
+    input.preview ||
+    input.selectedValues
+  );
 }
 
 /* ========== Tool definitions (con schema JSON) ========== */
@@ -526,6 +551,83 @@ registerTool('workbook.readWorkbook', async (params, memory) => {
 }, {
   description: 'Legge lo stato completo del workbook dal client Excel',
   inputs: ['maxRows', 'maxCols'],
+  category: 'read',
+  costHint: 'medium',
+  requiresApproval: 'never'
+});
+
+registerTool('workbook.buildGraph', async (params, memory = {}) => {
+  let input = resolveWorkbookGraphInput(params, memory);
+  if (!hasWorkbookGraphInput(input) && memory.runtime?.requestClientTool) {
+    input = await memory.runtime.requestClientTool('workbook.readWorkbook', {
+      maxRows: params.maxRows || 80,
+      maxCols: params.maxCols || 30,
+      includeFormulas: params.includeFormulas !== false,
+      includeNumberFormats: !!params.includeNumberFormats
+    });
+  }
+
+  const graph = buildWorkbookGraph(input || {}, {
+    workbookId: params.workbookId,
+    workbookName: params.workbookName,
+    source: params.source || 'excel'
+  });
+  return { data: graph, actions: [] };
+}, {
+  description: 'Costruisce un grafo semantico del workbook: fogli, ruoli, formule, dipendenze cross-sheet, tabelle, errori e oggetti finanziari',
+  inputs: ['fromResult', 'maxRows', 'maxCols'],
+  schema: {
+    type: 'object',
+    properties: {
+      fromResult: { type: 'string', description: 'ID del task workbook.readWorkbook precedente' },
+      resultId: { type: 'string' },
+      workbookId: { type: 'string' },
+      workbookName: { type: 'string' },
+      source: { type: 'string' },
+      maxRows: { type: 'integer', minimum: 1, maximum: 10000 },
+      maxCols: { type: 'integer', minimum: 1, maximum: 200 },
+      includeFormulas: { type: 'boolean' },
+      includeNumberFormats: { type: 'boolean' },
+      snapshot: { type: 'object' },
+      workbook: { type: 'object' }
+    }
+  },
+  category: 'read',
+  costHint: 'low',
+  requiresApproval: 'never'
+});
+
+registerTool('workbook.scanDeep', async (params, memory = {}) => {
+  if (!memory.runtime?.requestClientTool) {
+    throw new Error('Runtime workbook non disponibile per workbook.scanDeep');
+  }
+  const snapshot = await memory.runtime.requestClientTool('workbook.readWorkbook', {
+    maxRows: params.maxRows || 160,
+    maxCols: params.maxCols || 50,
+    includeFormulas: params.includeFormulas !== false,
+    includeNumberFormats: !!params.includeNumberFormats
+  });
+  const graph = buildWorkbookGraph(snapshot, {
+    workbookId: params.workbookId,
+    workbookName: params.workbookName,
+    source: params.source || 'excel.deep_scan'
+  });
+  return { data: graph, actions: [] };
+}, {
+  description: 'Esegue una scansione profonda del workbook corrente e restituisce il WorkbookGraph per analisi multi-foglio',
+  inputs: ['maxRows', 'maxCols'],
+  schema: {
+    type: 'object',
+    properties: {
+      workbookId: { type: 'string' },
+      workbookName: { type: 'string' },
+      source: { type: 'string' },
+      maxRows: { type: 'integer', minimum: 1, maximum: 10000 },
+      maxCols: { type: 'integer', minimum: 1, maximum: 200 },
+      includeFormulas: { type: 'boolean' },
+      includeNumberFormats: { type: 'boolean' }
+    }
+  },
   category: 'read',
   costHint: 'medium',
   requiresApproval: 'never'

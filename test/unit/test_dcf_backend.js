@@ -71,6 +71,7 @@ async function main() {
 
     const tools = plan.tasks.map(task => task.tool);
     assert.ok(tools.includes('workbook.readWorkbook'));
+    assert.ok(tools.includes('workbook.buildGraph'));
     assert.ok(tools.includes('yahoo.quote'));
     assert.ok(tools.includes('yahoo.fundamentals'));
     assert.ok(tools.includes('yahoo.historical'));
@@ -87,6 +88,7 @@ async function main() {
     const shellTask = plan.tasks.find(task => task.params.section === 'shell');
     assert.strictEqual(shellTask.params.ticker, 'AAPL');
     assert.ok(shellTask.deps.includes('t1'));
+    assert.ok(shellTask.deps.some(dep => plan.tasks.find(task => task.id === dep)?.tool === 'workbook.buildGraph'));
     assert.ok(shellTask.deps.some(dep => plan.tasks.find(task => task.id === dep)?.tool === 'yahoo.quote'));
   });
 
@@ -108,6 +110,7 @@ async function main() {
     });
 
     assert.ok(plan.tasks.some(task => task.tool === 'yahoo.quote' && task.params.ticker === 'AAPL'));
+    assert.ok(plan.tasks.some(task => task.tool === 'workbook.buildGraph'));
     assert.ok(!plan.tasks.some(task => task.tool === 'llm.writeFormulas' && task.params.section === 'full_model_review'));
     const dcfTasks = plan.tasks.filter(task => task.tool === 'finance.dcf.buildSection');
     assert.deepStrictEqual(dcfTasks.map(task => task.params.section), ['shell', 'sources', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'scenarios', 'summary', 'audit', 'format']);
