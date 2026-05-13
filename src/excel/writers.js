@@ -416,9 +416,8 @@ async function execSetCellRange(context, sheetCache, defaultSheet, action) {
     } else if (spec.value !== undefined) {
       cell.values = [[spec.value]];
     }
-    if (spec.note) {
-      cell.comments.add(spec.note);
-    }
+    // Excel comments can fail late during context.sync and abort the whole batch.
+    // Keep notes out of the write path until comments have a dedicated safe action.
     if (spec.cellStyles) {
       const fmt = spec.cellStyles;
       if (fmt.fontColor) cell.format.font.color = fmt.fontColor;

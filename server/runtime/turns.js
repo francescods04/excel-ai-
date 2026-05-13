@@ -822,6 +822,34 @@ async function executeSingleTask(turnId, task) {
   }
 }
 
+function skipTaskDueToFailedDeps(turnId, task, failedDeps) {
+  const itemId = taskItemId(task.id);
+  const message = `Saltato perché dipendenze fallite: ${failedDeps.join(', ')}`;
+  storeTaskResult(turnId, task.id, {
+    ok: false,
+    skipped: true,
+    error: message,
+    agent: task.agent,
+    tool: task.tool,
+    failedDeps
+  });
+  const item = upsertItem(turnId, {
+    id: itemId,
+    type: 'taskExecution',
+    taskId: task.id,
+    agent: task.agent,
+    tool: task.tool,
+    description: task.description || task.tool,
+    deps: task.deps || [],
+    status: 'error',
+    error: message
+  });
+  emitItemStarted(turnId, item);
+  emitItemCompleted(turnId, item);
+  appendLog(turnId, `[${task.id}] ${message}`, 'warn', { taskId: task.id, itemId });
+  return { ok: false, skipped: true, taskId: task.id, error: message };
+}
+
 async function executeTurn(turnId) {
   const turn = _getTurnRef(turnId);
   if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
@@ -842,6 +870,10 @@ async function executeTurn(turnId) {
       const results = await Promise.allSettled(taskIds.map(taskId => {
         const task = turn.plan.tasks.find(entry => entry.id === taskId);
         if (!task) throw new Error(`Task non trovato: ${taskId}`);
+        const failedDeps = (task.deps || []).filter(dep => failedTaskIds.has(dep));
+        if (failedDeps.length > 0) {
+          return skipTaskDueToFailedDeps(turnId, task, failedDeps);
+        }
         // Skip task già eseguiti dal prefetch (read-only safe in background)
         const liveTurn = _getTurnRef(turnId);
         if (liveTurn?.results && Object.prototype.hasOwnProperty.call(liveTurn.results, taskId)) {

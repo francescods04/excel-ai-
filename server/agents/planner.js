@@ -212,6 +212,35 @@ function compactPlanningContext(context) {
   };
 }
 
+function findSheetPreview(context, sheetName) {
+  const sheets = context?.allSheetsData || {};
+  const entry = Object.entries(sheets).find(([name]) => name.toLowerCase() === sheetName.toLowerCase());
+  return Array.isArray(entry?.[1]?.preview) ? entry[1].preview : [];
+}
+
+function findLabelValue(preview, labels) {
+  const wanted = labels.map(label => String(label).toLowerCase());
+  for (const row of preview || []) {
+    if (!Array.isArray(row) || row.length < 2) continue;
+    const label = String(row[0] || '').toLowerCase().trim();
+    if (wanted.some(w => label === w || label.includes(w))) {
+      const value = row[1];
+      if (value !== '' && value !== null && value !== undefined) return value;
+    }
+  }
+  return null;
+}
+
+function inferExistingDcfIdentity(context = {}) {
+  const assumptions = findSheetPreview(context, 'Assumptions');
+  const ticker = findLabelValue(assumptions, ['ticker', 'symbol']);
+  const companyName = findLabelValue(assumptions, ['company', 'company name']);
+  return {
+    ticker: ticker ? String(ticker).trim().toUpperCase() : null,
+    companyName: companyName ? String(companyName).trim() : null
+  };
+}
+
 const planCache = new Map();
 const PLAN_CACHE_TTL_MS = 10 * 60 * 1000;
 const SEMANTIC_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -398,11 +427,117 @@ function buildDeterministicDcfPlan(objective, context, equityIntent = {}) {
   return { objective, tasks };
 }
 
+function buildDcfCompletionPlan(objective, context, equityIntent = {}) {
+  const ticker = equityIntent.ticker || null;
+  const companyName = equityIntent.companyName || ticker || 'Target Company';
+  const existingSheets = context?.workbookSheets || [];
+  const hasAllDcfSheets = ['Assumptions', 'WACC', 'DCF', 'Sensitivity'].every(sheet =>
+    existingSheets.some(existing => existing.toLowerCase() === sheet.toLowerCase())
+  );
+
+  const dataDeps = ['t1'];
+  const tasks = [
+    {
+      id: 't1',
+      agent: 'data',
+      tool: 'workbook.readWorkbook',
+      description: 'Read workbook before completing the DCF model',
+      params: { maxRows: 45, maxCols: 12 },
+      deps: [],
+      requiresApproval: false
+    }
+  ];
+
+  let nextId = 2;
+  if (ticker) {
+    tasks.push({
+      id: `t${nextId}`,
+      agent: 'data',
+      tool: 'yahoo.quote',
+      description: `Refresh live quote and market data for ${ticker}`,
+      params: { ticker },
+      deps: [],
+      requiresApproval: false
+    });
+    dataDeps.push(`t${nextId}`);
+    nextId++;
+
+    tasks.push({
+      id: `t${nextId}`,
+      agent: 'data',
+      tool: 'yahoo.fundamentals',
+      description: `Refresh financial fundamentals for ${ticker}`,
+      params: { ticker },
+      deps: [],
+      requiresApproval: false
+    });
+    dataDeps.push(`t${nextId}`);
+    nextId++;
+  }
+
+  const baseParams = {
+    companyName,
+    objective,
+    projectionYears: 5,
+    mode: 'template',
+    usesResults: dataDeps
+  };
+  if (ticker) baseParams.ticker = ticker;
+
+  let previousDeps = dataDeps;
+  if (!hasAllDcfSheets) {
+    tasks.push({
+      id: `t${nextId}`,
+      agent: 'layout',
+      tool: 'finance.dcf.buildSection',
+      description: 'Ensure DCF workbook shell exists',
+      params: { ...baseParams, section: 'shell' },
+      deps: dataDeps,
+      requiresApproval: false
+    });
+    previousDeps = [`t${nextId}`];
+    nextId++;
+  }
+
+  const sections = [
+    { section: 'assumptions', agent: 'formula', description: 'Complete Assumptions with all required DCF drivers' },
+    { section: 'wacc', agent: 'formula', description: 'Complete WACC formulas from assumptions' },
+    { section: 'dcf', agent: 'formula', description: 'Complete 5-year DCF projection and valuation bridge' },
+    { section: 'sensitivity', agent: 'formula', description: 'Complete WACC x terminal growth sensitivity tables' },
+    { section: 'format', agent: 'format', description: 'Re-apply institutional DCF formatting' }
+  ];
+
+  for (const entry of sections) {
+    tasks.push({
+      id: `t${nextId}`,
+      agent: entry.agent,
+      tool: 'finance.dcf.buildSection',
+      description: entry.description,
+      params: { ...baseParams, section: entry.section },
+      deps: previousDeps,
+      requiresApproval: false
+    });
+    previousDeps = [`t${nextId}`];
+    nextId++;
+  }
+
+  logger.info(`[Planner] DCF completion/repair plan generated for ${ticker || companyName}`);
+  return { objective, tasks };
+}
+
 function buildFinanceFallbackPlan(objective, context) {
   const lowerObjective = String(objective || '').toLowerCase();
-  const equityIntent = inferEquityIntent(objective);
+  const workbookIdentity = inferExistingDcfIdentity(context);
+  const baseIntent = inferEquityIntent(objective);
+  const equityIntent = {
+    ...baseIntent,
+    ticker: baseIntent.ticker || workbookIdentity.ticker,
+    companyName: baseIntent.companyName || workbookIdentity.companyName,
+    isPublicCompanyTarget: baseIntent.isPublicCompanyTarget || !!workbookIdentity.ticker
+  };
   const activeSheet = context?.activeSheet || 'DCF';
-  const isModification = ['modifica', 'cambia', 'aggiorna', 'correggi', 'fix', 'change', 'update', 'adjust', 'edit', 'ricalcola', 'riformatta'].some(k => lowerObjective.includes(k));
+  const isModification = ['modifica', 'cambia', 'aggiorna', 'correggi', 'fix', 'change', 'update', 'adjust', 'edit', 'ricalcola', 'riformatta', 'sistema'].some(k => lowerObjective.includes(k));
+  const wantsCompletion = ['completa', 'completo', 'complete', 'finish', 'finisci', 'problemi', 'problems', 'repair'].some(k => lowerObjective.includes(k));
   const wantsNewModel = equityIntent.hasBuildIntent || ['crea', 'costruisci', 'build', 'new', 'nuovo'].some(keyword => lowerObjective.includes(keyword));
   const isDcf = equityIntent.model === 'dcf' || lowerObjective.includes('dcf');
   const isFinanceModel = !!equityIntent.model || ['dcf', 'wacc', 'lbo', 'valuation', 'forecast', 'modello'].some(keyword => lowerObjective.includes(keyword));
@@ -419,6 +554,10 @@ function buildFinanceFallbackPlan(objective, context) {
   const existingModelSheets = existingSheets.filter(s =>
     ['Assumptions', 'WACC', 'DCF', 'Sensitivity'].some(m => s.toLowerCase() === m.toLowerCase())
   );
+
+  if (isDcf && existingModelSheets.length > 0 && (wantsCompletion || isModification)) {
+    return buildDcfCompletionPlan(objective, context, equityIntent);
+  }
 
   if (isWacc) {
     return {

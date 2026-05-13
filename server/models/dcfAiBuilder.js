@@ -9,6 +9,48 @@ const DCF_AI_FALLBACK_TIMEOUT_MS = Number(process.env.DCF_AI_FALLBACK_TIMEOUT_MS
 
 const DCF_SHEETS = ['Assumptions', 'WACC', 'DCF', 'Sensitivity'];
 const AI_SECTIONS = new Set(['assumptions', 'wacc', 'dcf', 'projection', 'sensitivity']);
+const SECTION_REQUIREMENTS = {
+  assumptions: {
+    sheet: 'Assumptions',
+    minCells: 50,
+    required: [
+      'B10', 'B11', 'B12', 'B13', 'B14', 'B15',
+      'B18', 'B19', 'B20', 'B21', 'B22', 'B23',
+      'B26', 'B27', 'B28', 'B29', 'B30',
+      'B33', 'B34', 'B35', 'B36', 'B37'
+    ],
+    mustMatchTemplate: [
+      'B10', 'B11', 'B12', 'B13', 'B14', 'B15',
+      'B18', 'B19', 'B20', 'B21', 'B22', 'B23',
+      'B26', 'B27', 'B28', 'B29', 'B30',
+      'B33', 'B34', 'B35', 'B36', 'B37'
+    ]
+  },
+  wacc: {
+    sheet: 'WACC',
+    minCells: 22,
+    required: ['B4', 'B5', 'B6', 'B7', 'B10', 'B11', 'B12', 'B15', 'B16', 'B17', 'B19'],
+    mustMatchTemplate: ['B4', 'B5', 'B6', 'B7', 'B10', 'B11', 'B12', 'B15', 'B16', 'B17', 'B19']
+  },
+  dcf: {
+    sheet: 'DCF',
+    minCells: 120,
+    required: ['B5', 'C5', 'G20', 'C24', 'G24', 'H27', 'H28', 'H30', 'H33', 'H35', 'H40'],
+    mustMatchTemplate: ['B5', 'C5', 'G20', 'C24', 'G24', 'H27', 'H28', 'H30', 'H33', 'H35', 'H40']
+  },
+  projection: {
+    sheet: 'DCF',
+    minCells: 120,
+    required: ['B5', 'C5', 'G20', 'C24', 'G24', 'H27', 'H28', 'H30', 'H33', 'H35', 'H40'],
+    mustMatchTemplate: ['B5', 'C5', 'G20', 'C24', 'G24', 'H27', 'H28', 'H30', 'H33', 'H35', 'H40']
+  },
+  sensitivity: {
+    sheet: 'Sensitivity',
+    minCells: 60,
+    required: ['B4', 'C4', 'G4', 'B5', 'C5', 'G9', 'B13', 'C13', 'G13', 'B14', 'C14', 'G18'],
+    mustMatchTemplate: ['C5', 'G9', 'C14', 'G18']
+  }
+};
 
 const DCF_SECTION_SYSTEM_PROMPT = `You are an expert investment-banking analyst and Excel model builder embedded in Microsoft Excel.
 
@@ -38,7 +80,7 @@ Operational rules:
 3. Put calculations in Excel formulas. Do not compute final valuation numbers in chat or hardcode them into formulas.
 4. Business assumptions belong in visible input cells; downstream formulas must reference those cells.
 5. Use absolute references for assumptions and cross-sheet drivers.
-6. If market or fundamental data comes from Yahoo/app data, add a short source note to the relevant hardcoded input cells.
+6. Do not use Excel comments/notes. If source text is needed, make it visible in nearby cells or labels.
 7. Sensitivity tables must use direct formulas and an odd-sized grid around the base case.
 8. If prior critic feedback is supplied, fix those exact issues while preserving the schema.
 9. Use only supported action types: setCellRange, setCellValue, runFormula, setCellFormat, addConditionalFormat, createSheet.
@@ -98,7 +140,6 @@ function stripCellSpec(spec) {
   const out = {};
   if (Object.prototype.hasOwnProperty.call(spec, 'value')) out.value = spec.value;
   if (Object.prototype.hasOwnProperty.call(spec, 'formula')) out.formula = spec.formula;
-  if (Object.prototype.hasOwnProperty.call(spec, 'note')) out.note = spec.note;
   return out;
 }
 
@@ -135,7 +176,6 @@ function normalizeCellSpec(spec) {
     normalized.formula = normalized.value.trim();
     delete normalized.value;
   }
-  if (Object.prototype.hasOwnProperty.call(spec, 'note')) normalized.note = String(spec.note);
   if (spec.cellStyles && typeof spec.cellStyles === 'object') normalized.cellStyles = spec.cellStyles;
   if (spec.borderStyles && typeof spec.borderStyles === 'object') normalized.borderStyles = spec.borderStyles;
   if (!Object.prototype.hasOwnProperty.call(normalized, 'value') && !normalized.formula) {
@@ -188,6 +228,54 @@ function normalizeActions(rawActions, fallbackSheet) {
     if (action.type === 'setCellRange') return !!action.sheet && Object.keys(action.cells || {}).length > 0;
     return !!action.sheet && !!action.target;
   });
+}
+
+function getSheetCells(actions = [], sheetName) {
+  const cells = {};
+  for (const action of actions) {
+    if (action?.type !== 'setCellRange' || !action.cells) continue;
+    if (action.sheet !== sheetName) continue;
+    Object.assign(cells, action.cells);
+  }
+  return cells;
+}
+
+function specSignature(spec) {
+  if (!spec || typeof spec !== 'object') return JSON.stringify(spec ?? null);
+  if (spec.formula !== undefined) return `f:${String(spec.formula).replace(/\s+/g, '').toUpperCase()}`;
+  if (spec.value !== undefined) return `v:${JSON.stringify(spec.value)}`;
+  return 'empty';
+}
+
+function validateDcfSectionContract(section, actions, fallbackActions) {
+  const requirement = SECTION_REQUIREMENTS[section];
+  if (!requirement) return { ok: true, errors: [] };
+
+  const cells = getSheetCells(actions, requirement.sheet);
+  const fallbackCells = getSheetCells(fallbackActions, requirement.sheet);
+  const errors = [];
+  const cellCount = Object.keys(cells).length;
+
+  if (cellCount < requirement.minCells) {
+    errors.push(`${section} returned ${cellCount} cells; minimum complete section is ${requirement.minCells}`);
+  }
+
+  for (const address of requirement.required) {
+    if (!cells[address]) {
+      errors.push(`${section} missing required cell ${requirement.sheet}!${address}`);
+    }
+  }
+
+  for (const address of requirement.mustMatchTemplate || []) {
+    if (!cells[address] || !fallbackCells[address]) continue;
+    const actual = specSignature(cells[address]);
+    const expected = specSignature(fallbackCells[address]);
+    if (actual !== expected) {
+      errors.push(`${section} changed protected cell ${requirement.sheet}!${address}`);
+    }
+  }
+
+  return { ok: errors.length === 0, errors };
 }
 
 function fallbackWithBuilder(fallback, builder, extra = {}) {
@@ -269,6 +357,10 @@ async function buildDcfSectionAi(params = {}, memory = {}) {
       const summary = critic.errors.map(entry => entry.error).slice(0, 6).join('; ');
       throw new Error(`critic rejected AI section: ${summary}`);
     }
+    const contract = validateDcfSectionContract(section, actions, fallback.actions);
+    if (!contract.ok) {
+      throw new Error(`section contract rejected AI output: ${contract.errors.slice(0, 6).join('; ')}`);
+    }
 
     return {
       data: {
@@ -290,5 +382,6 @@ module.exports = {
   buildDcfSectionAi,
   compactResultsForDcf,
   normalizeActions,
+  validateDcfSectionContract,
   DCF_SECTION_SYSTEM_PROMPT
 };

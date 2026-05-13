@@ -61,7 +61,9 @@ async function fundamentals(ticker) {
   const key = cacheKey('fundamentals', ticker);
   return withCache('fundamentals', key, async () => {
     try {
-      const quoteData = await yahooFinance.quote(ticker, { modules: ['summaryDetail', 'defaultKeyStatistics', 'financialData'] });
+      const quoteData = await yahooFinance.quoteSummary(ticker, {
+        modules: ['summaryDetail', 'defaultKeyStatistics', 'financialData']
+      });
       return quoteData;
     } catch (e) {
       return { error: e.message };

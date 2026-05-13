@@ -1,7 +1,7 @@
 const assert = require('assert');
 const planner = require('../../server/agents/planner');
 const { buildDcfSection, inferDcfInputs } = require('../../server/models/dcfTemplate');
-const { buildDcfSectionAi, normalizeActions } = require('../../server/models/dcfAiBuilder');
+const { buildDcfSectionAi, normalizeActions, validateDcfSectionContract } = require('../../server/models/dcfAiBuilder');
 const { validateFormula, validateTaskOutput } = require('../../server/agents/critic');
 const { inferEquityIntent } = require('../../server/utils/equityIntent');
 
@@ -78,6 +78,30 @@ async function main() {
     assert.ok(shellTask.deps.some(dep => plan.tasks.find(task => task.id === dep)?.tool === 'yahoo.quote'));
   });
 
+  await test('planner repairs existing incomplete DCF without generic full_model_review LLM', async () => {
+    const plan = await planner.plan('completa il dcf ci sono ancora un sacco di problemi', {
+      activeSheet: 'Sensitivity',
+      workbookSheets: ['Sheet1', 'Assumptions', 'WACC', 'DCF', 'Sensitivity'],
+      allSheetsData: {
+        Assumptions: {
+          isActive: false,
+          usedRange: 'Assumptions!A1:B10',
+          preview: [
+            ['Company', 'Apple Inc.'],
+            ['Ticker', 'AAPL'],
+            ['Base Revenue ($M)', 100000]
+          ]
+        }
+      }
+    });
+
+    assert.ok(plan.tasks.some(task => task.tool === 'yahoo.quote' && task.params.ticker === 'AAPL'));
+    assert.ok(!plan.tasks.some(task => task.tool === 'llm.writeFormulas' && task.params.section === 'full_model_review'));
+    const dcfTasks = plan.tasks.filter(task => task.tool === 'finance.dcf.buildSection');
+    assert.deepStrictEqual(dcfTasks.map(task => task.params.section), ['assumptions', 'wacc', 'dcf', 'sensitivity', 'format']);
+    dcfTasks.forEach(task => assert.strictEqual(task.params.mode, 'template'));
+  });
+
   await test('DCF template derives assumptions from market data', () => {
     const inputs = inferDcfInputs({ ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
     assert.strictEqual(inputs.ticker, 'AAPL');
@@ -128,13 +152,13 @@ async function main() {
     }
   });
 
-  await test('AI DCF action normalizer preserves formula semantics in setCellRange', () => {
+  await test('AI DCF action normalizer preserves formula semantics and strips fragile notes', () => {
     const actions = normalizeActions([
       {
         type: 'setCellRange',
         cells: {
           A1: { value: 'Metric' },
-          B1: { value: '=Assumptions!$B$10' }
+          B1: { value: '=Assumptions!$B$10', note: 'Source note that must not abort Excel writes' }
         }
       }
     ], 'DCF');
@@ -144,6 +168,28 @@ async function main() {
     assert.strictEqual(actions[0].cells.A1.value, 'Metric');
     assert.strictEqual(actions[0].cells.B1.formula, '=Assumptions!$B$10');
     assert.strictEqual(actions[0].cells.B1.value, undefined);
+    assert.strictEqual(actions[0].cells.B1.note, undefined);
+  });
+
+  await test('AI DCF section contract rejects incomplete sections before Excel execution', () => {
+    const fallback = buildDcfSection({ section: 'assumptions', ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
+    const incomplete = {
+      data: {},
+      actions: [
+        {
+          type: 'setCellRange',
+          sheet: 'Assumptions',
+          cells: {
+            A1: { value: 'Apple Inc. (AAPL) - DCF Assumptions' },
+            A10: { value: 'Base Revenue ($M)' },
+            B10: { value: 100000 }
+          }
+        }
+      ]
+    };
+    const contract = validateDcfSectionContract('assumptions', incomplete.actions, fallback.actions);
+    assert.strictEqual(contract.ok, false);
+    assert.ok(contract.errors.some(error => error.includes('minimum complete section')));
   });
 
   await test('AI DCF builder can be disabled for deterministic fallback', async () => {
