@@ -27,6 +27,32 @@ function enqueueActions(actions, excelActionQueue, showActionsPreview, hideActio
 }
 
 let isExecutingQueue = false;
+const queueIdleResolvers = [];
+
+function resolveQueueIdleIfNeeded(excelActionQueue) {
+  if (isExecutingQueue || (excelActionQueue && excelActionQueue.length > 0)) return;
+  const resolvers = queueIdleResolvers.splice(0, queueIdleResolvers.length);
+  resolvers.forEach(resolve => resolve(true));
+}
+
+function waitForActionQueueIdle(excelActionQueue, timeoutMs = 120000) {
+  if (!isExecutingQueue && (!excelActionQueue || excelActionQueue.length === 0)) {
+    return Promise.resolve(true);
+  }
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      const idx = queueIdleResolvers.indexOf(done);
+      if (idx >= 0) queueIdleResolvers.splice(idx, 1);
+      resolve(false);
+    }, timeoutMs);
+    function done(value) {
+      clearTimeout(timer);
+      resolve(value);
+    }
+    queueIdleResolvers.push(done);
+  });
+}
 
 async function reportBatchComplete(onBatchComplete, payload) {
   if (!onBatchComplete) return;
@@ -79,6 +105,7 @@ async function processQueue(excelActionQueue, showActionsPreview, hideActionsPre
     }
   } finally {
     isExecutingQueue = false;
+    resolveQueueIdleIfNeeded(excelActionQueue);
   }
 }
 
@@ -657,4 +684,4 @@ async function execAddConditionalFormat(context, sheetCache, defaultSheet, actio
   }
 }
 
-export { enqueueActions, executeActions };
+export { enqueueActions, executeActions, waitForActionQueueIdle };

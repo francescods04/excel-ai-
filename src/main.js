@@ -15,7 +15,7 @@ import { initUndoBadge, showUndoBadge } from './ui/undoBar.js';
 import { hideRequestPanel, showPermissionRequest, showUserInputRequest, showQuestionRequest, collectRequestFormValues, normalizeRequestFields } from './ui/requestPanel.js';
 import { getExcelContext } from './excel/context.js';
 import { worksheetExists, readWorkbookSnapshot, readSheetSnapshot, readRangeSnapshot, readRangeAsCsv, readNamedRanges, readMultiRangeBatch } from './excel/readers.js';
-import { enqueueActions, executeActions as execActions, undoLastSnapshot } from './excel/writers.js';
+import { enqueueActions, executeActions as execActions, undoLastSnapshot, waitForActionQueueIdle } from './excel/writers.js';
 import { startTurn, approveTurnExecution, postTurnResponse, postTurnResponseBatch, postTurnActionResult, getTurn, getErrorMessageFromResponse } from './api/turn.js';
 import { startAgent, resumeAgentWithResponse, postAgentClientResponse } from './api/agent.js';
 import { loadModelConfig, changeModel, warmupLLM } from './api/config.js';
@@ -567,6 +567,13 @@ async function acknowledgeTurnActionBatch(result) {
   }
 }
 
+async function waitForPendingExcelActions(reason = 'lettura workbook') {
+  const idle = await waitForActionQueueIdle(state.excelActionQueue, 120000);
+  if (!idle) {
+    addLog(`Timeout attesa coda azioni Excel prima di ${reason}; procedo con lo stato disponibile.`, 'warn');
+  }
+}
+
 function openTurnEventStream(turnId, planMsgId) {
   if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
 
@@ -848,6 +855,7 @@ function handleRequestResolved() {
 async function handleClientToolRequest(request) {
   addLog(`[${request.taskId || 'runtime'}] Lettura client ${request.toolName}`);
   try {
+    await waitForPendingExcelActions(request.toolName);
     let data;
     switch (request.toolName) {
       case 'workbook.readWorkbook':
@@ -878,6 +886,7 @@ async function handleClientToolBatch(requests) {
   addLog(`Batch clientTool: ${requests.length} richieste`);
 
   try {
+    await waitForPendingExcelActions('batch clientTool');
     // NOTE: each reader already wraps itself in Excel.run(); do NOT nest here
     const outputs = [];
     for (const request of requests) {
@@ -922,6 +931,7 @@ async function handleAgentClientToolBatch(agentId, requests) {
   addLog(`Agent clientTool: ${requests.length} richieste`);
 
   try {
+    await waitForPendingExcelActions('batch agent clientTool');
     // Group range reads for batch execution in single Excel.run()
     const rangeReads = [];
     const otherRequests = [];

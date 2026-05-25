@@ -122,6 +122,11 @@ function hasHistory(jobId) {
   return !!(events && events.length > 0);
 }
 
+function hasClients(jobId) {
+  const jobClients = clients.get(jobId);
+  return !!(jobClients && jobClients.size > 0);
+}
+
 function sendEvent(jobId, eventType, data) {
   appendHistory(jobId, eventType, data);
 
@@ -200,6 +205,7 @@ module.exports = {
   registerClient,
   removeClient,
   hasHistory,
+  hasClients,
   sendEvent,
   sendTaskStart,
   sendTaskActions,

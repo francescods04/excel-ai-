@@ -278,6 +278,72 @@ function recordActionExecution(turnId, payload = {}) {
   return record;
 }
 
+function turnHasMutationResults(turn) {
+  return Object.values(turn?.results || {}).some(result =>
+    hasMutationActions(result?.actions || []) ||
+    hasMutationActions(result?.data?.actions || [])
+  );
+}
+
+async function capturePostExecutionSnapshotIfNeeded(turnId, failedTaskIds = new Set()) {
+  const turn = _getTurnRef(turnId);
+  if (!turn || !turnHasMutationResults(turn)) return null;
+  if (!streaming.hasClients(turnId)) {
+    appendLog(turnId, 'Verifica finale workbook saltata: nessun client Excel connesso.', 'warn');
+    return null;
+  }
+
+  appendLog(turnId, 'Verifica finale: rileggo il workbook dopo le mutazioni Excel.', 'info');
+  try {
+    const response = await requestClientResponse(turnId, {
+      id: makeRequestId('postcheck'),
+      type: 'clientTool',
+      taskId: '__postExecutionSnapshot',
+      toolName: 'workbook.readWorkbook',
+      params: {
+        maxRows: 80,
+        maxCols: 24,
+        includeFormulas: true,
+        includeNumberFormats: true,
+        reason: 'post_execution_verification'
+      },
+      title: 'Verifica finale workbook',
+      prompt: 'Rileggo il workbook dopo le modifiche per verificare lo stato reale di Excel.',
+      timeoutMs: 180000
+    });
+
+    const data = response && response.data !== undefined ? response.data : response;
+    const capturedAt = nowIso();
+    const liveTurn = _getTurnRef(turnId);
+    const workbookSheets = Array.isArray(data?.workbookSheets)
+      ? data.workbookSheets
+      : (Array.isArray(data?.sheets) ? data.sheets.map(sheet => sheet.name).filter(Boolean) : []);
+
+    liveTurn.postExecutionSnapshot = {
+      capturedAt,
+      activeSheet: data?.activeSheet || null,
+      workbookSheets,
+      sheetCount: workbookSheets.length,
+      failedTaskIds: Array.from(failedTaskIds || [])
+    };
+    if (!liveTurn.results) liveTurn.results = {};
+    liveTurn.results.__postExecutionSnapshot = {
+      data,
+      actions: [],
+      meta: {
+        kind: 'post_execution_workbook_snapshot',
+        capturedAt
+      }
+    };
+    saveTurn(liveTurn);
+    appendLog(turnId, `Verifica finale completata: ${workbookSheets.length} fogli riletti.`, 'info');
+    return liveTurn.results.__postExecutionSnapshot;
+  } catch (error) {
+    appendLog(turnId, `Verifica finale workbook fallita: ${error.message}`, 'warn');
+    return null;
+  }
+}
+
 function emitTurnStarted(turn) {
   streaming.sendEvent(turn.id, 'turnStarted', {
     turnId: turn.id,
@@ -1119,6 +1185,8 @@ async function executeTurn(turnId) {
       });
     }
 
+    await capturePostExecutionSnapshotIfNeeded(turnId, failedTaskIds);
+
     const finalError = failedTaskIds.size > 0
       ? `${failedTaskIds.size} task falliti su ${turn.plan.tasks.length}: ${Array.from(failedTaskIds).join(', ')}`
       : undefined;
@@ -1280,5 +1348,6 @@ module.exports = {
   respondToTurnRequest,
   applyActionExecutionResult,
   recordActionExecution,
+  turnHasMutationResults,
   undoTurn
 };

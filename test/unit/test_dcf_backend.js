@@ -12,7 +12,7 @@ const { normalizeAiSchema } = require('../../server/models/workbookAiSchema');
 const { normalizeUnderstanding } = require('../../server/models/workbookUnderstanding');
 const { selectLastModelState } = require('../../server/runtime/conversationMemory');
 const { isPrefetchSafeTask } = require('../../server/runtime/prefetchPolicy');
-const { buildExecutionMemory, applyActionExecutionResult } = require('../../server/runtime/turns');
+const { buildExecutionMemory, applyActionExecutionResult, turnHasMutationResults } = require('../../server/runtime/turns');
 const { registry } = require('../../server/tools/registry');
 
 async function test(name, fn) {
@@ -1230,6 +1230,21 @@ async function main() {
     assert.strictEqual(record.actionCount, 1);
     assert.strictEqual(turn.actionExecutions.length, 1);
     assert.strictEqual(turn.results.t3.clientExecution.completedAt, '2026-05-25T10:00:00.000Z');
+  });
+
+  await test('turn runtime detects mutation results that require final workbook verification', () => {
+    assert.strictEqual(turnHasMutationResults({
+      results: {
+        t1: { actions: [] },
+        t2: { actions: [{ type: 'setCellRange', sheet: 'DCF', cells: { A1: { value: 'x' } } }] }
+      }
+    }), true);
+    assert.strictEqual(turnHasMutationResults({
+      results: {
+        t1: { actions: [] },
+        t2: { actions: [{ type: 'todoWrite', todos: [] }] }
+      }
+    }), false);
   });
 }
 
