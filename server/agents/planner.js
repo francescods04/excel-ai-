@@ -6,6 +6,7 @@ const { analyzeWorkbookContext } = require('../utils/sheetParser');
 const { inferEquityIntent } = require('../utils/equityIntent');
 const { getAnalystDepth } = require('../models/analystDepth');
 const { applyExcelHarnessToPlan, getHarnessPromptSummary } = require('../runtime/excelHarness');
+const { assertPlanWithinLimits } = require('../runtime/safetyLimits');
 
 const PLANNER_TIMEOUT_MS = Number(process.env.PLANNER_TIMEOUT_MS) || 300000;
 const PLANNER_FALLBACK_TIMEOUT_MS = Number(process.env.PLANNER_FALLBACK_TIMEOUT_MS) || 180000;
@@ -1595,10 +1596,10 @@ function normalizeAndValidatePlan(result) {
 
   ensureNoCycles(normalizedTasks);
 
-  return applyExcelHarnessToPlan({
+  return assertPlanWithinLimits(applyExcelHarnessToPlan({
     objective: result.objective || '',
     tasks: normalizedTasks
-  }, registry);
+  }, registry));
 }
 
 function isAiManagedPlanningCandidate(objective = '', context = {}, domainPlan = null) {

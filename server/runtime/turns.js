@@ -18,6 +18,7 @@ const { buildActionPreview, hasMutationActions } = require('./actionPreview');
 const { computeLevels } = require('../utils/graph');
 const { buildUndoActions, summarizeUndo } = require('./undo');
 const { isPrefetchSafeTask } = require('./prefetchPolicy');
+const { LIMITS, assertActionBatchWithinLimits, allSettledLimit } = require('./safetyLimits');
 
 const TURNS_DIR = path.join(__dirname, '..', 'turns');
 
@@ -189,6 +190,9 @@ function appendLog(turnId, message, level = 'info', extra = {}) {
   };
 
   turn.log.push(entry);
+  if (turn.log.length > LIMITS.maxLogEntries) {
+    turn.log.splice(0, turn.log.length - LIMITS.maxLogEntries);
+  }
   saveTurn(turn);
   streaming.sendEvent(turnId, 'log', entry);
   return entry;
@@ -945,7 +949,7 @@ async function planTurn(turnId) {
       appendLog(turnId, `Prefetch ${totalPrefetch} task safe in background (livelli ${prefetchByLevel.map(b => b.level).join(',')})...`);
       (async () => {
         for (const batch of prefetchByLevel) {
-          const results = await Promise.allSettled(batch.tasks.map(task => executeSingleTask(turnId, task)));
+          const results = await allSettledLimit(batch.tasks, LIMITS.maxParallelTasks, task => executeSingleTask(turnId, task));
           const failed = results.filter(r => r.status === 'rejected' || r.value?.ok === false);
           if (failed.length > 0) {
             appendLog(turnId, `Errore prefetch livello ${batch.level}: ${failed.length} task falliti`, 'error');
@@ -1068,6 +1072,7 @@ async function executeSingleTaskInner(turnId, task) {
     }
 
     if (result.actions && result.actions.length > 0) {
+      assertActionBatchWithinLimits(result.actions, task);
       // Smart approval: check requiresApproval from tool registry
       const AUTO_APPROVE = process.env.AUTO_APPROVE_ALL === 'true';
       const toolMeta = registry.meta(task.tool);
@@ -1186,7 +1191,7 @@ async function executeTurn(turnId) {
       const taskIds = levels.get(level) || [];
       appendLog(turnId, `Livello ${level}: eseguo ${taskIds.length} task`, 'info', { level });
 
-      const results = await Promise.allSettled(taskIds.map(taskId => {
+      const results = await allSettledLimit(taskIds, LIMITS.maxParallelTasks, taskId => {
         const task = turn.plan.tasks.find(entry => entry.id === taskId);
         if (!task) throw new Error(`Task non trovato: ${taskId}`);
         const failedDeps = (task.deps || []).filter(dep => failedTaskIds.has(dep));
@@ -1200,7 +1205,7 @@ async function executeTurn(turnId) {
           return Promise.resolve();
         }
         return executeSingleTask(turnId, task);
-      }));
+      });
 
       results.forEach((result, idx) => {
         if (result.status === 'rejected' || result.value?.ok === false) {

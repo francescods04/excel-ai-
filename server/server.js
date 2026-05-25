@@ -9,14 +9,58 @@ require('dotenv').config();
 const logger = require('./utils/logger');
 const streaming = require('./agents/streaming');
 const turns = require('./runtime/turns');
+const { LIMITS } = require('./runtime/safetyLimits');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const HTTPS_PORT = process.env.HTTPS_PORT || 3443;
 
+function isAllowedOrigin(origin) {
+  if (!origin) return true;
+  if (process.env.ALLOW_ALL_CORS === 'true') return true;
+  return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(origin);
+}
+
+const rateBuckets = new Map();
+const RATE_WINDOW_MS = 60 * 1000;
+const RATE_MAX = Number(process.env.API_RATE_LIMIT_PER_MIN) || 600;
+
+function rateLimit(req, res, next) {
+  if (!req.path.startsWith('/api/') || req.path.includes('/stream/') || req.path === '/api/health') return next();
+  const now = Date.now();
+  const key = req.ip || req.socket?.remoteAddress || 'local';
+  const bucket = rateBuckets.get(key);
+  if (!bucket || now - bucket.startedAt > RATE_WINDOW_MS) {
+    rateBuckets.set(key, { startedAt: now, count: 1 });
+    return next();
+  }
+  bucket.count += 1;
+  if (bucket.count > RATE_MAX) {
+    return res.status(429).json({ error: 'Troppe richieste API ravvicinate. Riprova tra poco.' });
+  }
+  return next();
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, bucket] of rateBuckets.entries()) {
+    if (now - bucket.startedAt > RATE_WINDOW_MS * 2) rateBuckets.delete(key);
+  }
+}, RATE_WINDOW_MS).unref?.();
+
 // Middleware
-app.use(cors());
-app.use(bodyParser.json({ limit: '10mb' }));
+app.use(cors({
+  origin(origin, callback) {
+    callback(null, isAllowedOrigin(origin));
+  }
+}));
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
+app.use(bodyParser.json({ limit: `${LIMITS.maxRequestBodyMb}mb` }));
+app.use(rateLimit);
 app.use(express.static(path.join(__dirname, '..')));
 
 // Request logging
@@ -72,7 +116,9 @@ app.get('/api/health', (req, res) => {
       'calculation-suspension',
       'persistent-instructions',
       'update-setting',
-      'auto-skill-suggest'
+      'auto-skill-suggest',
+      'bounded-task-concurrency',
+      'runtime-safety-limits'
     ],
     env: {
       nodeEnv: process.env.NODE_ENV || 'development',

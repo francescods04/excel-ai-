@@ -1,9 +1,12 @@
 // Gestione stream SSE per job con supporto a replay, heartbeat e più client per job
+const { LIMITS } = require('../runtime/safetyLimits');
+
 const clients = new Map(); // jobId -> Set<res>
 const history = new Map(); // jobId -> [{ eventType, data }]
 const heartbeats = new Map(); // jobId -> IntervalID
 const llmProgressState = new Map(); // jobId -> { lastAt, length }
-const MAX_HISTORY_EVENTS = 500;
+const MAX_HISTORY_EVENTS = LIMITS.maxSseHistoryEvents;
+const MAX_CLIENTS_PER_JOB = LIMITS.maxSseClientsPerJob;
 const HEARTBEAT_INTERVAL_MS = 15000; // 15 secondi
 const LLM_PROGRESS_MIN_INTERVAL_MS = 1200;
 const LLM_PROGRESS_MIN_CHARS = 900;
@@ -92,6 +95,13 @@ function appendHistory(jobId, eventType, data) {
 
 function registerClient(jobId, res) {
   const jobClients = clients.get(jobId) || new Set();
+  if (jobClients.size >= MAX_CLIENTS_PER_JOB) {
+    const oldest = jobClients.values().next().value;
+    if (oldest) {
+      try { oldest.end(); } catch (err) {}
+      jobClients.delete(oldest);
+    }
+  }
   jobClients.add(res);
   clients.set(jobId, jobClients);
 

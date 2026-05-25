@@ -21,6 +21,7 @@ import { startAgent, resumeAgentWithResponse, postAgentClientResponse } from './
 import { loadModelConfig, changeModel, warmupLLM } from './api/config.js';
 
 const AGENT_KEYWORDS = ['dcf','wacc','lbo','model','modello','build','costruisci','valuation','finanziario','financial','forecast','proiezioni','sensitivity','scenario'];
+const MAX_HANDLED_IDS = 1500;
 
 const messagesContainer = document.getElementById('messages');
 const userInput = document.getElementById('user-input');
@@ -238,6 +239,17 @@ function resetAgent() {
   state.pausedAgentId = null;
   updateProgressBadge(0);
   stopElapsedTimer();
+}
+
+function rememberHandledId(set, value) {
+  if (!value) return false;
+  if (set.has(value)) return false;
+  set.add(value);
+  if (set.size > MAX_HANDLED_IDS) {
+    const oldest = set.values().next().value;
+    set.delete(oldest);
+  }
+  return true;
 }
 
 function resetRequestQueue() {
@@ -625,8 +637,7 @@ function openTurnEventStream(turnId, planMsgId) {
       try {
         const data = JSON.parse(e.data);
         const batchId = data.itemId || data.taskId || JSON.stringify(data.actions || []);
-        if (state.handledActionBatchIds.has(batchId)) return;
-        state.handledActionBatchIds.add(batchId);
+        if (!rememberHandledId(state.handledActionBatchIds, batchId)) return;
         if (data.actions && data.actions.length > 0) {
           addLog(`[${data.taskId}] Eseguo ${data.actions.length} azioni su Excel`);
           showToast(`${data.actions.length} azioni Excel (${data.taskId})`, 'info');
@@ -787,8 +798,7 @@ async function approveTurn(turnId) {
 }
 
 function queueToolRequest(request) {
-  if (!request || !request.id || state.handledRequestIds.has(request.id)) return;
-  state.handledRequestIds.add(request.id);
+  if (!request || !request.id || !rememberHandledId(state.handledRequestIds, request.id)) return;
   state.requestQueue.push(request);
   processToolRequests();
 }
