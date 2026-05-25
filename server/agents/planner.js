@@ -1,10 +1,11 @@
 const { callLLM, callLLMStreaming } = require('../tools/llm');
-const { tools } = require('../tools/registry');
+const { tools, registry } = require('../tools/registry');
 const logger = require('../utils/logger');
 const streaming = require('./streaming');
 const { analyzeWorkbookContext } = require('../utils/sheetParser');
 const { inferEquityIntent } = require('../utils/equityIntent');
 const { getAnalystDepth } = require('../models/analystDepth');
+const { applyExcelHarnessToPlan, getHarnessPromptSummary } = require('../runtime/excelHarness');
 
 const PLANNER_TIMEOUT_MS = Number(process.env.PLANNER_TIMEOUT_MS) || 300000;
 const PLANNER_FALLBACK_TIMEOUT_MS = Number(process.env.PLANNER_FALLBACK_TIMEOUT_MS) || 180000;
@@ -37,6 +38,8 @@ AGENTS:
 - layout: sheet structure, cell maps, section design
 - formula: Excel formulas and transformations (must reference cells, never hardcode)
 - format: professional formatting adapted to the workbook domain
+
+${getHarnessPromptSummary()}
 
 TOOLS:
 - data (equity): yahoo.quote, yahoo.historical, yahoo.fundamentals
@@ -1592,10 +1595,10 @@ function normalizeAndValidatePlan(result) {
 
   ensureNoCycles(normalizedTasks);
 
-  return {
+  return applyExcelHarnessToPlan({
     objective: result.objective || '',
     tasks: normalizedTasks
-  };
+  }, registry);
 }
 
 function isAiManagedPlanningCandidate(objective = '', context = {}, domainPlan = null) {
@@ -1700,6 +1703,7 @@ function prepareNormalizedPlan(rawPlan, planningContext = {}, objective = '') {
   let normalized = normalizeAndValidatePlan(rawPlan);
   normalized = enforceWorkbookFirstPlan(normalized, planningContext, objective);
   normalized = ensureWorkbookUnderstandingPlan(normalized, planningContext, objective);
+  normalized = applyExcelHarnessToPlan(normalized, registry);
   ensureNoCycles(normalized.tasks);
   return normalized;
 }

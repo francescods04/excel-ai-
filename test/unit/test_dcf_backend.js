@@ -13,6 +13,7 @@ const { normalizeUnderstanding } = require('../../server/models/workbookUndersta
 const { selectLastModelState } = require('../../server/runtime/conversationMemory');
 const { isPrefetchSafeTask } = require('../../server/runtime/prefetchPolicy');
 const { buildExecutionMemory, applyActionExecutionResult, turnHasMutationResults } = require('../../server/runtime/turns');
+const { applyExcelHarnessToTask, inferHarnessAgent } = require('../../server/runtime/excelHarness');
 const { registry } = require('../../server/tools/registry');
 
 async function test(name, fn) {
@@ -198,6 +199,8 @@ async function main() {
 
     const shellTask = plan.tasks.find(task => task.params.section === 'shell');
     assert.strictEqual(shellTask.params.ticker, 'AAPL');
+    assert.strictEqual(shellTask.harness.agent, 'modelArchitect');
+    assert.strictEqual(shellTask.harness.permissions.mutation, 'ask');
     assert.ok(shellTask.deps.includes('t1'));
     assert.ok(shellTask.deps.some(dep => plan.tasks.find(task => task.id === dep)?.tool === 'workbook.buildGraph'));
     assert.ok(shellTask.deps.some(dep => plan.tasks.find(task => task.id === dep)?.tool === 'yahoo.quote'));
@@ -626,6 +629,28 @@ async function main() {
     assert.strictEqual(formulaTask.params.analysisDepth, 'institutional');
     assert.strictEqual(formulaTask.params.analystDepth.section, 'wacc');
     assert.ok(formulaTask.params.analystDepth.requiredAnalyses.some(item => item.includes('peer/sector beta')));
+    assert.strictEqual(formulaTask.harness.agent, 'formulaEngineer');
+    assert.strictEqual(formulaTask.harness.permissions.mutation, 'ask');
+  });
+
+  await test('Excel harness routes read-only and domain agents with permissions', () => {
+    assert.strictEqual(inferHarnessAgent({ tool: 'workbook.understand', params: {} }), 'workbookScout');
+    assert.strictEqual(inferHarnessAgent({ tool: 'openbb.equity.fundamentals.income', params: {} }), 'marketScout');
+    assert.strictEqual(inferHarnessAgent({ tool: 'finance.dcf.buildSection', params: { section: 'wacc' } }), 'modelAnalyst');
+    assert.strictEqual(inferHarnessAgent({ tool: 'finance.dcf.buildSection', params: { section: 'audit' } }), 'auditReviewer');
+
+    const readTask = applyExcelHarnessToTask({
+      id: 't1',
+      agent: 'data',
+      tool: 'workbook.readWorkbook',
+      description: 'read workbook',
+      params: {},
+      deps: [],
+      requiresApproval: false
+    }, registry);
+    assert.strictEqual(readTask.harness.agent, 'workbookScout');
+    assert.strictEqual(readTask.harness.permissions.mutation, 'deny');
+    assert.strictEqual(readTask.harness.risk, 'low');
   });
 
   await test('runtime planner lets AI decide complex valuation plans before playbook fallback', async () => {

@@ -344,6 +344,19 @@ async function capturePostExecutionSnapshotIfNeeded(turnId, failedTaskIds = new 
   }
 }
 
+function enforceHarnessResultPermissions(task, result) {
+  const permissions = task?.harness?.permissions || {};
+  if (permissions.mutation !== 'deny') return;
+  const actions = [
+    ...(Array.isArray(result?.actions) ? result.actions : []),
+    ...(Array.isArray(result?.data?.actions) ? result.data.actions : [])
+  ];
+  if (hasMutationActions(actions)) {
+    const agent = task.harness?.agent || task.agent || 'unknown';
+    throw new Error(`Harness permission denied: ${agent} e' read-only ma ha prodotto mutazioni Excel`);
+  }
+}
+
 function emitTurnStarted(turn) {
   streaming.sendEvent(turn.id, 'turnStarted', {
     turnId: turn.id,
@@ -972,6 +985,7 @@ async function executeSingleTaskInner(turnId, task) {
     type: 'taskExecution',
     taskId: task.id,
     agent: task.agent,
+    harness: task.harness || null,
     tool: task.tool,
     description: task.description || task.tool,
     deps: task.deps || [],
@@ -980,6 +994,12 @@ async function executeSingleTaskInner(turnId, task) {
 
   emitItemStarted(turnId, runningItem);
   appendLog(turnId, `[${task.id}] ${task.agent}/${task.tool} avviato`, 'info', { taskId: task.id, itemId });
+  if (task.harness?.agent) {
+    appendLog(turnId, `[${task.id}] Harness: ${task.harness.agent} (${task.harness.mode}, risk=${task.harness.risk})`, 'info', {
+      taskId: task.id,
+      itemId
+    });
+  }
 
   try {
     const turn = _getTurnRef(turnId);
@@ -1002,6 +1022,7 @@ async function executeSingleTaskInner(turnId, task) {
         activeParams,
         executionMemory
       );
+      enforceHarnessResultPermissions(task, result);
       const layout = buildLayoutFromResults(executionMemory.results);
       criticResult = validateTaskOutput(result, layout);
 
@@ -1078,6 +1099,7 @@ async function executeSingleTaskInner(turnId, task) {
       type: 'taskExecution',
       taskId: task.id,
       agent: task.agent,
+      harness: task.harness || null,
       tool: task.tool,
       description: task.description || task.tool,
       deps: task.deps || [],
@@ -1102,6 +1124,7 @@ async function executeSingleTaskInner(turnId, task) {
       type: 'taskExecution',
       taskId: task.id,
       agent: task.agent,
+      harness: task.harness || null,
       tool: task.tool,
       description: task.description || task.tool,
       deps: task.deps || [],
@@ -1133,6 +1156,7 @@ function skipTaskDueToFailedDeps(turnId, task, failedDeps) {
     type: 'taskExecution',
     taskId: task.id,
     agent: task.agent,
+    harness: task.harness || null,
     tool: task.tool,
     description: task.description || task.tool,
     deps: task.deps || [],
