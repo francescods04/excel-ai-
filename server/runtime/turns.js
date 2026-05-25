@@ -215,6 +215,69 @@ function storeTaskResult(turnId, taskId, result) {
   return turn;
 }
 
+function normalizeClientActionErrors(errors) {
+  if (!Array.isArray(errors)) return [];
+  return errors.slice(0, 10).map(error => ({
+    type: error?.type || null,
+    sheet: error?.sheet || null,
+    target: error?.target || null,
+    message: String(error?.message || error || '').slice(0, 500)
+  }));
+}
+
+function applyActionExecutionResult(turn, payload = {}) {
+  const taskId = String(payload.taskId || '');
+  if (!taskId) throw new Error('taskId richiesto');
+  const numericActionCount = Number(payload.actionCount);
+  const numericErrorCount = Number(payload.errorCount);
+  const status = payload.status === 'error' ? 'error' : 'completed';
+  const errors = normalizeClientActionErrors(payload.errors);
+  const record = {
+    taskId,
+    itemId: payload.itemId || taskItemId(taskId),
+    status,
+    actionCount: Number.isFinite(numericActionCount) ? numericActionCount : 0,
+    errorCount: Number.isFinite(numericErrorCount)
+      ? numericErrorCount
+      : (status === 'error' ? Math.max(1, errors.length) : errors.length),
+    error: payload.error ? String(payload.error).slice(0, 1000) : null,
+    errors,
+    isUndo: Boolean(payload.isUndo),
+    completedAt: payload.completedAt || nowIso()
+  };
+
+  if (!Array.isArray(turn.actionExecutions)) turn.actionExecutions = [];
+  const existingIndex = turn.actionExecutions.findIndex(entry =>
+    entry.taskId === record.taskId && entry.itemId === record.itemId
+  );
+  if (existingIndex >= 0) {
+    turn.actionExecutions[existingIndex] = record;
+  } else {
+    turn.actionExecutions.push(record);
+  }
+
+  if (turn.results && turn.results[taskId]) {
+    turn.results[taskId].clientExecution = record;
+  }
+
+  return record;
+}
+
+function recordActionExecution(turnId, payload = {}) {
+  const turn = _getTurnRef(turnId);
+  if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
+
+  const record = applyActionExecutionResult(turn, payload);
+  const message = record.status === 'completed'
+    ? `[${record.taskId}] Excel client ha applicato ${record.actionCount} azioni`
+    : `[${record.taskId}] Excel client segnala ${record.errorCount || 1} errori su ${record.actionCount} azioni`;
+
+  appendLog(turnId, message, record.status === 'completed' ? 'info' : 'error', {
+    actionExecution: record
+  });
+  return record;
+}
+
 function emitTurnStarted(turn) {
   streaming.sendEvent(turn.id, 'turnStarted', {
     turnId: turn.id,
@@ -1215,5 +1278,7 @@ module.exports = {
   loadTurn,
   buildExecutionMemory,
   respondToTurnRequest,
+  applyActionExecutionResult,
+  recordActionExecution,
   undoTurn
 };

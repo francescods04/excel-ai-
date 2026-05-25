@@ -16,7 +16,7 @@ import { hideRequestPanel, showPermissionRequest, showUserInputRequest, showQues
 import { getExcelContext } from './excel/context.js';
 import { worksheetExists, readWorkbookSnapshot, readSheetSnapshot, readRangeSnapshot, readRangeAsCsv, readNamedRanges, readMultiRangeBatch } from './excel/readers.js';
 import { enqueueActions, executeActions as execActions, undoLastSnapshot } from './excel/writers.js';
-import { startTurn, approveTurnExecution, postTurnResponse, postTurnResponseBatch, getTurn, getErrorMessageFromResponse } from './api/turn.js';
+import { startTurn, approveTurnExecution, postTurnResponse, postTurnResponseBatch, postTurnActionResult, getTurn, getErrorMessageFromResponse } from './api/turn.js';
 import { startAgent, resumeAgentWithResponse, postAgentClientResponse } from './api/agent.js';
 import { loadModelConfig, changeModel, warmupLLM } from './api/config.js';
 
@@ -544,6 +544,29 @@ async function runTurnMode(text) {
   }
 }
 
+async function acknowledgeTurnActionBatch(result) {
+  const meta = result?.meta || {};
+  if (!meta.turnId || !meta.taskId) return;
+  const status = result.ok ? 'completed' : 'error';
+  try {
+    await postTurnActionResult(meta.turnId, {
+      taskId: meta.taskId,
+      itemId: meta.itemId,
+      status,
+      actionCount: result.actionCount || 0,
+      errorCount: result.errorCount || 0,
+      error: result.error || null,
+      errors: Array.isArray(result.errors) ? result.errors : [],
+      isUndo: Boolean(meta.isUndo),
+      completedAt: new Date().toISOString()
+    });
+    const suffix = status === 'completed' ? 'applicate' : 'con errori';
+    addLog(`[${meta.taskId}] ACK Excel: ${result.actionCount || 0} azioni ${suffix}`);
+  } catch (err) {
+    addLog(`[${meta.taskId}] ACK Excel non salvato: ${err.message}`, 'warn');
+  }
+}
+
 function openTurnEventStream(turnId, planMsgId) {
   if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
 
@@ -600,8 +623,16 @@ function openTurnEventStream(turnId, planMsgId) {
         if (data.actions && data.actions.length > 0) {
           addLog(`[${data.taskId}] Eseguo ${data.actions.length} azioni su Excel`);
           showToast(`${data.actions.length} azioni Excel (${data.taskId})`, 'info');
-          enqueueActions(data.actions, state.excelActionQueue, showActionsPreview, hideActionsPreview,
-            (acts) => execActions(acts, updateStepsPanel));
+          enqueueActions({
+            actions: data.actions,
+            meta: {
+              turnId: data.turnId || turnId,
+              taskId: data.taskId,
+              itemId: data.itemId,
+              isUndo: Boolean(data.isUndo)
+            }
+          }, state.excelActionQueue, showActionsPreview, hideActionsPreview,
+          (acts) => execActions(acts, updateStepsPanel), acknowledgeTurnActionBatch);
         }
       } catch (err) {}
     });

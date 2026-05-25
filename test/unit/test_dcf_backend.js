@@ -12,7 +12,7 @@ const { normalizeAiSchema } = require('../../server/models/workbookAiSchema');
 const { normalizeUnderstanding } = require('../../server/models/workbookUnderstanding');
 const { selectLastModelState } = require('../../server/runtime/conversationMemory');
 const { isPrefetchSafeTask } = require('../../server/runtime/prefetchPolicy');
-const { buildExecutionMemory } = require('../../server/runtime/turns');
+const { buildExecutionMemory, applyActionExecutionResult } = require('../../server/runtime/turns');
 const { registry } = require('../../server/tools/registry');
 
 async function test(name, fn) {
@@ -1206,6 +1206,30 @@ async function main() {
       if (previous === undefined) delete process.env.DCF_AI_BUILDER_ENABLED;
       else process.env.DCF_AI_BUILDER_ENABLED = previous;
     }
+  });
+
+  await test('turn runtime records client-side Excel action acknowledgements', () => {
+    const turn = {
+      id: 'turn-test',
+      results: {
+        t3: {
+          actions: [{ type: 'setCellValue', sheet: 'DCF', target: 'B2', value: 1 }]
+        }
+      }
+    };
+
+    const record = applyActionExecutionResult(turn, {
+      taskId: 't3',
+      itemId: 'task-t3',
+      status: 'completed',
+      actionCount: 1,
+      completedAt: '2026-05-25T10:00:00.000Z'
+    });
+
+    assert.strictEqual(record.status, 'completed');
+    assert.strictEqual(record.actionCount, 1);
+    assert.strictEqual(turn.actionExecutions.length, 1);
+    assert.strictEqual(turn.results.t3.clientExecution.completedAt, '2026-05-25T10:00:00.000Z');
   });
 }
 

@@ -6,28 +6,80 @@ import { formatActionTarget } from '../utils/html.js';
 import { addLog } from '../ui/executionLog.js';
 import state from '../store/state.js';
 
-function enqueueActions(actions, excelActionQueue, showActionsPreview, hideActionsPreview, executeActions) {
-  if (!actions || actions.length === 0) return;
-  excelActionQueue.push(actions);
+function normalizeBatch(batch) {
+  if (Array.isArray(batch)) return { actions: batch, meta: null };
+  if (batch && Array.isArray(batch.actions)) {
+    return {
+      actions: batch.actions,
+      meta: batch.meta || null,
+      onBatchComplete: batch.onBatchComplete || null
+    };
+  }
+  return null;
+}
+
+function enqueueActions(actions, excelActionQueue, showActionsPreview, hideActionsPreview, executeActions, onBatchComplete) {
+  const batch = normalizeBatch(actions);
+  if (!batch || batch.actions.length === 0) return;
+  batch.onBatchComplete = onBatchComplete || batch.onBatchComplete || null;
+  excelActionQueue.push(batch);
   processQueue(excelActionQueue, showActionsPreview, hideActionsPreview, executeActions);
 }
 
 let isExecutingQueue = false;
 
+async function reportBatchComplete(onBatchComplete, payload) {
+  if (!onBatchComplete) return;
+  try {
+    await onBatchComplete(payload);
+  } catch (err) {
+    addLog('Errore salvataggio esito azioni Excel: ' + err.message, 'warn');
+  }
+}
+
 async function processQueue(excelActionQueue, showActionsPreview, hideActionsPreview, executeActions) {
   if (isExecutingQueue) return;
   isExecutingQueue = true;
-  while (excelActionQueue.length > 0) {
-    const batch = excelActionQueue.shift();
-    try {
-      showActionsPreview(batch);
-      await executeActions(batch);
-      hideActionsPreview();
-    } catch (err) {
-      addLog('Errore azioni Excel: ' + err.message, 'error');
+  try {
+    while (excelActionQueue.length > 0) {
+      const batch = normalizeBatch(excelActionQueue.shift());
+      if (!batch || batch.actions.length === 0) continue;
+      const { actions, meta, onBatchComplete } = batch;
+      let completion = {
+        ok: true,
+        meta,
+        actionCount: actions.length,
+        errorCount: 0,
+        errors: []
+      };
+      try {
+        showActionsPreview(actions);
+        const result = await executeActions(actions);
+        const errors = Array.isArray(result?.errors) ? result.errors : [];
+        const errorCount = Number(result?.errorCount) || errors.length || 0;
+        completion = {
+          ...completion,
+          actionCount: Number(result?.actionCount) || actions.length,
+          errorCount,
+          errors,
+          ok: errorCount === 0
+        };
+      } catch (err) {
+        completion = {
+          ...completion,
+          ok: false,
+          error: err.message,
+          errorCount: actions.length || 1
+        };
+        addLog('Errore azioni Excel: ' + err.message, 'error');
+      } finally {
+        try { hideActionsPreview(); } catch (err) {}
+        await reportBatchComplete(onBatchComplete, completion);
+      }
     }
+  } finally {
+    isExecutingQueue = false;
   }
-  isExecutingQueue = false;
 }
 
 // ---------- Undo Snapshots ----------
@@ -177,9 +229,10 @@ async function resolveSheetAndTarget(context, sheetCache, defaultSheet, action) 
 }
 
 async function executeActions(actions, updateStepsPanel) {
-  if (!actions || actions.length === 0) return;
+  if (!actions || actions.length === 0) return { actionCount: 0, errorCount: 0, errors: [] };
 
   return Excel.run(async (context) => {
+    const actionErrors = [];
     const defaultSheet = context.workbook.worksheets.getActiveWorksheet();
     const sheetCache = new Map();
 
@@ -289,6 +342,12 @@ async function executeActions(actions, updateStepsPanel) {
         const detail = actionErr && actionErr.message ? actionErr.message : String(actionErr);
         const where = action.sheet ? ` (sheet=${action.sheet})` : '';
         addLog(`Azione ${action.type} fallita${where}: ${detail}`, 'error');
+        actionErrors.push({
+          type: action.type,
+          sheet: action.sheet || action.sheetName || null,
+          target: action.target || null,
+          message: detail
+        });
       }
     }
 
@@ -302,6 +361,12 @@ async function executeActions(actions, updateStepsPanel) {
       if (state.undoStack.length > 10) state.undoStack.shift();
       addLog(`Snapshot salvato: ${snapshot.entries.length} celle (undo stack: ${state.undoStack.length})`);
     }
+
+    return {
+      actionCount: actions.length,
+      errorCount: actionErrors.length,
+      errors: actionErrors
+    };
   });
 }
 

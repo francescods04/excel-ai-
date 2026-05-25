@@ -154,6 +154,21 @@ app.post('/api/turn/respond-batch', async (req, res) => {
   }
 });
 
+app.post('/api/turn/action-result', async (req, res) => {
+  try {
+    const { turnId, taskId } = req.body || {};
+    if (!turnId || !taskId) {
+      return res.status(400).json({ error: 'turnId e taskId sono richiesti' });
+    }
+
+    const result = turns.recordActionExecution(turnId, req.body || {});
+    res.json({ ok: true, result });
+  } catch (error) {
+    logger.error('Errore turn/action-result:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/turn/stream/:turnId', async (req, res) => {
   const { turnId } = req.params;
   const turn = turns.loadTurn(turnId);

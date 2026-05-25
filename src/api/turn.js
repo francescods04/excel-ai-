@@ -49,6 +49,19 @@ async function postTurnResponseBatch(turnId, responses) {
   }
 }
 
+async function postTurnActionResult(turnId, result) {
+  const res = await fetch(`${API_BASE}/api/turn/action-result`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ turnId, ...(result || {}) })
+  });
+  if (!res.ok) {
+    const payload = await res.json().catch(() => ({}));
+    throw new Error(payload.error || 'Errore nel salvataggio esito azioni Excel');
+  }
+  return res.json();
+}
+
 async function getTurn(turnId) {
   const res = await fetch(`${API_BASE}/api/turn/${encodeURIComponent(turnId)}`);
   if (!res.ok) {
@@ -80,4 +93,4 @@ async function getErrorMessageFromResponse(response, fallbackMessage) {
   return fallback;
 }
 
-export { startTurn, approveTurnExecution, postTurnResponse, postTurnResponseBatch, getTurn, getErrorMessageFromResponse, API_BASE };
+export { startTurn, approveTurnExecution, postTurnResponse, postTurnResponseBatch, postTurnActionResult, getTurn, getErrorMessageFromResponse, API_BASE };
