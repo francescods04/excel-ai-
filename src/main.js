@@ -44,6 +44,7 @@ const btnRequestSecondary = document.getElementById('btn-request-secondary');
 const modelSelect = document.getElementById('model-select');
 const scrollBottomBtn = document.getElementById('scroll-bottom-btn');
 const themeToggle = document.getElementById('theme-toggle');
+const restartBtn = document.getElementById('restart-btn');
 const pendingQuestionBanner = document.getElementById('pending-question-banner');
 
 function showActionsPreview(actions) {
@@ -132,6 +133,42 @@ async function init() {
     document.documentElement.setAttribute('data-theme', isDark ? '' : 'dark');
     themeToggle.setAttribute('aria-pressed', String(!isDark));
     themeToggle.textContent = isDark ? '◐' : '◑';
+  });
+
+  restartBtn.addEventListener('click', () => {
+    // Close SSE connections
+    if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
+    if (state.agentEventSource) { state.agentEventSource.close(); state.agentEventSource = null; }
+    // Reset state
+    state.isProcessing = false;
+    state.currentTurnId = null;
+    state.currentPlanTasks = null;
+    state.requestQueue = [];
+    state.excelActionQueue = [];
+    state.handledActionBatchIds.clear();
+    state.handledRequestIds.clear();
+    state.taskTreeCache.clear();
+    state.undoStack = [];
+    // Clear UI
+    messagesContainer.innerHTML = `<div class="message bot-message">
+      <div class="bubble welcome-bubble">
+        <div class="welcome-kicker">Workbook cockpit</div>
+        <div class="welcome-title">Pronto per lavorare sul foglio con piano, preview e conferma.</div>
+      </div>
+    </div>`;
+    clearLog();
+    resetTaskTree();
+    hideApproveBar();
+    hideCodePanel();
+    hideRequestPanel();
+    hideStepsPanel();
+    hideActionsPreview();
+    actionsList.innerHTML = '';
+    hidePendingBanner();
+    stopElapsedTimer();
+    updateProgress(0, 0);
+    updateProgressBadge(0);
+    addLog('Sessione riavviata', 'info');
   });
 
   sendBtn.addEventListener('click', handleSend);
