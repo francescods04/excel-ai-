@@ -1781,7 +1781,8 @@ async function executeAgentLoopTurn(turnId) {
       requestQuestion: (questions) => runtime.requestQuestion(questions, {
         title: 'Mi serve una scelta per continuare il task',
         prompt: 'Seleziona l\'opzione migliore per far proseguire il loop AI sul workbook.'
-      })
+      }),
+      pullSteerMessages: () => drainSteerQueue(turnId)
     });
 
     storeTaskResult(turnId, task.id, {
@@ -2108,6 +2109,50 @@ function undoTurn(turnId) {
   return { ok: true, summary, actions: undoData.actions, skipped: undoData.skipped };
 }
 
+/* ---------- Steering: inject user messages into running turn ---------- */
+
+const INTERRUPT_PATTERNS = [
+  /\b(stop|halt|cancel|abort|cease|quit)\b/i,
+  /\b(invece|piuttosto|instead)\b/i,
+  /\b(wait[, ]+no|aspetta[, ]+no)\b/i,
+  /\b(non\s+(fare|farlo|continuare)|do\s*n[o']?t\s+(do|continue))\b/i,
+  /\b(smetti|smettila|fermati|fermo|ferma\b)/i,
+  /\b(cambia\b.*\b(con|in)\b|change\s+to\b)/i,
+  /\b(annulla|undo this|scarta)\b/i
+];
+
+function classifySteerKind(text) {
+  if (!text || typeof text !== 'string') return 'addendum';
+  return INTERRUPT_PATTERNS.some(rx => rx.test(text)) ? 'interrupt' : 'addendum';
+}
+
+function enqueueSteer(turnId, text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) throw new Error('Steer text vuoto');
+  const turn = _getTurnRef(turnId);
+  if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
+  if (!['running', 'awaiting_approval', 'planning'].includes(turn.status)) {
+    throw new Error(`Steer non applicabile a turn con status "${turn.status}"`);
+  }
+  if (!Array.isArray(turn.steerQueue)) turn.steerQueue = [];
+  const item = { id: makeRequestId('steer'), text: trimmed, kind: classifySteerKind(trimmed), ts: nowIso(), consumed: false };
+  turn.steerQueue.push(item);
+  saveTurn(turn);
+  appendLog(turnId, `Steer ricevuto (${item.kind}): ${trimmed.slice(0, 140)}`, 'info');
+  streaming.sendEvent(turnId, 'steerQueued', { id: item.id, kind: item.kind, text: trimmed, ts: item.ts });
+  return item;
+}
+
+function drainSteerQueue(turnId) {
+  const turn = _getTurnRef(turnId);
+  if (!turn || !Array.isArray(turn.steerQueue) || turn.steerQueue.length === 0) return [];
+  const pending = turn.steerQueue.filter(s => !s.consumed);
+  if (pending.length === 0) return [];
+  pending.forEach(s => { s.consumed = true; });
+  saveTurn(turn);
+  return pending.map(s => ({ id: s.id, text: s.text, kind: s.kind }));
+}
+
 module.exports = {
   startTurn,
   approveTurn,
@@ -2118,5 +2163,8 @@ module.exports = {
   applyActionExecutionResult,
   recordActionExecution,
   turnHasMutationResults,
-  undoTurn
+  undoTurn,
+  enqueueSteer,
+  drainSteerQueue,
+  classifySteerKind
 };

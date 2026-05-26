@@ -285,6 +285,18 @@ app.post('/api/turn/approve', authenticate, async (req, res) => {
   }
 });
 
+app.post('/api/turn/steer', authenticate, async (req, res) => {
+  try {
+    const { turnId, text } = req.body;
+    if (!turnId || !text) return res.status(400).json({ error: 'turnId e text sono richiesti' });
+    const item = turns.enqueueSteer(turnId, text);
+    res.json({ ok: true, id: item.id, kind: item.kind });
+  } catch (error) {
+    logger.error('Errore turn/steer:', error.message);
+    res.status(400).json({ error: error.message });
+  }
+});
+
 app.post('/api/turn/respond', authenticate, async (req, res) => {
   try {
     const { turnId, requestId, response } = req.body;

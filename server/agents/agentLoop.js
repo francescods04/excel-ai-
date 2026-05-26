@@ -1078,6 +1078,26 @@ async function runAgentLoop(objective, context, options = {}) {
     logger.info(`[AgentLoop] Iteration ${iteration}/${maxIterations}`);
     onEvent('iterationStart', { iteration, maxIterations });
 
+    // Drain steering queue: messages user sent mid-execution are injected here
+    // before the next LLM call. Classified upstream as ADDENDUM (context) or INTERRUPT (priority redirect).
+    if (typeof options.pullSteerMessages === 'function') {
+      try {
+        const steerItems = options.pullSteerMessages() || [];
+        for (const item of steerItems) {
+          if (!item || !item.text) continue;
+          const isInterrupt = item.kind === 'interrupt';
+          const wrapped = isInterrupt
+            ? `<user-interrupt iteration="${iteration}">\nThe user issued a mid-execution DIRECTIVE. Reassess immediately: drop in-progress steps that conflict with it. Acknowledge briefly in your next "thought" and act on the new directive.\n\nDirective: ${item.text}\n</user-interrupt>`
+            : `<user-addendum iteration="${iteration}">\nAdditional info from the user (continue current work, integrate this into the ongoing task):\n${item.text}\n</user-addendum>`;
+          messages.push(makeUserMessage(wrapped));
+          onEvent('agentSteered', { iteration, kind: item.kind, text: item.text });
+          logger.info(`[AgentLoop] Steer injected (${item.kind}): ${item.text.slice(0, 120)}`);
+        }
+      } catch (steerErr) {
+        logger.warn(`[AgentLoop] pullSteerMessages failed: ${steerErr.message}`);
+      }
+    }
+
     try {
       // DeepSeek calls are cheap enough that quality wins: keep thinking enabled by default.
       const useThinking = AGENT_THINKING_EVERY_ITER || (AGENT_THINKING_FIRST_ITER && iteration === 1);

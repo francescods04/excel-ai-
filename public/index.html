@@ -302,11 +302,7 @@
     .os-tab:last-child { border-top-right-radius: var(--radius-lg); }
     .os-tab.active { color: var(--accent-green); background: var(--bg-deep); border-color: var(--accent-green); border-bottom: 2px solid var(--accent-green); }
     .os-tab:hover:not(.active) { color: var(--text-primary); }
-    .install-panel {
-      display: none; background: var(--bg-deep); padding: 40px;
-      border: 1px solid var(--border); border-top: none;
-      border-radius: 0 0 var(--radius-lg) var(--radius-lg);
-    }
+    .install-panel { display: none; }
     .install-panel.active { display: block; }
     .install-step {
       display: flex; gap: 16px; align-items: flex-start; margin-bottom: 20px;
@@ -460,77 +456,114 @@
           </div>
         </div>
       </div>
-    </section>
-
     <!-- INSTALL -->
     <section class="install-section" id="installa">
       <div class="container">
         <div class="section-label reveal" data-reveal>// Installazione</div>
         <h2 class="section-title reveal reveal-delay-1" data-reveal">
-          Un comando. 30 secondi. Sei dentro.
+          Scarica. Apri. Sei dentro.
         </h2>
         <p class="section-subtitle reveal reveal-delay-2" data-reveal">
-          Nessuna registrazione, nessun developer mode. Copia e incolla nel terminale.
+          Nessun terminale, nessuna configurazione. Come scaricare un'app.
         </p>
 
         <div class="install-os-tabs reveal reveal-delay-3" data-reveal>
-          <div class="os-tab active" data-os="mac">macOS</div>
-          <div class="os-tab" data-os="windows">Windows</div>
+          <div class="os-tab active" data-os="mac" onclick="switchInstallTab('mac')">macOS</div>
+          <div class="os-tab" data-os="windows" onclick="switchInstallTab('windows')">Windows</div>
         </div>
 
-        <div class="install-panel active" data-os="mac">
-          <div class="install-step">
-            <div class="install-step-num">1</div>
-            <div>
-              <p><strong>Apri il Terminale</strong> (Cmd+Spazio, scrivi "Terminale")</p>
-            </div>
+        <!-- macOS Panel -->
+        <div class="install-panel active" id="panel-mac">
+          <div style="text-align:center;padding:12px 0 28px;">
+            <a href="/public/install-mac.command" download
+               style="display:inline-flex;align-items:center;gap:12px;padding:16px 40px;
+                      background:var(--accent-green);color:var(--bg-deep);border:none;
+                      border-radius:var(--radius);font-size:16px;font-weight:600;
+                      cursor:pointer;text-decoration:none;font-family:inherit;
+                      box-shadow:0 0 30px rgba(0,212,170,0.2);transition:all 0.2s;"
+               onmouseover="this.style.boxShadow='0 0 50px rgba(0,212,170,0.35)'"
+               onmouseout="this.style.boxShadow='0 0 30px rgba(0,212,170,0.2)'">
+              <span style="font-size:22px;">↓</span> Scarica per Mac
+            </a>
+            <p style="margin-top:12px;font-size:12px;color:var(--text-muted);">
+              File .command — 2 KB — Apri il file scaricato con doppio clic
+            </p>
           </div>
-          <div class="install-step">
-            <div class="install-step-num">2</div>
-            <div>
-              <p><strong>Incolla questo comando</strong> e premi Invio:</p>
-              <div class="install-cmd" data-copy="bash <(curl -s https://excel-ai-sigma.vercel.app/install.sh)" onclick="copyInstall(this)">
-                $ bash &lt;(curl -s https://excel-ai-sigma.vercel.app/install.sh)
-                <span class="copy-hint">Clicca per copiare</span>
-              </div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1px;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;">
+            <div style="background:var(--bg-card);padding:20px 16px;text-align:center;">
+              <div style="font-size:24px;margin-bottom:8px;">1</div>
+              <p style="font-size:13px;color:var(--text-secondary);line-height:1.6;"><strong style="color:var(--text-primary);">Scarica</strong> il file<br>qui sopra</p>
             </div>
-          </div>
-          <div class="install-step">
-            <div class="install-step-num">3</div>
-            <div>
-              <p><strong>Apri Excel</strong>. L'add-in appare nella tab <strong>Home</strong> come "Excel AI".</p>
+            <div style="background:var(--bg-card);padding:20px 16px;text-align:center;">
+              <div style="font-size:24px;margin-bottom:8px;">2</div>
+              <p style="font-size:13px;color:var(--text-secondary);line-height:1.6;"><strong style="color:var(--text-primary);">Fai doppio clic</strong><br>sul file scaricato</p>
             </div>
-          </div>
-        </div>
-
-        <div class="install-panel" data-os="windows">
-          <div class="install-step">
-            <div class="install-step-num">1</div>
-            <div>
-              <p><strong>Apri PowerShell</strong> (tasto Win, scrivi "powershell", tasto destro &rarr; Esegui come amministratore <em>opzionale</em>)</p>
-            </div>
-          </div>
-          <div class="install-step">
-            <div class="install-step-num">2</div>
-            <div>
-              <p><strong>Incolla questo comando</strong> e premi Invio:</p>
-              <div class="install-cmd" data-copy="irm https://excel-ai-sigma.vercel.app/install.ps1 | iex" onclick="copyInstall(this)">
-                PS&gt; irm https://excel-ai-sigma.vercel.app/install.ps1 | iex
-                <span class="copy-hint">Clicca per copiare</span>
-              </div>
-            </div>
-          </div>
-          <div class="install-step">
-            <div class="install-step-num">3</div>
-            <div>
-              <p><strong>Apri Excel</strong>. Vai su <strong>Inserisci &rarr; I miei componenti aggiuntivi &rarr; Cartella condivisa</strong> e seleziona "Excel AI".</p>
+            <div style="background:var(--bg-card);padding:20px 16px;text-align:center;">
+              <div style="font-size:24px;margin-bottom:8px;">3</div>
+              <p style="font-size:13px;color:var(--text-secondary);line-height:1.6;"><strong style="color:var(--text-primary);">Apri Excel</strong><br>add-in nella tab Home</p>
             </div>
           </div>
         </div>
 
-        <p style="margin-top:20px;font-size:12px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;text-align:center;">
-          Dopo l&rsquo;installazione: <strong style="color:var(--accent-green);">registrati con la tua email</strong> per attivare l&rsquo;account gratuito (50 richieste/mese).
+        <!-- Windows Panel -->
+        <div class="install-panel" id="panel-win">
+          <div style="text-align:center;padding:12px 0 28px;">
+            <a href="/public/install-win.bat" download
+               style="display:inline-flex;align-items:center;gap:12px;padding:16px 40px;
+                      background:var(--accent-green);color:var(--bg-deep);border:none;
+                      border-radius:var(--radius);font-size:16px;font-weight:600;
+                      cursor:pointer;text-decoration:none;font-family:inherit;
+                      box-shadow:0 0 30px rgba(0,212,170,0.2);transition:all 0.2s;"
+               onmouseover="this.style.boxShadow='0 0 50px rgba(0,212,170,0.35)'"
+               onmouseout="this.style.boxShadow='0 0 30px rgba(0,212,170,0.2)'">
+              <span style="font-size:22px;">↓</span> Scarica per Windows
+            </a>
+            <p style="margin-top:12px;font-size:12px;color:var(--text-muted);">
+              File .bat — 2 KB — Fai doppio clic sul file scaricato
+            </p>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1px;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;">
+            <div style="background:var(--bg-card);padding:20px 16px;text-align:center;">
+              <div style="font-size:24px;margin-bottom:8px;">1</div>
+              <p style="font-size:13px;color:var(--text-secondary);line-height:1.6;"><strong style="color:var(--text-primary);">Scarica</strong> il file<br>qui sopra</p>
+            </div>
+            <div style="background:var(--bg-card);padding:20px 16px;text-align:center;">
+              <div style="font-size:24px;margin-bottom:8px;">2</div>
+              <p style="font-size:13px;color:var(--text-secondary);line-height:1.6;"><strong style="color:var(--text-primary);">Fai doppio clic</strong><br>sul file .bat</p>
+            </div>
+            <div style="background:var(--bg-card);padding:20px 16px;text-align:center;">
+              <div style="font-size:24px;margin-bottom:8px;">3</div>
+              <p style="font-size:13px;color:var(--text-secondary);line-height:1.6;"><strong style="color:var(--text-primary);">Apri Excel</strong><br>Inserisci → Componenti aggiuntivi</p>
+            </div>
+          </div>
+        </div>
+
+        <p style="margin-top:24px;font-size:12px;color:var(--text-muted);text-align:center;line-height:1.8;">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-muted);">Power user?</span>
+          <a href="#terminal-install" onclick="toggleTerminal(event)" style="color:var(--accent-green);text-decoration:none;margin-left:6px;">Usa il terminale →</a>
+          &nbsp;&middot;&nbsp;
+          Dopo l'installazione <strong style="color:var(--accent-green);">registrati con la tua email</strong> per 50 richieste gratuite al mese.
         </p>
+
+        <div id="terminal-install" style="display:none;margin-top:20px;padding:24px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--accent-green);margin-bottom:12px;">// Terminale (avanzato)</div>
+          <div class="install-os-tabs" style="margin-top:0;">
+            <div class="os-tab active" data-os="mac" onclick="switchTermTab('mac')">macOS</div>
+            <div class="os-tab" data-os="windows" onclick="switchTermTab('windows')">Windows</div>
+          </div>
+          <div class="install-panel active" id="term-mac" style="border:none;background:transparent;padding:16px 0;">
+            <div class="install-cmd" data-copy="bash <(curl -s https://excel-ai-sigma.vercel.app/install.sh)" onclick="copyInstall(this)">
+              $ bash &lt;(curl -s https://excel-ai-sigma.vercel.app/install.sh)
+              <span class="copy-hint">Clicca per copiare</span>
+            </div>
+          </div>
+          <div class="install-panel" id="term-win" style="border:none;background:transparent;padding:16px 0;">
+            <div class="install-cmd" data-copy="irm https://excel-ai-sigma.vercel.app/install.ps1 | iex" onclick="copyInstall(this)">
+              PS&gt; irm https://excel-ai-sigma.vercel.app/install.ps1 | iex
+              <span class="copy-hint">Clicca per copiare</span>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -779,23 +812,33 @@
       document.getElementById('installa').scrollIntoView({ behavior: 'smooth' });
     });
 
-    // ── OS Detection ──
-    (function initInstallTabs() {
-      const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
-      const defaultOs = isMac ? 'mac' : 'windows';
-
-      document.querySelectorAll('.os-tab').forEach(tab => {
-        if (tab.dataset.os === defaultOs) {
-          tab.click();
-        }
-        tab.addEventListener('click', () => {
-          document.querySelectorAll('.os-tab').forEach(t => t.classList.remove('active'));
-          document.querySelectorAll('.install-panel').forEach(p => p.classList.remove('active'));
-          tab.classList.add('active');
-          const panel = document.querySelector(`.install-panel[data-os="${tab.dataset.os}"]`);
-          if (panel) panel.classList.add('active');
-        });
+    // ── OS Detection & Tab Switching ──
+    function switchInstallTab(os) {
+      document.querySelectorAll('#installa .os-tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.os === os);
       });
+      document.getElementById('panel-mac').classList.toggle('active', os === 'mac');
+      document.getElementById('panel-win').classList.toggle('active', os === 'windows');
+    }
+
+    function switchTermTab(os) {
+      document.querySelectorAll('#terminal-install .os-tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.os === os);
+      });
+      document.getElementById('term-mac').classList.toggle('active', os === 'mac');
+      document.getElementById('term-win').classList.toggle('active', os === 'windows');
+    }
+
+    function toggleTerminal(e) {
+      e.preventDefault();
+      const el = document.getElementById('terminal-install');
+      el.style.display = el.style.display === 'none' ? 'block' : 'none';
+      if (el.style.display === 'block') el.scrollIntoView({ behavior: 'smooth' });
+    }
+
+    (function initOS() {
+      const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+      switchInstallTab(isMac ? 'mac' : 'windows');
     })();
 
     // ── Copy command ──
