@@ -21,6 +21,9 @@ const { buildUndoActions, summarizeUndo } = require('./undo');
 const { isPrefetchSafeTask } = require('./prefetchPolicy');
 const { LIMITS, assertActionBatchWithinLimits, allSettledLimit } = require('./safetyLimits');
 const { track } = require('../telemetry/tracker');
+const { triageObjective } = require('../agents/triage');
+const { generateBlueprint } = require('../agents/architect');
+const { runParallelBlueprint } = require('../agents/parallelOrchestrator');
 
 const TURNS_DIR = path.join(__dirname, '..', 'turns');
 
@@ -1278,8 +1281,124 @@ async function planTurn(turnId) {
         appendLog(turnId, `Turn parent ${turn.parentTurnId} non trovato. Procedo con il solo contesto corrente.`, 'warn');
       }
     }
-    const strategy = turn.strategy || chooseTurnStrategy(turn.objective, turn.context, turn.parentTurnId);
+    // AI-driven triage: ask LLM to classify complexity and recommend a mode.
+    // Falls back safely to legacy heuristic routing if triage is unavailable.
+    let strategy;
+    const triageEnabled = process.env.DISABLE_TRIAGE !== 'true';
+    if (triageEnabled && !turn.strategy) {
+      appendLog(turnId, 'Triage AI: classifico complessità del task...', 'info');
+      const triage = await triageObjective({
+        objective: turn.objective,
+        context: turn.context || {},
+        parentSummary: parentResults ? `Parent has ${Object.keys(parentResults).length} task results.` : ''
+      });
+      appendLog(turnId, `Triage: ${triage.complexity}, mode=${triage.mode}, ~${triage.estimated_iterations} iter (${triage.reasoning})`, 'info');
+      streaming.sendEvent(turnId, 'triageDecision', triage);
+
+      if (triage.mode === 'architect_then_parallel') {
+        strategy = {
+          mode: 'architect_parallel',
+          label: 'Architect + parallel workers',
+          reason: triage.reasoning,
+          promptVariant: 'fast',
+          maxIterations: triage.estimated_iterations,
+          allowEscalation: false,
+          triage
+        };
+      } else if (triage.mode === 'single_deep_plan') {
+        strategy = {
+          mode: 'planned_dag',
+          label: 'Deep planned DAG (triage)',
+          reason: triage.reasoning,
+          promptVariant: 'default',
+          allowEscalation: false,
+          triage
+        };
+      } else {
+        // single_agent: use existing chooser but let triage override max iterations
+        strategy = chooseTurnStrategy(turn.objective, turn.context, turn.parentTurnId);
+        strategy.maxIterations = Math.max(strategy.maxIterations || 45, triage.estimated_iterations);
+        strategy.triage = triage;
+      }
+    } else {
+      strategy = turn.strategy || chooseTurnStrategy(turn.objective, turn.context, turn.parentTurnId);
+    }
     const enrichedContext = buildTurnExecutionContext(turn);
+
+    // architect_parallel: generate blueprint NOW so user can see and approve the slice DAG.
+    if (strategy.mode === 'architect_parallel') {
+      emitPlanningTodos(turnId, 'llm');
+      appendLog(turnId, `Router: architect + parallel workers. Genero blueprint...`);
+      let blueprint;
+      try {
+        blueprint = await generateBlueprint({
+          objective: turn.objective,
+          context: enrichedContext,
+          triage: strategy.triage || null
+        });
+      } catch (err) {
+        appendLog(turnId, `Architect fallita (${err.message}). Fallback su deep planner sequenziale.`, 'warn');
+        strategy = {
+          mode: 'planned_dag',
+          label: 'Deep planned DAG (architect fallback)',
+          reason: `architect_failed: ${err.message}`,
+          promptVariant: 'default',
+          allowEscalation: false
+        };
+      }
+
+      if (blueprint) {
+        emitPlanningTodos(turnId, 'review');
+        // Convert blueprint to plan.tasks for UI compatibility.
+        const tasks = blueprint.slices.map(s => ({
+          id: s.id,
+          agent: 'ai',
+          tool: 'orchestrator.slice',
+          description: s.title,
+          deps: s.deps,
+          requiresApproval: false,
+          slice: s
+        }));
+        const plan = {
+          objective: blueprint.objective_restated || turn.objective,
+          tasks,
+          meta: {
+            strategyMode: strategy.mode,
+            strategyLabel: strategy.label,
+            blueprint,
+            triage: strategy.triage
+          }
+        };
+        const updatedTurn = _getTurnRef(turnId);
+        updatedTurn.plan = plan;
+        updatedTurn.strategy = strategy;
+        updatedTurn.blueprint = blueprint;
+        updatedTurn.status = 'awaiting_approval';
+        saveTurn(updatedTurn);
+
+        const completedPlanItem = upsertItem(turnId, {
+          id: 'plan',
+          type: 'plan',
+          title: 'Blueprint architect',
+          status: 'completed',
+          objective: plan.objective,
+          tasks,
+          strategy: plan.meta
+        });
+        emitPlanUpdated(updatedTurn);
+        emitItemCompleted(turnId, completedPlanItem);
+        const autoApprove = shouldAutoApprovePlan(plan, strategy);
+        appendLog(turnId, `Blueprint pronto: ${tasks.length} slice in ${blueprint.waves.length} wave.${autoApprove ? ' Auto-approvazione.' : ' Attendo conferma.'}`);
+        emitPlanningTodos(turnId, autoApprove ? 'queued' : 'awaiting_approval');
+        stopPlanningHeartbeat();
+        if (autoApprove) {
+          approveTurn(turnId);
+        } else {
+          emitTurnAwaitingApproval(updatedTurn);
+        }
+        return;
+      }
+    }
 
     if (strategy.mode === 'agent_loop') {
       emitPlanningTodos(turnId, 'llm');
@@ -1990,10 +2109,137 @@ async function executeTurn(turnId) {
   if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
 
   const strategy = turn.strategy || chooseTurnStrategy(turn.objective, turn.context, turn.parentTurnId);
+  if (strategy.mode === 'architect_parallel') {
+    return executeArchitectParallelTurn(turnId);
+  }
   if (strategy.mode === 'agent_loop') {
     return executeAgentLoopTurn(turnId);
   }
   return executePlannedTurn(turnId);
+}
+
+async function executeArchitectParallelTurn(turnId) {
+  const turn = _getTurnRef(turnId);
+  if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
+  const blueprint = turn.blueprint;
+  if (!blueprint) {
+    throw new Error('executeArchitectParallelTurn: blueprint missing on turn');
+  }
+
+  const orchestratorTask = {
+    id: 'orchestrator',
+    agent: 'ai',
+    tool: 'orchestrator',
+    description: 'Architect parallel workers'
+  };
+  const runtime = buildRuntimeHelpers(turnId, orchestratorTask);
+  const context = buildTurnExecutionContext(turn);
+  const startedAt = Date.now();
+
+  // Pre-register a UI item per slice so the user sees each slice progress live.
+  const sliceItemIds = new Map();
+  for (const slice of blueprint.slices) {
+    const itemId = `slice-${slice.id}`;
+    sliceItemIds.set(slice.id, itemId);
+    const item = upsertItem(turnId, {
+      id: itemId,
+      type: 'taskExecution',
+      taskId: slice.id,
+      agent: 'ai',
+      tool: 'orchestrator.slice',
+      description: slice.title,
+      deps: slice.deps || [],
+      status: 'pending'
+    });
+    emitItemStarted(turnId, item);
+  }
+
+  appendLog(turnId, `Avvio orchestratore: ${blueprint.slices.length} slice in ${blueprint.waves.length} wave (max ${process.env.PARALLEL_ORCHESTRATOR_MAX || 4} parallele).`);
+
+  const onEvent = (eventType, data = {}) => {
+    if (eventType === 'sliceStarted') {
+      const itemId = sliceItemIds.get(data.sliceId);
+      const item = upsertItem(turnId, { id: itemId, type: 'taskExecution', taskId: data.sliceId, status: 'inProgress' });
+      emitItemStarted(turnId, item);
+      appendLog(turnId, `[slice ${data.sliceId}] avviato (${data.title || ''})`);
+      return;
+    }
+    if (eventType === 'sliceCompleted') {
+      const itemId = sliceItemIds.get(data.sliceId);
+      const item = upsertItem(turnId, { id: itemId, type: 'taskExecution', taskId: data.sliceId, status: 'completed', result: { summary: data.summary } });
+      emitItemCompleted(turnId, item);
+      appendLog(turnId, `[slice ${data.sliceId}] completato in ${data.elapsedMs}ms — ${(data.summary || '').slice(0, 100)}`);
+      return;
+    }
+    if (eventType === 'sliceFailed') {
+      const itemId = sliceItemIds.get(data.sliceId);
+      const item = upsertItem(turnId, { id: itemId, type: 'taskExecution', taskId: data.sliceId, status: 'error', error: data.error || data.status });
+      emitItemCompleted(turnId, item);
+      appendLog(turnId, `[slice ${data.sliceId}] fallito: ${data.error || data.status}`, 'error');
+      return;
+    }
+    if (eventType === 'sliceSkipped') {
+      const itemId = sliceItemIds.get(data.sliceId);
+      const item = upsertItem(turnId, { id: itemId, type: 'taskExecution', taskId: data.sliceId, status: 'error', error: `skipped (${data.reason})` });
+      emitItemCompleted(turnId, item);
+      appendLog(turnId, `[slice ${data.sliceId}] saltato: ${data.reason}`, 'warn');
+      return;
+    }
+    if (eventType === 'sliceEvent') {
+      // forward inner worker events as compact log lines
+      const inner = data.event;
+      const inn = data.data || {};
+      if (inner === 'thought') {
+        emitEphemeralLog(turnId, `[slice ${data.sliceId} / loop ${inn.iteration || '?'}] ${inn.tool || 'step'}: ${(inn.thought || '').slice(0, 140)}`);
+      } else if (inner === 'iterationError') {
+        appendLog(turnId, `[slice ${data.sliceId}] iter error: ${inn.error}`, 'warn');
+      }
+      return;
+    }
+    if (eventType === 'blueprintCompleted') {
+      const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+      appendLog(turnId, `Orchestratore concluso in ${elapsed}s — succeeded:${data.succeeded} failed:${data.failed} skipped:${data.skipped}`);
+    }
+  };
+
+  let summary;
+  try {
+    summary = await runParallelBlueprint({
+      blueprint,
+      turnId,
+      context,
+      runtimeHelpers: {
+        requestClientTool: runtime.requestClientTool,
+        requestQuestion: (questions) => runtime.requestQuestion(questions, {
+          title: 'Scelta richiesta dal worker',
+          prompt: 'Seleziona per far proseguire la slice in esecuzione.'
+        })
+      },
+      onEvent,
+      pullSteerMessages: () => drainSteerQueue(turnId)
+    });
+  } catch (err) {
+    return failTurn(turnId, `Orchestrator error: ${err.message}`, {
+      id: 'orchestrator',
+      type: 'taskExecution',
+      title: 'Architect parallel workers'
+    });
+  }
+
+  const turnRef = _getTurnRef(turnId);
+  turnRef.orchestratorSummary = summary;
+  saveTurn(turnRef);
+
+  if (summary.failed > 0 || summary.skipped > 0) {
+    const partial = `Completati ${summary.succeeded}/${summary.total} slice. Fallite: ${summary.failed}, saltate: ${summary.skipped}.`;
+    appendLog(turnId, partial, summary.succeeded === 0 ? 'error' : 'warn');
+    const finalStatus = summary.succeeded === 0 ? 'error' : 'completed';
+    setTurnStatus(turnId, finalStatus, finalStatus === 'error' ? partial : undefined);
+  } else {
+    setTurnStatus(turnId, 'completed');
+  }
+  emitTurnCompleted(_getTurnRef(turnId));
+  return _getTurnRef(turnId);
 }
 
 function startTurn(message, context, parentTurnId = null, options = {}) {

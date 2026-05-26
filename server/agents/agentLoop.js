@@ -1053,8 +1053,11 @@ async function runAgentLoop(objective, context, options = {}) {
     }
   }
 
+  const systemPromptAddendum = typeof options.systemPromptAddendum === 'string' && options.systemPromptAddendum.trim()
+    ? '\n\n' + options.systemPromptAddendum.trim()
+    : '';
   const messages = options.resumeMessages || [
-    { role: 'system', content: systemPromptForRun + (skillReminder ? '\n\n' + skillReminder : '') },
+    { role: 'system', content: systemPromptForRun + (skillReminder ? '\n\n' + skillReminder : '') + systemPromptAddendum },
     makeUserMessage(userPrompt)
   ];
 

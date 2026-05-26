@@ -16,7 +16,7 @@ import { hideRequestPanel, showPermissionRequest, showUserInputRequest, showQues
 import { getExcelContext } from './excel/context.js';
 import { worksheetExists, readWorkbookSnapshot, readSheetSnapshot, readRangeSnapshot, readRangeAsCsv, readNamedRanges, readMultiRangeBatch } from './excel/readers.js';
 import { enqueueActions, executeActions as execActions, undoLastSnapshot, waitForActionQueueIdle } from './excel/writers.js';
-import { startTurn, approveTurnExecution, postTurnResponse, postTurnResponseBatch, postTurnActionResult, getTurn, getErrorMessageFromResponse } from './api/turn.js';
+import { startTurn, approveTurnExecution, postTurnResponse, postTurnResponseBatch, postTurnActionResult, getTurn, steerTurn, getErrorMessageFromResponse } from './api/turn.js';
 import { startAgent, resumeAgentWithResponse, postAgentClientResponse } from './api/agent.js';
 import { loadModelConfig, changeModel, warmupLLM } from './api/config.js';
 import { init as initAuth, getAccessToken, apiCall } from './auth/auth.js';
@@ -211,7 +211,7 @@ async function init() {
 
 async function handleSend() {
   const text = userInput.value.trim();
-  if (!text || state.isProcessing) return;
+  if (!text) return;
 
   // If agent is paused waiting for a response, route this message as the answer
   if (state.isAgentPaused && state.pausedAgentId) {
@@ -233,10 +233,27 @@ async function handleSend() {
     return;
   }
 
+  // STEERING: if a turn is running, inject this message into the running loop
+  // instead of starting a new turn. Server classifies as ADDENDUM (continue) or INTERRUPT (redirect).
+  if (state.isProcessing && state.currentTurnId) {
+    addMessage(text, 'user');
+    userInput.value = '';
+    try {
+      const result = await steerTurn(state.currentTurnId, text);
+      const label = result.kind === 'interrupt' ? 'Interrupt inviato all\'agent' : 'Info aggiuntiva inviata all\'agent';
+      addLog(`${label}: ${text.slice(0, 100)}`);
+    } catch (err) {
+      addMessage(`Errore steering: ${err.message}`, 'error');
+    }
+    return;
+  }
+
+  if (state.isProcessing) return;
+
   addMessage(text, 'user');
   userInput.value = '';
   state.isProcessing = true;
-  sendBtn.disabled = true;
+  // Keep sendBtn enabled so user can steer (add info / interrupt) while agent runs.
   showTypingIndicator();
 
   try {
@@ -660,6 +677,21 @@ function openTurnEventStream(turnId, planMsgId) {
     src.addEventListener('turnAwaitingApproval', () => {
       addLog('Piano pronto. In attesa della tua conferma per eseguire.');
       showApproveBar();
+    });
+
+    src.addEventListener('steerQueued', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        addLog(`Steering ${data.kind === 'interrupt' ? '[INTERRUPT]' : '[ADDENDUM]'} accodato: ${(data.text || '').slice(0, 100)}`);
+      } catch (err) {}
+    });
+
+    src.addEventListener('agentSteered', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        const tag = data.kind === 'interrupt' ? 'Interrupt applicato' : 'Info aggiuntiva applicata';
+        addLog(`[loop ${data.iteration || '?'}] ${tag}: ${(data.text || '').slice(0, 100)}`);
+      } catch (err) {}
     });
 
     src.addEventListener('itemStarted', (e) => {
