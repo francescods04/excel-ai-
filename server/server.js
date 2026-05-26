@@ -137,6 +137,8 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+app.get('/health', (req, res) => res.redirect('/api/health'));
+
 /* ---------- Office Add-in Manifest (dinamico) ---------- */
 app.get('/manifest.xml', (req, res) => {
   const baseUrl = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
