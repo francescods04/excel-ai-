@@ -39,6 +39,10 @@ server/turns/turn-*.json
 server/memory/
 server/metrics/
 
+# SQLite database
+data/*
+!data/.gitkeep
+
 # Wiki raw PDFs (large binaries)
 docs/wiki/raw/*.pdf
 
