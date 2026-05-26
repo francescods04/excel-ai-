@@ -1992,7 +1992,7 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       return r.data || r;
     }
     case 'read_skill': {
-      const skillData = readSkill(params.name);
+      const skillData = readSkill(params && params.name);
       return skillData;
     }
     case 'update_instructions': {

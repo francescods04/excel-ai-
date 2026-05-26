@@ -1617,7 +1617,7 @@ registerTool('research.competitors', async (params) => {
 const { readSkill } = require('../skills/loader');
 
 registerTool('skill.read', async (params) => {
-  const data = readSkill(params.name);
+  const data = readSkill(params && params.name);
   return { data, actions: [] };
 }, {
   description: 'Load a skill document on-demand (DCF, LBO, WACC, comps, 3-statement, audit, clean-data). Returns structured instructions and formulas.',

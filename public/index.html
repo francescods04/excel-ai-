@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="it" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Excel AI &mdash; Assistente intelligente per professionisti finanziari</title>
+  <link rel="icon" type="image/svg+xml" href="/public/favicon.svg">
+  <meta name="description" content="L'assistente AI che lavora direttamente nei tuoi fogli Excel. Progettato per commercialisti, CPA, analisti finanziari e controller.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg-deep: #06090d;
+      --bg-surface: #0c1118;
+      --bg-card: #111820;
+      --bg-raised: #16202c;
+      --border: #1e2a36;
+      --border-light: #263340;
+      --text-primary: #cdd6de;
+      --text-secondary: #7e8c9e;
+      --text-muted: #4a5666;
+      --accent-green: #00d4aa;
+      --accent-green-glow: rgba(0, 212, 170, 0.15);
+      --accent-amber: #f0a040;
+      --accent-amber-glow: rgba(240, 160, 64, 0.12);
+      --accent-red: #ff5c6c;
+      --accent-blue: #4da6ff;
+      --radius-sm: 4px;
+      --radius: 8px;
+      --radius-lg: 12px;
+    }
+
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: 'DM Sans', -apple-system, sans-serif;
+      background: var(--bg-deep);
+      color: var(--text-primary);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+
+    /* ── Background Pattern ── */
+    .bg-grid {
+      position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      background-image:
+        radial-gradient(circle at 50% 0%, rgba(0,212,170,0.04) 0%, transparent 60%),
+        radial-gradient(circle at 80% 20%, rgba(240,160,64,0.03) 0%, transparent 50%);
+    }
+    .bg-grid::after {
+      content: '';
+      position: absolute; inset: 0;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.015) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px);
+      background-size: 60px 60px;
+      mask-image: radial-gradient(ellipse at 50% 0%, black 30%, transparent 70%);
+    }
+
+    /* ── Noise Texture ── */
+    .noise {
+      position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0.03;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-size: 256px 256px;
+    }
+
+    /* ── Layout ── */
+    .container { max-width: 1200px; margin: 0 auto; padding: 0 24px; position: relative; z-index: 1; }
+    section { padding: 100px 0; position: relative; z-index: 1; }
+
+    /* ── Header ── */
+    header {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      padding: 16px 24px;
+      background: rgba(6, 9, 13, 0.85);
+      backdrop-filter: blur(20px) saturate(180%);
+      border-bottom: 1px solid var(--border);
+      transition: background 0.3s;
+    }
+    header.scrolled { background: rgba(6, 9, 13, 0.95); }
+    .header-inner {
+      max-width: 1200px; margin: 0 auto;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .logo {
+      display: flex; align-items: center; gap: 10px;
+      text-decoration: none; color: var(--text-primary);
+    }
+    .logo-mark {
+      width: 32px; height: 32px; background: var(--accent-green);
+      border-radius: var(--radius-sm);
+      display: flex; align-items: center; justify-content: center;
+      font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 600;
+      color: var(--bg-deep); letter-spacing: -1px;
+    }
+    .logo-text {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px; font-weight: 500; letter-spacing: 0.5px;
+      color: var(--text-secondary);
+    }
+    .nav-links { display: flex; gap: 28px; align-items: center; }
+    .nav-links a {
+      color: var(--text-secondary); text-decoration: none;
+      font-size: 13px; font-weight: 500; letter-spacing: 0.5px; text-transform: uppercase;
+      transition: color 0.2s;
+    }
+    .nav-links a:hover { color: var(--text-primary); }
+    .btn-nav {
+      padding: 8px 20px; border: 1px solid var(--accent-green);
+      color: var(--accent-green); border-radius: var(--radius);
+      font-size: 13px; font-weight: 600; text-decoration: none;
+      transition: all 0.2s;
+    }
+    .btn-nav:hover { background: var(--accent-green); color: var(--bg-deep); }
+
+    /* ── Hero ── */
+    .hero { padding-top: 160px; padding-bottom: 80px; text-align: center; }
+    .hero-badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 6px 16px; border: 1px solid var(--border-light);
+      border-radius: 100px; font-size: 12px; color: var(--text-secondary);
+      font-family: 'JetBrains Mono', monospace; letter-spacing: 0.5px;
+      margin-bottom: 32px;
+    }
+    .hero-badge .dot {
+      width: 6px; height: 6px; background: var(--accent-green);
+      border-radius: 50%; animation: pulse 2s infinite;
+    }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .hero h1 {
+      font-family: 'Cormorant Garamond', serif;
+      font-size: clamp(48px, 8vw, 80px); font-weight: 500;
+      line-height: 1.08; letter-spacing: -0.02em; color: #e8edf2;
+      max-width: 800px; margin: 0 auto 24px;
+    }
+    .hero h1 em { font-style: italic; color: var(--accent-green); }
+    .hero h1 span { display: block; font-size: 0.35em; font-family: 'JetBrains Mono', monospace; font-weight: 400; color: var(--text-muted); letter-spacing: 0.05em; margin-top: 12px; font-style: normal; }
+    .hero p {
+      max-width: 560px; margin: 0 auto 40px;
+      color: var(--text-secondary); font-size: 17px; line-height: 1.7;
+    }
+    .hero-cta {
+      display: flex; gap: 14px; justify-content: center; flex-wrap: wrap;
+    }
+    .btn-primary {
+      padding: 14px 36px; background: var(--accent-green);
+      color: var(--bg-deep); border: none; border-radius: var(--radius);
+      font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none;
+      font-family: inherit; transition: all 0.2s;
+      box-shadow: 0 0 30px rgba(0, 212, 170, 0.2);
+    }
+    .btn-primary:hover { box-shadow: 0 0 50px rgba(0, 212, 170, 0.35); transform: translateY(-1px); }
+    .btn-secondary {
+      padding: 14px 36px; background: transparent;
+      color: var(--text-primary); border: 1px solid var(--border-light);
+      border-radius: var(--radius); font-size: 15px; font-weight: 500; text-decoration: none;
+      font-family: inherit; transition: all 0.2s;
+    }
+    .btn-secondary:hover { background: var(--bg-card); border-color: var(--text-muted); }
+
+    /* ── Hero Metrics ── */
+    .hero-metrics {
+      display: flex; gap: 48px; justify-content: center; margin-top: 64px;
+      padding-top: 48px; border-top: 1px solid var(--border);
+    }
+    .metric { text-align: center; }
+    .metric-value {
+      font-family: 'Cormorant Garamond', serif;
+      font-size: 40px; font-weight: 600; line-height: 1;
+      color: #e8edf2;
+    }
+    .metric-value .unit {
+      font-size: 20px; color: var(--accent-green);
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .metric-label {
+      font-size: 11px; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 1.5px; margin-top: 6px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* ── Section Headers ── */
+    .section-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px; color: var(--accent-green); letter-spacing: 2px;
+      text-transform: uppercase; margin-bottom: 16px;
+    }
+    .section-title {
+      font-family: 'Cormorant Garamond', serif;
+      font-size: clamp(32px, 5vw, 48px); font-weight: 500;
+      line-height: 1.15; letter-spacing: -0.02em; color: #e8edf2;
+      max-width: 600px; margin-bottom: 16px;
+    }
+    .section-subtitle {
+      color: var(--text-secondary); font-size: 16px; line-height: 1.7;
+      max-width: 500px;
+    }
+
+    /* ── How it Works (Ledger Style) ── */
+    .ledger-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin-top: 56px; }
+    .ledger-item {
+      background: var(--bg-card); padding: 40px 32px;
+      border: 1px solid var(--border);
+      transition: border-color 0.3s, background 0.3s;
+    }
+    .ledger-item:hover { border-color: var(--border-light); background: var(--bg-raised); }
+    .ledger-num {
+      font-family: 'Cormorant Garamond', serif;
+      font-size: 56px; color: var(--accent-green); opacity: 0.3; line-height: 1;
+      margin-bottom: 16px;
+    }
+    .ledger-item h4 {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px; font-weight: 500; color: var(--text-primary);
+      text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px;
+    }
+    .ledger-item p { color: var(--text-secondary); font-size: 14px; line-height: 1.65; }
+
+    /* ── Capabilities Grid ── */
+    .capabilities {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 24px; margin-top: 56px;
+    }
+    .cap-card {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); padding: 32px;
+      transition: border-color 0.3s;
+    }
+    .cap-card:hover { border-color: var(--accent-green); }
+    .cap-icon {
+      width: 40px; height: 40px; border-radius: var(--radius-sm);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px; margin-bottom: 20px;
+    }
+    .cap-card h4 { font-size: 16px; font-weight: 600; margin-bottom: 8px; color: #e8edf2; }
+    .cap-card p { color: var(--text-secondary); font-size: 14px; line-height: 1.65; }
+
+    /* ── Terminal Preview ── */
+    .terminal-section { background: var(--bg-surface); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+    .terminal-window {
+      background: #020408; border: 1px solid var(--border);
+      border-radius: var(--radius-lg); overflow: hidden;
+      max-width: 720px; margin: 48px auto 0;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    }
+    .terminal-bar {
+      background: var(--bg-raised); padding: 10px 16px;
+      display: flex; align-items: center; gap: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .terminal-dot { width: 10px; height: 10px; border-radius: 50%; }
+    .terminal-dot:nth-child(1) { background: #ff5c6c; }
+    .terminal-dot:nth-child(2) { background: #f0a040; }
+    .terminal-dot:nth-child(3) { background: #00d4aa; }
+    .terminal-title {
+      margin-left: 12px; font-family: 'JetBrains Mono', monospace;
+      font-size: 11px; color: var(--text-muted);
+    }
+    .terminal-body {
+      padding: 24px; font-family: 'JetBrains Mono', monospace;
+      font-size: 13px; line-height: 1.8;
+    }
+    .terminal-prompt { color: var(--accent-green); }
+    .terminal-cmd { color: var(--text-primary); }
+    .terminal-output { color: var(--text-secondary); }
+    .terminal-highlight { color: var(--accent-amber); }
+    .terminal-cursor {
+      display: inline-block; width: 8px; height: 16px;
+      background: var(--accent-green); vertical-align: middle;
+      margin-left: 2px; animation: blink 1s step-end infinite;
+    }
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+    /* ── For Whom ── */
+    .audiences { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; margin-top: 56px; }
+    .audience-card {
+      background: var(--bg-card); padding: 32px 24px;
+      border: 1px solid var(--border); text-align: center;
+      transition: background 0.3s;
+    }
+    .audience-card:hover { background: var(--bg-raised); }
+    .audience-role {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px; color: var(--accent-green); letter-spacing: 1.5px;
+      text-transform: uppercase; margin-bottom: 12px;
+    }
+    .audience-title {
+      font-family: 'Cormorant Garamond', serif;
+      font-size: 24px; font-weight: 500; color: #e8edf2; margin-bottom: 10px;
+    }
+    .audience-card p { color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
+
+    /* ── Trust ── */
+    .trust-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; margin-top: 56px; }
+    .trust-item {
+      background: var(--bg-card); padding: 36px 32px; border: 1px solid var(--border);
+    }
+    .trust-item h4 { font-size: 15px; font-weight: 600; margin-bottom: 8px; color: #e8edf2; }
+    .trust-item p { color: var(--text-secondary); font-size: 14px; line-height: 1.65; }
+
+    /* ── CTA Section ── */
+    .cta-section { text-align: center; }
+    .cta-box {
+      background: var(--bg-card); border: 1px solid var(--accent-green);
+      border-radius: var(--radius-lg); padding: 56px 32px; max-width: 640px; margin: 0 auto;
+      box-shadow: 0 0 60px rgba(0, 212, 170, 0.08);
+    }
+    .cta-box h2 {
+      font-family: 'Cormorant Garamond', serif;
+      font-size: 36px; font-weight: 500; color: #e8edf2; margin-bottom: 12px;
+    }
+    .cta-box p { color: var(--text-secondary); font-size: 15px; margin-bottom: 28px; }
+
+    /* ── Footer ── */
+    footer {
+      padding: 48px 0; border-top: 1px solid var(--border);
+      text-align: center;
+    }
+    footer p { color: var(--text-muted); font-size: 12px; font-family: 'JetBrains Mono', monospace; }
+    footer a { color: var(--text-secondary); text-decoration: none; }
+    footer a:hover { color: var(--accent-green); }
+
+    /* ── Responsive ── */
+    @media (max-width: 768px) {
+      .ledger-steps, .audiences { grid-template-columns: 1fr; }
+      .trust-grid { grid-template-columns: 1fr; }
+      .hero-metrics { gap: 24px; flex-wrap: wrap; }
+      .hero h1 { font-size: 36px; }
+      .nav-links { display: none; }
+    }
+
+    /* ── Scroll Reveal ── */
+    .reveal {
+      opacity: 0; transform: translateY(30px);
+      transition: opacity 0.7s cubic-bezier(0.22, 0.61, 0.36, 1),
+                  transform 0.7s cubic-bezier(0.22, 0.61, 0.36, 1);
+    }
+    .reveal.visible { opacity: 1; transform: translateY(0); }
+    .reveal-delay-1 { transition-delay: 0.1s; }
+    .reveal-delay-2 { transition-delay: 0.2s; }
+    .reveal-delay-3 { transition-delay: 0.3s; }
+    .reveal-delay-4 { transition-delay: 0.4s; }
+    .reveal-delay-5 { transition-delay: 0.5s; }
+  </style>
+</head>
+<body>
+  <div class="bg-grid"></div>
+  <div class="noise"></div>
+
+  <header id="header">
+    <div class="header-inner">
+      <a href="/" class="logo">
+        <div class="logo-mark">E</div>
+        <span class="logo-text">EXCEL AGENT</span>
+      </a>
+      <nav class="nav-links">
+        <a href="#come-funziona">Come funziona</a>
+        <a href="#funzionalita">Funzionalit&agrave;</a>
+        <a href="#per-chi">Per chi</a>
+        <a href="#sicurezza">Sicurezza</a>
+        <a href="#inizia" class="btn-nav">Inizia gratis</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <!-- HERO -->
+    <section class="hero reveal" data-reveal>
+      <div class="container">
+        <div class="hero-badge reveal" data-reveal>
+          <span class="dot"></span> DeepSeek v4 &mdash; Excel Add-in
+        </div>
+        <h1 class="reveal reveal-delay-1" data-reveal>
+          L&rsquo;assistente AI che lavora <em>dentro</em> i tuoi fogli Excel
+          <span>&mdash; progettato per commercialisti e CPA &mdash;</span>
+        </h1>
+        <p class="reveal reveal-delay-2" data-reveal>
+          Chiedi in linguaggio naturale. Excel AI analizza il foglio, pianifica le modifiche,
+          ti mostra un'anteprima e chiede conferma prima di scrivere. Ogni azione &egrave; tracciata.
+        </p>
+        <div class="hero-cta reveal reveal-delay-3" data-reveal>
+          <a href="#inizia" class="btn-primary">Prova gratis &rarr;</a>
+          <a href="#come-funziona" class="btn-secondary">Scopri come funziona</a>
+        </div>
+        <div class="hero-metrics reveal reveal-delay-4" data-reveal>
+          <div class="metric">
+            <div class="metric-value">99.8<span class="unit">%</span></div>
+            <div class="metric-label">Cache hit rate</div>
+          </div>
+          <div class="metric">
+            <div class="metric-value">&lt;3<span class="unit">s</span></div>
+            <div class="metric-label">Risposta media</div>
+          </div>
+          <div class="metric">
+            <div class="metric-value">100<span class="unit">%</span></div>
+            <div class="metric-label">Dati in locale</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- HOW IT WORKS -->
+    <section id="come-funziona">
+      <div class="container">
+        <div class="section-label reveal" data-reveal">// Flusso operativo</div>
+        <h2 class="section-title reveal reveal-delay-1" data-reveal">
+          Tre passaggi. Nessun errore nei dati.
+        </h2>
+        <p class="section-subtitle reveal reveal-delay-2" data-reveal">
+          Ogni operazione segue un flusso di revisione: il commercialista resta sempre al controllo.
+        </p>
+        <div class="ledger-steps reveal reveal-delay-3" data-reveal>
+          <div class="ledger-item reveal reveal-delay-3" data-reveal>
+            <div class="ledger-num">01</div>
+            <h4>1. Chiedi</h4>
+            <p>Scrivi in italiano cosa vuoi fare. Esempio: &ldquo;Crea una riconciliazione bancaria per il mese di marzo&rdquo;.</p>
+          </div>
+          <div class="ledger-item reveal reveal-delay-4" data-reveal>
+            <div class="ledger-num">02</div>
+            <h4>2. Revisiona</h4>
+            <p>L&rsquo;AI ti mostra le modifiche pianificate con un'anteprima dettagliata. Puoi accettare, modificare o rifiutare.</p>
+          </div>
+          <div class="ledger-item reveal reveal-delay-5" data-reveal>
+            <div class="ledger-num">03</div>
+            <h4>3. Esegui</h4>
+            <p>Con un click autorizzi l&rsquo;esecuzione. Le modifiche vengono scritte nel foglio. Ogni azione &egrave; tracciata nell&rsquo;audit log.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CAPABILITIES -->
+    <section class="terminal-section" id="funzionalita">
+      <div class="container">
+        <div class="section-label reveal" data-reveal">// Capacit&agrave;</div>
+        <h2 class="section-title reveal reveal-delay-1" data-reveal">
+          Un terminale intelligente per ogni foglio
+        </h2>
+        <p class="section-subtitle reveal reveal-delay-2" data-reveal">
+          Non &egrave; un chatbot. &Egrave; un agente che opera direttamente su celle, formule, tabelle e formattazione.
+        </p>
+
+        <div class="terminal-window reveal reveal-delay-3" data-reveal>
+          <div class="terminal-bar">
+            <span class="terminal-dot"></span>
+            <span class="terminal-dot"></span>
+            <span class="terminal-dot"></span>
+            <span class="terminal-title">excel-ai ~ audit-trail</span>
+          </div>
+          <div class="terminal-body">
+            <div><span class="terminal-prompt">$</span> <span class="terminal-cmd">crea un foglio di bilancio con ricavi, costi e margine</span></div>
+            <div style="margin: 8px 0 4px;"><span class="terminal-output">&rarr; Analisi del foglio attuale in corso...</span></div>
+            <div style="margin: 4px 0;"><span class="terminal-output">&rarr; Individuata struttura dati (colonne: Data, Descrizione, Importo)</span></div>
+            <div style="margin: 4px 0;"><span class="terminal-output">&rarr; Piano: 6 azioni preparate</span></div>
+            <div style="margin: 12px 0 4px;"><span class="terminal-highlight">[1/6] INSERT_ROW</span> <span class="terminal-output">| A1:C1 | &ldquo;Ricavi&rdquo; | &ldquo;Costi&rdquo; | &ldquo;Margine&rdquo;</span></div>
+            <div><span class="terminal-highlight">[2/6] SET_FORMULA</span> <span class="terminal-output">| C2 | =A2-B2</span></div>
+            <div><span class="terminal-highlight">[3/6] SET_FORMAT</span> <span class="terminal-output">| Valute, grassetto intestazioni</span></div>
+            <div style="margin: 12px 0 4px;"><span class="terminal-output">In attesa di autorizzazione...</span></div>
+            <div><span class="terminal-prompt">$</span> <span class="terminal-cursor"></span></div>
+          </div>
+        </div>
+
+        <div class="capabilities reveal reveal-delay-4" data-reveal>
+          <div class="cap-card">
+            <div class="cap-icon" style="background:var(--accent-green-glow);color:var(--accent-green);">&#x1F4C8;</div>
+            <h4>Analisi finanziaria</h4>
+            <p>Crea bilanci, conti economici, analisi di varianza e riconciliazioni bancarie automaticamente.</p>
+          </div>
+          <div class="cap-card">
+            <div class="cap-icon" style="background:var(--accent-amber-glow);color:var(--accent-amber);">&#x1F4CB;</div>
+            <h4>Scritture contabili</h4>
+            <p>Prepara mastrini, partite doppie e scritture di assestamento direttamente nel foglio.</p>
+          </div>
+          <div class="cap-card">
+            <div class="cap-icon" style="background:var(--accent-amber-glow);color:var(--accent-blue);">&#x1F50D;</div>
+            <h4>Audit e revisione</h4>
+            <p>Ogni modifica &egrave; tracciata con timestamp, tipo azione e contenuto originale. Audit trail completo.</p>
+          </div>
+          <div class="cap-card">
+            <div class="cap-icon" style="background:var(--accent-green-glow);color:var(--accent-green);">&#x2699;&#xFE0F;</div>
+            <h4>Automazione fogli</h4>
+            <p>Formatta, rinomina, unisci celle, applica formattazione condizionale. Tutto a linguaggio naturale.</p>
+          </div>
+          <div class="cap-card">
+            <div class="cap-icon" style="background:var(--accent-amber-glow);color:var(--accent-amber);">&#x1F4CA;</div>
+            <h4>Grafici e dashboard</h4>
+            <p>Genera grafici a barre, torta e linee con un comando. Colori e legenda configurati automaticamente.</p>
+          </div>
+          <div class="cap-card">
+            <div class="cap-icon" style="background:var(--accent-green-glow);color:var(--accent-green);">&#x1F5E3;</div>
+            <h4>Linguaggio naturale</h4>
+            <p>Niente formule complesse. Scrivi in italiano quello che vuoi ottenere e l&rsquo;AI lo realizza.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- FOR WHOM -->
+    <section id="per-chi">
+      <div class="container">
+        <div class="section-label reveal" data-reveal">// Professionisti</div>
+        <h2 class="section-title reveal reveal-delay-1" data-reveal">
+          Progettato per chi vive di numeri
+        </h2>
+        <p class="section-subtitle reveal reveal-delay-2" data-reveal">
+          Non un tool generico: ogni funzionalit&agrave; &egrave; pensata per il professionista finanziario.
+        </p>
+        <div class="audiences reveal reveal-delay-3" data-reveal>
+          <div class="audience-card">
+            <div class="audience-role">// 01</div>
+            <div class="audience-title">Commercialisti</div>
+            <p>Bilanci, dichiarazioni, scritture contabili e riconciliazioni automatizzate. Meno tempo sui fogli, pi&ugrave; tempo per i clienti.</p>
+          </div>
+          <div class="audience-card">
+            <div class="audience-role">// 02</div>
+            <div class="audience-title">CPA &amp; Revisori</div>
+            <p>Audit trail completo, controllo modifiche, verifica incrociata automatica. Tracciabilit&agrave; certificabile.</p>
+          </div>
+          <div class="audience-card">
+            <div class="audience-role">// 03</div>
+            <div class="audience-title">Analisti finanziari</div>
+            <p>Analisi di bilancio, variance, forecasting e modelli finanziari. Prompt in linguaggio naturale, output in Excel.</p>
+          </div>
+          <div class="audience-card">
+            <div class="audience-role">// 04</div>
+            <div class="audience-title">Controller</div>
+            <p>Reportistica mensile, consolidamenti, KPI dashboard. Automatizza la reportistica periodica.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TRUST -->
+    <section id="sicurezza" style="background:var(--bg-surface);">
+      <div class="container">
+        <div class="section-label reveal" data-reveal">// Sicurezza e privacy</div>
+        <h2 class="section-title reveal reveal-delay-1" data-reveal">
+          I tuoi dati sono al sicuro
+        </h2>
+        <p class="section-subtitle reveal reveal-delay-2" data-reveal">
+          Progettato per standard professionali. Nessun dato salvato oltre il minimo necessario.
+        </p>
+        <div class="trust-grid reveal reveal-delay-3" data-reveal>
+          <div class="trust-item">
+            <h4>Crittografia end-to-end</h4>
+            <p>Connessioni TLS 1.3. Dati trasmessi solo via HTTPS. Nessuna persistenza dei contenuti delle celle.</p>
+          </div>
+          <div class="trust-item">
+            <h4>Autenticazione Supabase</h4>
+            <p>Login con email. JWT token. Row-Level Security su PostgreSQL. Nessun accesso non autorizzato.</p>
+          </div>
+          <div class="trust-item">
+            <h4>Nessun training sui dati</h4>
+            <p>I contenuti dei fogli non vengono usati per addestrare modelli. DeepSeek non conserva le richieste.</p>
+          </div>
+          <div class="trust-item">
+            <h4>GDPR compliant</h4>
+            <p>Cancellazione account, esportazione dati, audit log. Tutto conforme al regolamento europeo.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CTA -->
+    <section class="cta-section" id="inizia">
+      <div class="container">
+        <div class="cta-box reveal" data-reveal>
+          <h2>Inizia ora, gratis.</h2>
+          <p>
+            Installa l&rsquo;add-in in 30 secondi. Nessuna carta di credito.<br>
+            Funziona su Excel per Mac e Windows.
+          </p>
+          <p style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-muted);margin-bottom:28px;">
+            bash <(curl -s https://excel-ai-sigma.vercel.app/install.sh)
+          </p>
+          <a href="#" class="btn-primary" id="cta-install">Scarica l&rsquo;add-in &rarr;</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container">
+      <p>
+        <a href="/">Excel Agent</a> &mdash; Assistente AI per professionisti finanziari &mdash;
+        <a href="/privacy">Privacy</a> &middot; <a href="/terms">Termini</a>
+      </p>
+      <p style="margin-top:8px;">&copy; 2026 Excel AI. DeepSeek v4 powered.</p>
+    </div>
+  </footer>
+
+  <script>
+    // ── Header scroll effect ──
+    const header = document.getElementById('header');
+    window.addEventListener('scroll', () => {
+      header.classList.toggle('scrolled', window.scrollY > 10);
+    });
+
+    // ── Scroll reveal ──
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+        }
+      });
+    }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
+
+    document.querySelectorAll('[data-reveal]').forEach(el => observer.observe(el));
+
+    let revealNum = 1;
+    document.querySelectorAll('.terminal-body > div').forEach(() => revealNum++);
+
+    // ── Terminal animation ──
+    function typeTerminal() {
+      const lines = document.querySelectorAll('.terminal-body > div');
+      lines.forEach(line => line.style.opacity = '0');
+      let i = 0;
+      const showNext = () => {
+        if (i < lines.length) {
+          lines[i].style.transition = 'opacity 0.3s';
+          lines[i].style.opacity = '1';
+          i++;
+          if (i === 1) setTimeout(showNext, 600);
+          else if (i === 2) setTimeout(showNext, 400);
+          else if (i === 3) setTimeout(showNext, 500);
+          else if (i === 4) setTimeout(showNext, 300);
+          else setTimeout(showNext, 200);
+        }
+      };
+      const terminalWindow = document.querySelector('.terminal-window');
+      const termObserver = new IntersectionObserver((entries) => {
+        if (entries[0].isIntersecting) {
+          showNext();
+          termObserver.disconnect();
+        }
+      }, { threshold: 0.3 });
+      termObserver.observe(terminalWindow);
+    }
+    typeTerminal();
+
+    // ── CTA button ──
+    document.getElementById('cta-install').addEventListener('click', (e) => {
+      e.preventDefault();
+      alert('Per installare l\'add-in su macOS:\n\nbash <(curl -s https://excel-ai-sigma.vercel.app/install.sh)\n\nSu Windows: scarica il manifest da /manifest.xml e caricalo in Excel.');
+    });
+  </script>
+</body>
+</html>

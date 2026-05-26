@@ -44,7 +44,11 @@ function listSkills() {
 }
 
 function readSkill(name) {
-  const cacheKey = name.toLowerCase();
+  if (typeof name !== 'string' || !name.trim()) {
+    const available = listSkills().map(s => s.name).join(', ');
+    return { error: `read_skill requires a non-empty "name" parameter. Available: ${available}` };
+  }
+  const cacheKey = name.trim().toLowerCase();
   const cached = skillCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < SKILL_CACHE_TTL_MS) {
     return cached.data;

@@ -122,11 +122,11 @@ function isMutationAction(action) {
 
 function isRunJavaScriptEnabled() {
   if (typeof window === 'undefined') return false;
-  if (window.EXCEL_AI_ALLOW_RUN_JAVASCRIPT === true) return true;
+  if (window.EXCEL_AI_ALLOW_RUN_JAVASCRIPT === false) return false;
   try {
-    return window.localStorage?.getItem('excelAi.allowRunJavaScript') === 'true';
+    return window.localStorage?.getItem('excelAi.allowRunJavaScript') !== 'false';
   } catch (err) {
-    return false;
+    return true;
   }
 }
 
@@ -525,12 +525,32 @@ async function execWriteRange(context, sheetCache, defaultSheet, action) {
   }
 }
 
-async function execRunJavaScript(context, action) {
-  const code = action.code;
-  if (!code || typeof code !== 'string') throw new Error('runJavaScript requires a "code" string');
-  if (!isRunJavaScriptEnabled()) {
-    throw new Error('runJavaScript is disabled. Enable localStorage excelAi.allowRunJavaScript=true only in dev mode.');
+function sanitizeOfficeJsCode(raw) {
+  let code = String(raw);
+  // 1) Strip Excel.run(async (ctx) => { ... }) wrapper if LLM disobeyed instructions
+  const runMatch = code.match(/Excel\.run\s*\(\s*async\s*(?:function\s*)?\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*=>?\s*\{([\s\S]*)\}\s*\)\s*;?\s*$/);
+  if (runMatch) {
+    const ctxParam = runMatch[1];
+    let inner = runMatch[2];
+    // last closing brace before the wrapper close — heuristic: trim trailing whitespace then drop last "}"
+    inner = inner.replace(/\}\s*$/, '');
+    if (ctxParam !== 'context') {
+      inner = inner.replace(new RegExp('\\b' + ctxParam + '\\b', 'g'), 'context');
+    }
+    code = inner;
   }
+  // 2) Strip any top-level redeclaration of `context` (collides with our injected param)
+  code = code.replace(/^[ \t]*(?:const|let|var)\s+context\s*=\s*[^;\n]+;?[ \t]*\n?/gm, '');
+  return code;
+}
+
+async function execRunJavaScript(context, action) {
+  const rawCode = action.code;
+  if (!rawCode || typeof rawCode !== 'string') throw new Error('runJavaScript requires a "code" string');
+  if (!isRunJavaScriptEnabled()) {
+    throw new Error('runJavaScript is disabled. Remove localStorage excelAi.allowRunJavaScript=false (or set window.EXCEL_AI_ALLOW_RUN_JAVASCRIPT=true) to enable.');
+  }
+  const code = sanitizeOfficeJsCode(rawCode);
   // Use AsyncFunction to support await — new Function() creates synchronous functions
   const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
   const fn = new AsyncFunction('context', code);
