@@ -1,7 +1,10 @@
-.PHONY: dev certs build start clean db-reset deploy
+.PHONY: dev certs build start clean db-reset deploy install
 
 dev:
 	node --watch server/server.js
+
+install:
+	bash install.sh
 
 certs:
 	mkcert -install
