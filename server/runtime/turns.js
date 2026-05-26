@@ -24,8 +24,12 @@ const { track } = require('../telemetry/tracker');
 
 const TURNS_DIR = path.join(__dirname, '..', 'turns');
 
-if (!fs.existsSync(TURNS_DIR)) {
-  fs.mkdirSync(TURNS_DIR, { recursive: true });
+try {
+  if (!fs.existsSync(TURNS_DIR)) {
+    fs.mkdirSync(TURNS_DIR, { recursive: true });
+  }
+} catch (_) {
+  // Vercel serverless: filesystem read-only, persistence via Supabase
 }
 
 const activeTurns = new Map();
@@ -137,7 +141,13 @@ function flushDiskWrite(turnId) {
   }
   const turn = activeTurns.get(turnId);
   if (!turn) return;
-  fs.writeFileSync(turnPath(turnId), JSON.stringify(turn, null, 2));
+  try {
+    const p = turnPath(turnId);
+    if (!fs.existsSync(path.dirname(p))) fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(turn, null, 2));
+  } catch (_) {
+    // Vercel serverless: skip disk write, Supabase handles persistence
+  }
 }
 
 function saveTurn(turn) {

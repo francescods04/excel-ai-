@@ -19,8 +19,12 @@ function memoryFilePath(userId = USER_ID) {
 }
 
 function ensureDir() {
-  if (!fs.existsSync(MEMORY_DIR)) {
-    fs.mkdirSync(MEMORY_DIR, { recursive: true });
+  try {
+    if (!fs.existsSync(MEMORY_DIR)) {
+      fs.mkdirSync(MEMORY_DIR, { recursive: true });
+    }
+  } catch (_) {
+    // Vercel serverless: read-only filesystem
   }
 }
 
