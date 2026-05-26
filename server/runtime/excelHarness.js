@@ -85,7 +85,7 @@ function getHarnessAgentProfile(agentName) {
 }
 
 function isExternalDataTool(tool = '') {
-  return /^(openbb|yahoo)\./.test(String(tool));
+  return /^(openbb|yahoo|web|research)\./.test(String(tool));
 }
 
 function isWorkbookReadTool(tool = '') {
@@ -120,10 +120,12 @@ function inferHarnessAgent(task = {}) {
   const section = String(task.params?.section || '').toLowerCase();
   const text = `${task.description || ''} ${task.params?.objective || ''} ${task.params?.mode || ''}`.toLowerCase();
 
-  if (tool === 'finance.dcf.buildSection') {
+  if (tool === 'finance.dcf.buildSection' || tool === 'finance.model.buildSection') {
     if (section === 'format') return 'formatDesigner';
-    if (section === 'shell' || section === 'sources') return 'modelArchitect';
-    if (section === 'audit') return 'auditReviewer';
+    if (section === 'shell' || section === 'sources' || section === 'source_data') return 'modelArchitect';
+    // Audit build writes executable formula checks → needs mutation rights.
+    // Pure review (read-only) is invoked via dedicated review tools, not buildSection.
+    if (section === 'audit' || section === 'checks') return 'formulaEngineer';
     return 'modelAnalyst';
   }
   if (isExternalDataTool(tool)) return 'marketScout';
@@ -131,6 +133,7 @@ function inferHarnessAgent(task = {}) {
   if (isFormatTool(tool)) return 'formatDesigner';
   if (isLayoutTool(tool)) return 'modelArchitect';
   if (isFormulaTool(tool)) return 'formulaEngineer';
+  // Only fall back to auditReviewer when the task is read-only (no write tool matched above).
   if (section === 'audit' || /\baudit\b|review|verifica|controll/.test(text)) return 'auditReviewer';
   return getHarnessAgentProfile(task.agent).name;
 }

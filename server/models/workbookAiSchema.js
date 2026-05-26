@@ -265,8 +265,7 @@ async function inferWorkbookSchemaWithAi(params = {}, memory = {}) {
     modelOverride: memory?.llm?.modelOverride || undefined,
     label: 'Workbook AI schema inference',
     cachePrompt: true,
-    thinkingDisabled: false,
-    reasoningEffort: 'high'
+    role: 'schema_infer'
   })
     .then(result => {
       const schema = normalizeAiSchema(result, compact.cellLookup);

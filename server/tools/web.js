@@ -6,6 +6,14 @@ const yahooFinance = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 const WIKI_API = 'https://en.wikipedia.org/w/api.php';
 const DDG_API = 'https://api.duckduckgo.com';
+const DDG_HTML = 'https://html.duckduckgo.com/html/';
+// Optional paid providers (use when API key present):
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY || '';
+const TAVILY_API = 'https://api.tavily.com/search';
+const BRAVE_API_KEY = process.env.BRAVE_API_KEY || '';
+const BRAVE_API = 'https://api.search.brave.com/res/v1/web/search';
+const SERPAPI_KEY = process.env.SERPAPI_KEY || '';
+const SERPAPI_API = 'https://serpapi.com/search.json';
 
 // Common company name → ticker mappings (case-insensitive key)
 const COMPANY_TICKER = {
@@ -177,7 +185,27 @@ async function webSearch(params) {
     sources.push('SEC EDGAR');
   }
 
-  // 5 ─── DIRECT URL FETCH (if query is a URL) ────────────────
+  // 5 ─── REAL SERP (Tavily/Brave/SerpAPI/DDG HTML) ─────────
+  // Gives the AI agent actual web hits beyond Wikipedia/Yahoo. Critical for
+  // competitor research, news, industry reports.
+  if (!query.startsWith('http://') && !query.startsWith('https://')) {
+    try {
+      const serpKey = `serp:${query.slice(0, 120)}:${maxResults}`;
+      let serp = cached(serpKey, 'ddg');
+      if (!serp) {
+        serp = await realSerpSearch(query, maxResults);
+        if (serp) cacheSet(serpKey, serp);
+      }
+      if (Array.isArray(serp?.results) && serp.results.length > 0) {
+        for (const r of serp.results) results.push(r);
+        sources.push(serp.provider === 'tavily' ? 'Tavily' : serp.provider === 'brave' ? 'Brave' : serp.provider === 'serpapi' ? 'SerpAPI' : 'DuckDuckGo SERP');
+      }
+    } catch (e) {
+      logger.warn(`[WebSearch] SERP error: ${e.message}`);
+    }
+  }
+
+  // 6 ─── DIRECT URL FETCH (if query is a URL) ────────────────
   if (query.startsWith('http://') || query.startsWith('https://')) {
     try {
       const page = await webFetch({ url: query });
@@ -207,6 +235,94 @@ async function webSearch(params) {
 
   cacheSet(cacheKey, output);
   return output;
+}
+
+/* ===================================================================
+   REAL SERP SEARCH — pick best available provider
+   Priority: Tavily (AI-tuned) > Brave > SerpAPI > DDG HTML scrape (no key)
+   =================================================================== */
+async function realSerpSearch(query, maxResults = 8) {
+  if (TAVILY_API_KEY) {
+    try {
+      const resp = await axios.post(TAVILY_API, {
+        api_key: TAVILY_API_KEY,
+        query,
+        search_depth: 'basic',
+        max_results: maxResults,
+        include_answer: true
+      }, { timeout: 12000 });
+      const out = [];
+      if (resp.data?.answer) {
+        out.push({ source: 'Tavily Answer', title: 'AI answer', url: '', snippet: String(resp.data.answer).slice(0, 800) });
+      }
+      for (const r of (resp.data?.results || []).slice(0, maxResults)) {
+        out.push({ source: 'Tavily', title: r.title || '', url: r.url, snippet: (r.content || '').slice(0, 500) });
+      }
+      return { provider: 'tavily', results: out };
+    } catch (e) {
+      logger.warn(`[WebSearch] Tavily error: ${e.message}`);
+    }
+  }
+  if (BRAVE_API_KEY) {
+    try {
+      const resp = await axios.get(BRAVE_API, {
+        params: { q: query, count: maxResults },
+        headers: { 'X-Subscription-Token': BRAVE_API_KEY, Accept: 'application/json' },
+        timeout: 12000
+      });
+      const out = [];
+      for (const r of (resp.data?.web?.results || []).slice(0, maxResults)) {
+        out.push({ source: 'Brave', title: r.title || '', url: r.url, snippet: (r.description || '').slice(0, 500) });
+      }
+      return { provider: 'brave', results: out };
+    } catch (e) {
+      logger.warn(`[WebSearch] Brave error: ${e.message}`);
+    }
+  }
+  if (SERPAPI_KEY) {
+    try {
+      const resp = await axios.get(SERPAPI_API, { params: { q: query, api_key: SERPAPI_KEY, num: maxResults }, timeout: 12000 });
+      const out = [];
+      for (const r of (resp.data?.organic_results || []).slice(0, maxResults)) {
+        out.push({ source: 'SerpAPI', title: r.title || '', url: r.link, snippet: (r.snippet || '').slice(0, 500) });
+      }
+      return { provider: 'serpapi', results: out };
+    } catch (e) {
+      logger.warn(`[WebSearch] SerpAPI error: ${e.message}`);
+    }
+  }
+  // Fallback: DDG HTML scrape (no key required)
+  try {
+    const resp = await axios.get(DDG_HTML, {
+      params: { q: query },
+      headers: { 'User-Agent': USER_AGENT, Accept: 'text/html' },
+      timeout: 12000
+    });
+    const html = String(resp.data || '');
+    const results = [];
+    // Parse DDG result blocks. Each result has a.result__a (title+url) and a.result__snippet.
+    const blockRe = /<a class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+    let match;
+    while ((match = blockRe.exec(html)) !== null && results.length < maxResults) {
+      let url = match[1];
+      try {
+        // DDG uses redirect like //duckduckgo.com/l/?uddg=ENCODED → unwrap
+        if (url.startsWith('//')) url = 'https:' + url;
+        const u = new URL(url);
+        const uddg = u.searchParams.get('uddg');
+        if (uddg) url = decodeURIComponent(uddg);
+      } catch (_) { /* ignore parse errors */ }
+      const title = stripHtml(match[2]).slice(0, 200);
+      const snippet = stripHtml(match[3]).slice(0, 500);
+      if (title && url && !url.startsWith('javascript:')) {
+        results.push({ source: 'DuckDuckGo SERP', title, url, snippet });
+      }
+    }
+    return { provider: 'ddg_html', results };
+  } catch (e) {
+    logger.warn(`[WebSearch] DDG HTML error: ${e.message}`);
+    return { provider: 'none', results: [] };
+  }
 }
 
 /* ===================================================================
@@ -330,4 +446,90 @@ function stripHtml(text) {
   return text.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
 }
 
-module.exports = { webSearch, webFetch, extractTicker };
+/* ===================================================================
+   WEB FETCH JS — render JS-heavy pages via Playwright (L2)
+   Lazy-loaded so the server boots even without Playwright installed.
+   =================================================================== */
+let _playwrightChromium = null;
+async function _loadPlaywright() {
+  if (_playwrightChromium === null) {
+    try {
+      const pw = require('playwright');
+      _playwrightChromium = pw.chromium;
+    } catch (e) {
+      throw new Error(`playwright non installato. Esegui: npm install playwright && npx playwright install chromium`);
+    }
+  }
+  return _playwrightChromium;
+}
+
+async function webFetchJs(params) {
+  const url = (params.url || '').trim();
+  if (!url) throw new Error('URL required');
+  const waitFor = params.waitFor || null;             // CSS selector to wait for
+  const waitMs = Math.min(Number(params.waitMs) || 0, 15000);
+  const screenshot = !!params.screenshot;
+  const fullPage = !!params.fullPage;
+  const maxChars = Math.min(Number(params.maxChars) || 15000, 60000);
+  const timeoutMs = Math.min(Number(params.timeoutMs) || 30000, 60000);
+
+  logger.info(`[WebFetchJs] Rendering ${url}${waitFor ? ` (wait: ${waitFor})` : ''}`);
+  const chromium = await _loadPlaywright();
+  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+  try {
+    const context = await browser.newContext({ userAgent: USER_AGENT, viewport: { width: 1366, height: 900 } });
+    const page = await context.newPage();
+    await page.goto(url, { waitUntil: 'networkidle', timeout: timeoutMs }).catch(async (e) => {
+      // networkidle can hang on infinite-poll sites; retry with domcontentloaded.
+      logger.warn(`[WebFetchJs] networkidle failed (${e.message}), retry domcontentloaded`);
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    });
+    if (waitFor) {
+      try { await page.waitForSelector(waitFor, { timeout: 15000 }); }
+      catch (e) { logger.warn(`[WebFetchJs] waitFor "${waitFor}" timed out: ${e.message}`); }
+    }
+    if (waitMs > 0) await page.waitForTimeout(waitMs);
+
+    const title = await page.title().catch(() => '');
+    const text = await page.evaluate(() => {
+      const els = document.querySelectorAll('script, style, nav, footer, header, aside, noscript');
+      els.forEach(el => el.remove());
+      return document.body ? document.body.innerText : '';
+    });
+
+    let screenshotB64 = null;
+    if (screenshot) {
+      const buf = await page.screenshot({ fullPage });
+      screenshotB64 = buf.toString('base64');
+    }
+
+    // Extract anchor links so caller can navigate further.
+    const links = await page.evaluate(() => {
+      const out = [];
+      const seen = new Set();
+      document.querySelectorAll('a[href]').forEach(a => {
+        const href = a.href;
+        const text = (a.innerText || '').trim().slice(0, 120);
+        if (!href || seen.has(href)) return;
+        if (!text) return;
+        seen.add(href);
+        out.push({ href, text });
+      });
+      return out.slice(0, 60);
+    });
+
+    return {
+      url,
+      title: String(title || '').slice(0, 200),
+      text: String(text || '').replace(/\s+/g, ' ').trim().slice(0, maxChars),
+      length: text ? text.length : 0,
+      links,
+      screenshot: screenshotB64,
+      provider: 'playwright'
+    };
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
+module.exports = { webSearch, webFetch, webFetchJs, extractTicker };

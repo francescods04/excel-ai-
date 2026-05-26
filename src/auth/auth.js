@@ -1,100 +1,77 @@
 import { API_BASE } from '../ui/tabs.js';
 
-const STORAGE_KEY_TOKEN = 'excelai_access_token';
-const STORAGE_KEY_REFRESH = 'excelai_refresh_token';
-const STORAGE_KEY_USER = 'excelai_user';
+let supabase = null;
+let currentSession = null;
 
-let currentUser = null;
+async function getSupabase() {
+  if (supabase) return supabase;
+
+  const res = await fetch(`${API_BASE}/api/config`);
+  const config = await res.json();
+
+  const { createClient } = window.supabase || {};
+  if (!createClient) {
+    throw new Error('Supabase client non caricato');
+  }
+
+  supabase = createClient(config.supabaseUrl, config.supabaseAnonKey, {
+    auth: { storage: localStorage, autoRefreshToken: true, persistSession: true, detectSessionInUrl: true },
+  });
+
+  const { data: { session } } = await supabase.auth.getSession();
+  currentSession = session;
+
+  supabase.auth.onAuthStateChange((_event, session) => {
+    currentSession = session;
+  });
+
+  return supabase;
+}
 
 function getAccessToken() {
-  return localStorage.getItem(STORAGE_KEY_TOKEN);
+  return currentSession?.access_token || null;
 }
 
-function getRefreshToken() {
-  return localStorage.getItem(STORAGE_KEY_REFRESH);
+async function login(email, password) {
+  const sb = await getSupabase();
+  const { data, error } = await sb.auth.signInWithPassword({ email, password });
+  if (error) throw new Error(error.message);
+  currentSession = data.session;
+  return data.user;
 }
 
-function getUser() {
-  if (currentUser) return currentUser;
-  const raw = localStorage.getItem(STORAGE_KEY_USER);
-  if (raw) {
-    try { currentUser = JSON.parse(raw); } catch (_) {}
-  }
-  return currentUser;
+async function register(email, password, name) {
+  const sb = await getSupabase();
+  const { data, error } = await sb.auth.signUp({
+    email,
+    password,
+    options: { data: { name } },
+  });
+  if (error) throw new Error(error.message);
+  if (data.session) currentSession = data.session;
+  return data.user;
 }
 
-function saveTokens(accessToken, refreshToken, user) {
-  localStorage.setItem(STORAGE_KEY_TOKEN, accessToken);
-  localStorage.setItem(STORAGE_KEY_REFRESH, refreshToken);
-  localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(user));
-  currentUser = user;
-}
-
-function clearTokens() {
-  localStorage.removeItem(STORAGE_KEY_TOKEN);
-  localStorage.removeItem(STORAGE_KEY_REFRESH);
-  localStorage.removeItem(STORAGE_KEY_USER);
-  currentUser = null;
-}
-
-async function authFetch(url, options = {}) {
-  const headers = { ...options.headers, 'Content-Type': 'application/json' };
-  const token = getAccessToken();
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-
-  let res = await fetch(url, { ...options, headers });
-
-  if (res.status === 401 && getRefreshToken()) {
-    const refreshed = await refreshAccessToken();
-    if (refreshed) {
-      headers['Authorization'] = `Bearer ${getAccessToken()}`;
-      res = await fetch(url, { ...options, headers });
-    }
-  }
-
-  return res;
-}
-
-async function refreshAccessToken() {
-  const refreshToken = getRefreshToken();
-  if (!refreshToken) return false;
+async function logout() {
+  currentSession = null;
   try {
-    const res = await fetch(`${API_BASE}/api/auth/refresh`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refreshToken }),
-    });
-    if (!res.ok) { clearTokens(); return false; }
-    const data = await res.json();
-    localStorage.setItem(STORAGE_KEY_TOKEN, data.accessToken);
-    localStorage.setItem(STORAGE_KEY_REFRESH, data.refreshToken);
-    return true;
-  } catch (_) {
-    clearTokens();
-    return false;
-  }
+    const sb = supabase;
+    if (sb) await sb.auth.signOut();
+  } catch (_) {}
 }
 
-async function apiCall(method, path, body = null) {
+async function getUser() {
   const token = getAccessToken();
-  const headers = token ? { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
-  const options = { method, headers };
-  if (body) options.body = JSON.stringify(body);
-
-  let res = await fetch(`${API_BASE}${path}`, options);
-
-  if (res.status === 401 && getRefreshToken()) {
-    const refreshed = await refreshAccessToken();
-    if (refreshed) {
-      headers['Authorization'] = `Bearer ${getAccessToken()}`;
-      options.headers = headers;
-      res = await fetch(`${API_BASE}${path}`, options);
-    }
+  if (!token) return null;
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return null;
+    return res.json();
+  } catch (_) {
+    return null;
   }
-
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Errore API');
-  return data;
 }
 
 function showLoginOverlay() {
@@ -128,18 +105,10 @@ function initAuthUI() {
     loginError.textContent = '';
     const email = document.getElementById('login-email').value.trim();
     const password = document.getElementById('login-password').value;
-
     try {
-      const res = await fetch(`${API_BASE}/api/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Login fallito');
-      saveTokens(data.accessToken, data.refreshToken, data.user);
+      const user = await login(email, password);
       hideLoginOverlay();
-      document.dispatchEvent(new CustomEvent('auth:login', { detail: data.user }));
+      document.dispatchEvent(new CustomEvent('auth:login', { detail: user }));
     } catch (err) {
       loginError.textContent = err.message;
     }
@@ -151,23 +120,18 @@ function initAuthUI() {
     const name = document.getElementById('register-name').value.trim();
     const email = document.getElementById('register-email').value.trim();
     const password = document.getElementById('register-password').value;
-
     if (password.length < 6) {
       registerError.textContent = 'Password minima 6 caratteri';
       return;
     }
-
     try {
-      const res = await fetch(`${API_BASE}/api/auth/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, name }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Registrazione fallita');
-      saveTokens(data.accessToken, data.refreshToken, data.user);
-      hideLoginOverlay();
-      document.dispatchEvent(new CustomEvent('auth:login', { detail: data.user }));
+      const user = await register(email, password, name);
+      if (user) {
+        hideLoginOverlay();
+        document.dispatchEvent(new CustomEvent('auth:login', { detail: user }));
+      } else {
+        registerError.textContent = 'Controlla la tua email per confermare la registrazione.';
+      }
     } catch (err) {
       registerError.textContent = err.message;
     }
@@ -181,33 +145,28 @@ function addLogoutButton() {
   btn.id = 'logout-btn';
   btn.textContent = 'Esci';
   btn.addEventListener('click', async () => {
-    const refreshToken = getRefreshToken();
-    if (refreshToken) {
-      try {
-        await fetch(`${API_BASE}/api/auth/logout`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refreshToken }),
-        });
-      } catch (_) {}
-    }
-    clearTokens();
+    await logout();
     showLoginOverlay();
     document.dispatchEvent(new CustomEvent('auth:logout'));
   });
   headerRight.appendChild(btn);
 }
 
-function init() {
+async function init() {
   initAuthUI();
   addLogoutButton();
 
-  const token = getAccessToken();
-  if (token) {
-    hideLoginOverlay();
-  } else {
-    showLoginOverlay();
-  }
+  try {
+    const sb = await getSupabase();
+    const { data: { session } } = await sb.auth.getSession();
+    if (session) {
+      currentSession = session;
+      hideLoginOverlay();
+      return;
+    }
+  } catch (_) {}
+
+  showLoginOverlay();
 }
 
-export { init, getAccessToken, getUser, apiCall, clearTokens, showLoginOverlay, hideLoginOverlay };
+export { init, getAccessToken, getUser, logout, showLoginOverlay, hideLoginOverlay };

@@ -311,6 +311,39 @@ registerTool('finance.dcf.buildSection', async (params, memory) => {
   requiresApproval: 'always'
 });
 
+// Generic model-agnostic section builder. Accepts any modelType from financeModelCatalog.
+// For DCF it routes through the existing AI+template pipeline; for other models it routes
+// through the same AI builder but with model-specific contracts and no deterministic
+// fallback (pure AI). This is the preferred tool for LBO, M&A, three-statement, comps,
+// credit, DDM, data_analysis, dashboard, etl_cleanup, forecasting, optimization, custom.
+const { MODEL_TYPES } = require('../models/financeModelCatalog');
+registerTool('finance.model.buildSection', async (params, memory) => {
+  return buildDcfSectionAi(params, memory);
+}, {
+  description: 'Generic AI-assisted model section builder. Accepts params.modelType (dcf | lbo | m_a | three_statement | comps | credit | ddm | data_analysis | dashboard | etl_cleanup | forecasting | optimization | custom) and params.section. Routes through model-specific contracts. Use this for any non-DCF model.',
+  inputs: ['modelType', 'section'],
+  schema: {
+    type: 'object',
+    required: ['modelType', 'section'],
+    properties: {
+      modelType: { type: 'string', enum: MODEL_TYPES },
+      section: { type: 'string' },
+      focusArea: { type: 'string' },
+      ticker: { type: 'string', minLength: 1, maxLength: 12 },
+      companyName: { type: 'string' },
+      objective: { type: 'string' },
+      projectionYears: { type: 'integer', minimum: 1, maximum: 15 },
+      mode: { type: 'string', enum: ['ai_assisted', 'template'] },
+      usesResults: { type: 'array', items: { type: 'string' } },
+      sheet: SCHEMA_SHEET_NAME,
+      sheets: { type: 'array', items: SCHEMA_SHEET_NAME }
+    }
+  },
+  category: 'mutation',
+  costHint: 'low',
+  requiresApproval: 'always'
+});
+
 registerTool('llm.planLayout', async (params, memory) => {
   const result = await runLayoutAgent(params, memory);
   return { data: result, actions: [] };
@@ -1049,7 +1082,9 @@ registerTool('requestPermissions', async (params, memory) => {
   costHint: 'medium'
 });
 
-const { webSearch, webFetch } = require('./web');
+const { webSearch, webFetch, webFetchJs } = require('./web');
+const { findCompetitors } = require('./research');
+const { runBrowserAgent } = require('./browserAgent');
 
 /* ---------- OpenBB Financial Data ---------- */
 let openbb = null;
@@ -1505,6 +1540,73 @@ registerTool('web.fetch', async (params) => {
     required: ['url'],
     properties: {
       url: { type: 'string', description: 'URL to fetch and extract text from' }
+    }
+  },
+  category: 'read',
+  costHint: 'medium'
+});
+
+registerTool('web.fetchJs', async (params) => {
+  const data = await webFetchJs(params);
+  return { data, actions: [] };
+}, {
+  description: 'Render a JS-heavy web page in a real headless Chromium (Playwright) and return clean text + links + optional screenshot. Use when web.fetch returns empty/JS-shell HTML (single-page apps, dashboards, sites that require client-side rendering). Cost: ~3-8s per fetch.',
+  inputs: ['url'],
+  schema: {
+    type: 'object',
+    required: ['url'],
+    properties: {
+      url: { type: 'string', description: 'URL to render' },
+      waitFor: { type: 'string', description: 'Optional CSS selector to wait for after load (default: networkidle)' },
+      waitMs: { type: 'integer', minimum: 0, maximum: 15000, description: 'Extra wait in ms after load' },
+      screenshot: { type: 'boolean', description: 'Return base64 PNG screenshot (default false)' },
+      fullPage: { type: 'boolean', description: 'Full-page screenshot vs viewport (default false)' },
+      maxChars: { type: 'integer', minimum: 500, maximum: 60000, description: 'Cap on returned text (default 15000)' },
+      timeoutMs: { type: 'integer', minimum: 5000, maximum: 60000, description: 'Total nav timeout (default 30000)' }
+    }
+  },
+  category: 'read',
+  costHint: 'medium'
+});
+
+registerTool('web.agent', async (params) => {
+  const data = await runBrowserAgent(params);
+  return { data, actions: [] };
+}, {
+  description: 'Spawn an autonomous browser agent (browser-use sidecar) to accomplish a multi-step web task: search, navigate, click, fill forms, scroll, extract data. The agent sees screenshots and reasons step-by-step. Use for goals that require navigation beyond a single page fetch: "find the latest 10-K filing for X and extract revenue", "log into MSCI ESG and pull rating for Y", "navigate Bloomberg quote page to extract analyst targets". REQUIRES the python_bridge sidecar to be running (./python_bridge/start_browseruse.sh). Cost: 30-180s per task.',
+  inputs: ['task'],
+  schema: {
+    type: 'object',
+    required: ['task'],
+    properties: {
+      task: { type: 'string', description: 'Natural-language goal (e.g. "Open sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=AAPL, find the most recent 10-K, copy the Net Sales total revenue for the latest year")' },
+      maxSteps: { type: 'integer', minimum: 1, maximum: 80, description: 'Max browsing steps (default 25)' },
+      headless: { type: 'boolean', description: 'Headless browser (default true)' },
+      model: { type: 'string', description: 'Override LLM model for the browser agent' },
+      useVision: { type: 'boolean', description: 'Enable vision-based reasoning on screenshots (default true)' },
+      returnScreenshots: { type: 'boolean', description: 'Return up to 6 step screenshots as base64 (default false)' },
+      timeoutMs: { type: 'integer', minimum: 30000, maximum: 600000, description: 'Total timeout in ms (default 240000)' }
+    }
+  },
+  category: 'read',
+  costHint: 'high'
+});
+
+registerTool('research.competitors', async (params) => {
+  const data = await findCompetitors(params);
+  return { data, actions: [] };
+}, {
+  description: 'Identify direct competitors of a target company. Combines OpenBB peer set (if ticker), real web SERP (Tavily/Brave/SerpAPI/DDG), Wikipedia and an LLM extractor. Returns ranked competitor list with ticker, rationale, confidence and optional live quote snapshots. Use this for "analyze this company" / "find competitors" / "build comps for X" requests instead of guessing.',
+  inputs: ['company', 'ticker'],
+  schema: {
+    type: 'object',
+    properties: {
+      company: { type: 'string', description: 'Company name (e.g. "Tesla", "Ferrari", "Acme Holdings")' },
+      ticker: { type: 'string', description: 'Public ticker if known (e.g. "TSLA", "RACE")' },
+      maxResults: { type: 'integer', minimum: 1, maximum: 20, description: 'Max competitors (default 10)' },
+      includeWeb: { type: 'boolean', description: 'Run web search (default true)' },
+      includePeers: { type: 'boolean', description: 'Run OpenBB peers (default true)' },
+      enrichWithQuotes: { type: 'boolean', description: 'Fetch Yahoo quote snapshot per competitor with a ticker (default false)' }
     }
   },
   category: 'read',

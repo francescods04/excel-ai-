@@ -1674,12 +1674,17 @@
     return total;
   }
 
-  async function executeActions(actions) {
+  const FOCUS_LOST_RE = /multiple workbooks|lost focus/i;
+  const FOCUS_MAX_RETRIES = 2;
+  const FOCUS_RETRY_DELAY_MS = 600;
+
+  async function executeActions(actions, _attempt = 0) {
     if (!actions || actions.length === 0) return;
     const cellCount = countBatchCells(actions);
     const shouldAutoSuspend = cellCount > 200;
+    let focusLost = false;
 
-    return Excel.run(async (context) => {
+    await Excel.run(async (context) => {
       if (shouldAutoSuspend) {
         context.application.calculationMode = Excel.CalculationMode.manual;
         console.log(`[Excel] Auto-suspended calculation for ${cellCount} cells`);
@@ -1773,6 +1778,11 @@
           console.error('Errore azione', action.type, actionErr);
           const detail = actionErr && actionErr.message ? actionErr.message : String(actionErr);
           const where = action.sheet ? ` (sheet=${action.sheet})` : '';
+          if (FOCUS_LOST_RE.test(detail) && _attempt < FOCUS_MAX_RETRIES) {
+            focusLost = true;
+            addLog(`Azione ${action.type} fallita per focus workbook perso, riprovo batch`, 'warn');
+            break;
+          }
           addLog(`Azione ${action.type} fallita${where}: ${detail}`, 'error');
         }
       }
@@ -1782,8 +1792,22 @@
         console.log('[Excel] Auto-resumed calculation after bulk write');
       }
 
-      await context.sync();
+      try { await context.sync(); } catch (syncErr) {
+        const detail = syncErr && syncErr.message ? syncErr.message : String(syncErr);
+        if (FOCUS_LOST_RE.test(detail) && _attempt < FOCUS_MAX_RETRIES) {
+          focusLost = true;
+          addLog(`context.sync fallito per focus perso, riprovo batch`, 'warn');
+        } else {
+          throw syncErr;
+        }
+      }
     });
+
+    if (focusLost && _attempt < FOCUS_MAX_RETRIES) {
+      addLog(`Retry batch Excel (tentativo ${_attempt + 2}/${FOCUS_MAX_RETRIES + 1})`, 'warn');
+      await new Promise(resolve => setTimeout(resolve, FOCUS_RETRY_DELAY_MS));
+      return executeActions(actions, _attempt + 1);
+    }
   }
 
   function parseTargetReference(target) {

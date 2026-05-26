@@ -304,7 +304,8 @@ async function runLayoutAgent(params, memory) {
     userText: user,
     timeoutMs: LAYOUT_TIMEOUT_MS,
     fallbackTimeoutMs: LAYOUT_FALLBACK_TIMEOUT_MS,
-    label: 'LayoutAgent LLM'
+    label: 'LayoutAgent LLM',
+    role: 'builder_structural'
   });
   logger.info(`[LayoutAgent] Completato in ${Date.now() - start}ms`);
   return result;
@@ -343,7 +344,8 @@ async function runFormulaAgent(params, memory) {
     userText: user,
     timeoutMs,
     fallbackTimeoutMs,
-    label: `FormulaAgent ${isSection ? params.section : 'full'}`
+    label: `FormulaAgent ${isSection ? params.section : 'full'}`,
+    role: 'builder_hard'
   });
   logger.info(`[FormulaAgent] Completato in ${Date.now() - start}ms`);
   if (result.actions && Array.isArray(result.actions)) {
@@ -395,7 +397,7 @@ ${wikiContext}`;
       timeoutMs: FORMAT_TIMEOUT_MS,
       fallbackTimeoutMs: FORMAT_FALLBACK_TIMEOUT_MS,
       label: 'FormatAgent LLM',
-      thinkingDisabled: true
+      role: 'builder_structural'
     });
     logger.info(`[FormatAgent] LLM completato in ${Date.now() - start}ms`);
     const rawActions = result?.actions && Array.isArray(result.actions)

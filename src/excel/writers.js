@@ -255,10 +255,15 @@ async function resolveSheetAndTarget(context, sheetCache, defaultSheet, action) 
   return { sheet, target: parsedTarget.rangeAddress || action.target };
 }
 
-async function executeActions(actions, updateStepsPanel) {
+const FOCUS_LOST_RE = /multiple workbooks|lost focus/i;
+const FOCUS_MAX_RETRIES = 2;
+const FOCUS_RETRY_DELAY_MS = 600;
+
+async function executeActions(actions, updateStepsPanel, _attempt = 0) {
   if (!actions || actions.length === 0) return { actionCount: 0, errorCount: 0, errors: [] };
 
-  return Excel.run(async (context) => {
+  let focusLost = false;
+  const result = await Excel.run(async (context) => {
     const actionErrors = [];
     const defaultSheet = context.workbook.worksheets.getActiveWorksheet();
     const sheetCache = new Map();
@@ -368,6 +373,11 @@ async function executeActions(actions, updateStepsPanel) {
         console.error('Errore azione', action.type, actionErr);
         const detail = actionErr && actionErr.message ? actionErr.message : String(actionErr);
         const where = action.sheet ? ` (sheet=${action.sheet})` : '';
+        if (FOCUS_LOST_RE.test(detail) && _attempt < FOCUS_MAX_RETRIES) {
+          focusLost = true;
+          addLog(`Azione ${action.type} fallita per focus workbook perso, riprovo batch`, 'warn');
+          break;
+        }
         addLog(`Azione ${action.type} fallita${where}: ${detail}`, 'error');
         actionErrors.push({
           type: action.type,
@@ -378,7 +388,17 @@ async function executeActions(actions, updateStepsPanel) {
       }
     }
 
-    await context.sync();
+    try {
+      await context.sync();
+    } catch (syncErr) {
+      const detail = syncErr && syncErr.message ? syncErr.message : String(syncErr);
+      if (FOCUS_LOST_RE.test(detail) && _attempt < FOCUS_MAX_RETRIES) {
+        focusLost = true;
+        addLog(`context.sync fallito per focus perso, riprovo batch`, 'warn');
+      } else {
+        throw syncErr;
+      }
+    }
 
     // 3. Store snapshot for undo (after successful sync)
     if (snapshot && snapshot.entries.length > 0) {
@@ -395,6 +415,14 @@ async function executeActions(actions, updateStepsPanel) {
       errors: actionErrors
     };
   });
+
+  if (focusLost && _attempt < FOCUS_MAX_RETRIES) {
+    addLog(`Retry batch Excel dopo focus perso (tentativo ${_attempt + 2}/${FOCUS_MAX_RETRIES + 1})`, 'warn');
+    await new Promise(resolve => setTimeout(resolve, FOCUS_RETRY_DELAY_MS));
+    return executeActions(actions, updateStepsPanel, _attempt + 1);
+  }
+
+  return result;
 }
 
 async function execSetCellValue(context, sheetCache, defaultSheet, action) {

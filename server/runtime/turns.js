@@ -145,27 +145,27 @@ function saveTurn(turn) {
   activeTurns.set(turn.id, turn);
   enforceActiveTurnsLimit();
 
-  // Persist to SQLite
+  // Persist to Supabase (fire and forget)
   try {
-    const db = require('../db/init').getDb();
-    db.prepare(`
-      INSERT OR REPLACE INTO turns (id, user_id, status, input_message_length, plan_json, task_count, action_count, model, created_at, completed_at, total_latency_ms)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      turn.id,
-      turn.userId || null,
-      turn.status,
-      turn.objective?.length || 0,
-      turn.plan ? JSON.stringify(turn.plan) : null,
-      turn.plan?.tasks?.length || 0,
-      turn.actionCount || 0,
-      turn.llm?.modelOverride || process.env.OPENROUTER_MODEL || null,
-      turn.createdAt,
-      turn.status === 'completed' || turn.status === 'error' ? nowIso() : null,
-      turn.totalLatencyMs || null
-    );
+    const { getSupabase } = require('../supabase/client');
+    const supabase = getSupabase();
+    supabase.from('turns').upsert({
+      id: turn.id,
+      user_id: turn.userId || null,
+      status: turn.status,
+      input_message_length: turn.objective?.length || 0,
+      plan_json: turn.plan || null,
+      task_count: turn.plan?.tasks?.length || 0,
+      action_count: turn.actionCount || 0,
+      model: turn.llm?.modelOverride || process.env.OPENROUTER_MODEL || null,
+      created_at: turn.createdAt,
+      completed_at: (turn.status === 'completed' || turn.status === 'error') ? nowIso() : null,
+      total_latency_ms: turn.totalLatencyMs || null,
+    }).then(({ error }) => {
+      if (error) logger.warn(`[Turn] Supabase save error for ${turn.id}: ${error.message}`);
+    });
   } catch (err) {
-    logger.warn(`[Turn] SQLite save error for ${turn.id}: ${err.message}`);
+    logger.warn(`[Turn] Supabase save error for ${turn.id}: ${err.message}`);
   }
 
   // Terminal states flush immediately; intermediate states debounce

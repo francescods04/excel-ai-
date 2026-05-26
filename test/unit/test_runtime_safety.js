@@ -5,6 +5,7 @@ const {
   assertActionBatchWithinLimits,
   allSettledLimit
 } = require('../../server/runtime/safetyLimits');
+const { chooseTurnStrategy } = require('../../server/runtime/turns');
 
 async function test(name, fn) {
   try {
@@ -51,6 +52,49 @@ async function main() {
       value: index
     }));
     assert.throws(() => assertActionBatchWithinLimits(actions, { id: 't9' }), /troppe azioni Excel/);
+  });
+
+  await test('turn router prefers fast agent loop for local workbook continuation', () => {
+    const strategy = chooseTurnStrategy('analizza questo excel e completalo', {
+      activeSheet: 'DCF',
+      selectedRange: 'DCF!T48',
+      workbookSheets: ['DCF'],
+      allSheetsData: {
+        DCF: { usedRange: 'A1:L39', rowCount: 39, columnCount: 12 }
+      }
+    });
+
+    assert.strictEqual(strategy.mode, 'agent_loop');
+    assert.strictEqual(strategy.promptVariant, 'fast');
+    assert.strictEqual(strategy.allowEscalation, true);
+  });
+
+  await test('turn router keeps full public-company builds on deep planner path', () => {
+    const strategy = chooseTurnStrategy('voglio fare un DCF di Apple da zero con WACC, sensitivity e fonti', {
+      activeSheet: 'Sheet1',
+      workbookSheets: ['Sheet1']
+    });
+
+    assert.strictEqual(strategy.mode, 'planned_dag');
+    assert.strictEqual(strategy.allowEscalation, false);
+  });
+
+  await test('turn router uses structured agent loop for continuity edits on multi-sheet models', () => {
+    const strategy = chooseTurnStrategy('continua questo modello e correggi la sensitivity', {
+      activeSheet: 'Sensitivity',
+      workbookSheets: ['Summary', 'Assumptions', 'WACC', 'DCF', 'Sensitivity'],
+      allSheetsData: {
+        Summary: { usedRange: 'A1:H20' },
+        Assumptions: { usedRange: 'A1:F30' },
+        WACC: { usedRange: 'A1:F25' },
+        DCF: { usedRange: 'A1:L40' },
+        Sensitivity: { usedRange: 'A1:G18' }
+      }
+    }, 'parent-turn-1');
+
+    assert.strictEqual(strategy.mode, 'agent_loop');
+    assert.strictEqual(strategy.promptVariant, 'default');
+    assert.strictEqual(strategy.reason, 'continuity_incremental_edit');
   });
 }
 

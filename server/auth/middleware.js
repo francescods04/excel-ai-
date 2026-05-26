@@ -1,7 +1,6 @@
-const { verifyAccessToken } = require('./auth');
-const { getDb } = require('../db/init');
+const { getSupabase } = require('../supabase/client');
 
-function authenticate(req, res, next) {
+async function authenticate(req, res, next) {
   const header = req.headers.authorization;
   const token = header?.startsWith('Bearer ') ? header.slice(7) : req.query?.token || null;
 
@@ -10,31 +9,36 @@ function authenticate(req, res, next) {
   }
 
   try {
-    const payload = verifyAccessToken(token);
-    req.userId = payload.userId;
-    req.userEmail = payload.email;
-    req.userPlan = payload.plan;
+    const supabase = getSupabase();
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+
+    if (error || !user) {
+      return res.status(401).json({ error: 'Token non valido o scaduto', code: 'TOKEN_EXPIRED' });
+    }
+
+    req.userId = user.id;
+    req.userEmail = user.email;
+    req.userPlan = user.app_metadata?.plan || 'free';
     next();
   } catch (err) {
-    if (err.name === 'TokenExpiredError') {
-      return res.status(401).json({ error: 'Token scaduto', code: 'TOKEN_EXPIRED' });
-    }
-    return res.status(401).json({ error: 'Token non valido' });
+    return res.status(401).json({ error: 'Errore di autenticazione' });
   }
 }
 
 function optionalAuth(req, res, next) {
   const header = req.headers.authorization;
-  if (!header || !header.startsWith('Bearer ')) return next();
+  const token = header?.startsWith('Bearer ') ? header.slice(7) : req.query?.token || null;
 
-  const token = header.slice(7);
-  try {
-    const payload = verifyAccessToken(token);
-    req.userId = payload.userId;
-    req.userEmail = payload.email;
-    req.userPlan = payload.plan;
-  } catch (_) {}
-  next();
+  if (!token) return next();
+
+  getSupabase().auth.getUser(token).then(({ data: { user }, error }) => {
+    if (!error && user) {
+      req.userId = user.id;
+      req.userEmail = user.email;
+      req.userPlan = user.app_metadata?.plan || 'free';
+    }
+    next();
+  }).catch(() => next());
 }
 
 function requirePlan(plan) {
@@ -46,22 +50,32 @@ function requirePlan(plan) {
   };
 }
 
-function quotaCheck(req, res, next) {
-  const db = getDb();
-  const user = db.prepare('SELECT plan, daily_quota FROM users WHERE id = ?').get(req.userId);
-  if (!user) return res.status(401).json({ error: 'Utente non trovato' });
+async function quotaCheck(req, res, next) {
+  try {
+    const supabase = getSupabase();
 
-  const turnsToday = db.prepare(
-    "SELECT COUNT(*) as count FROM turns WHERE user_id = ? AND date(created_at) = date('now')"
-  ).get(req.userId).count;
+    const { data: quotaData } = await supabase
+      .rpc('get_user_quota', { uid: req.userId })
+      .single();
 
-  if (turnsToday >= user.daily_quota) {
-    return res.status(429).json({ error: 'Quota giornaliera esaurita', quota: user.daily_quota, used: turnsToday });
+    const dailyQuota = quotaData?.daily_limit || 10;
+
+    const { count: turnsToday } = await supabase
+      .from('turns')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', req.userId)
+      .gte('created_at', new Date().toISOString().slice(0, 10));
+
+    if (turnsToday >= dailyQuota) {
+      return res.status(429).json({ error: 'Quota giornaliera esaurita', quota: dailyQuota, used: turnsToday });
+    }
+
+    req.dailyQuota = dailyQuota;
+    req.turnsUsedToday = turnsToday;
+    next();
+  } catch (err) {
+    return res.status(500).json({ error: 'Errore verifica quota' });
   }
-
-  req.dailyQuota = user.daily_quota;
-  req.turnsUsedToday = turnsToday;
-  next();
 }
 
 module.exports = { authenticate, optionalAuth, requirePlan, quotaCheck };

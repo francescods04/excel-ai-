@@ -997,6 +997,15 @@ function tryAutoAnswer(questionData, context, objective) {
   return answers.length === 1 ? answers[0] : answers.join(' | ');
 }
 
+function normalizeQuestionResponsePayload(response) {
+  if (response == null) return { answers: [] };
+  if (response.values && typeof response.values === 'object') return response.values;
+  if (Array.isArray(response.answers)) return { answers: response.answers };
+  if (typeof response.answers === 'string') return { answers: [response.answers] };
+  if (typeof response === 'string') return { answers: [response] };
+  return response;
+}
+
 /* ---------- Agent Loop ---------- */
 
 async function runAgentLoop(objective, context, options = {}) {
@@ -1189,6 +1198,20 @@ async function runAgentLoop(objective, context, options = {}) {
           ));
           results.push({ type: 'ask_user', question: questionData, autoAnswer });
           onEvent('agentAutoAnswer', { question: questionData, answer: autoAnswer, iteration });
+          continue;
+        }
+
+        if (typeof options.requestQuestion === 'function') {
+          logger.info(`[AgentLoop] requestQuestion callback handling ${Array.isArray(questionData) ? questionData.length : 1} prompt(s)`);
+          onEvent('agentPaused', { reason: 'user_input_required', question: questionData, iteration, handledInline: true });
+          const userResponse = await options.requestQuestion(questionData, { iteration, objective });
+          const normalizedResponse = normalizeQuestionResponsePayload(userResponse);
+          messages.push({
+            role: 'user',
+            content: `User response: ${JSON.stringify(normalizedResponse)}`
+          });
+          results.push({ type: 'ask_user', question: questionData, response: normalizedResponse });
+          onEvent('agentResumed', { question: questionData, response: normalizedResponse, iteration });
           continue;
         }
 

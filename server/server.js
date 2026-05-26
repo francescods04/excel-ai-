@@ -69,15 +69,53 @@ app.use((req, res, next) => {
   next();
 });
 
-/* ---------- Auth API ---------- */
-const auth = require('./auth/auth');
+/* ---------- Auth API (Supabase) ---------- */
 const { authenticate, optionalAuth, quotaCheck } = require('./auth/middleware');
 
-app.post('/api/auth/register', auth.register);
-app.post('/api/auth/login', auth.login);
-app.post('/api/auth/refresh', auth.refresh);
-app.post('/api/auth/logout', auth.logout);
-app.get('/api/auth/me', authenticate, auth.me);
+app.get('/api/auth/me', authenticate, async (req, res) => {
+  try {
+    const { getSupabase } = require('./supabase/client');
+    const supabase = getSupabase();
+
+    const { data: profile } = await supabase
+      .from('user_settings')
+      .select('*')
+      .eq('user_id', req.userId)
+      .single();
+
+    const { count: turnsToday } = await supabase
+      .from('turns')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', req.userId)
+      .gte('created_at', new Date().toISOString().slice(0, 10));
+
+    const { count: totalTurns } = await supabase
+      .from('turns')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', req.userId);
+
+    res.json({
+      id: req.userId,
+      email: req.userEmail,
+      plan: req.userPlan,
+      settings: profile?.settings_json || {},
+      turns_today: turnsToday || 0,
+      total_turns: totalTurns || 0,
+      daily_quota: 10,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ---------- Supabase Config (per il frontend) ---------- */
+const { getSupabaseUrl } = require('./supabase/client');
+app.get('/api/config', (req, res) => {
+  res.json({
+    supabaseUrl: getSupabaseUrl(),
+    supabaseAnonKey: process.env.SUPABASE_ANON_KEY || '',
+  });
+});
 
 const START_TIME = Date.now();
 
@@ -136,60 +174,82 @@ app.get('/manifest.xml', (req, res) => {
 });
 
 /* ---------- Admin Dashboard API ---------- */
-app.get('/api/admin/stats', authenticate, (req, res) => {
+app.get('/api/admin/stats', authenticate, async (req, res) => {
   if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
   try {
-    const db = require('../db/init').getDb();
-    const totalUsers = db.prepare('SELECT COUNT(*) as c FROM users').get().c;
-    const turnsToday = db.prepare("SELECT COUNT(*) as c FROM turns WHERE date(created_at) = date('now')").get().c;
-    const errors24h = db.prepare("SELECT COUNT(*) as c FROM events WHERE event_type = 'turn.failed' AND ts > datetime('now', '-24 hours')").get().c;
-    const llmCalls24h = db.prepare("SELECT COUNT(*) as c, SUM(tokens_in) as tin, SUM(tokens_out) as tout FROM events WHERE event_type = 'llm.response' AND ts > datetime('now', '-24 hours')").get();
-    res.json({ totalUsers, turnsToday, errors24h, llmCalls24h: llmCalls24h.c, tokensIn24h: llmCalls24h.tin || 0, tokensOut24h: llmCalls24h.tout || 0 });
+    const supabase = require('./supabase/client').getSupabase();
+
+    const [{ count: totalUsers }, { count: turnsToday }, { count: errors24h }, { data: llmCalls }] = await Promise.all([
+      supabase.from('auth.users').select('*', { count: 'exact', head: true }),
+      supabase.from('turns').select('*', { count: 'exact', head: true }).gte('created_at', new Date().toISOString().slice(0, 10)),
+      supabase.from('events').select('*', { count: 'exact', head: true }).eq('event_type', 'turn.failed').gte('ts', new Date(Date.now() - 86400000).toISOString()),
+      supabase.from('events').select('tokens_in, tokens_out').eq('event_type', 'llm.response').gte('ts', new Date(Date.now() - 86400000).toISOString()),
+    ]);
+
+    const tokensIn24h = (llmCalls || []).reduce((s, r) => s + (r.tokens_in || 0), 0);
+    const tokensOut24h = (llmCalls || []).reduce((s, r) => s + (r.tokens_out || 0), 0);
+
+    res.json({ totalUsers, turnsToday, errors24h, llmCalls24h: (llmCalls || []).length, tokensIn24h, tokensOut24h });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-app.get('/api/admin/events-daily', authenticate, (req, res) => {
+app.get('/api/admin/events-daily', authenticate, async (req, res) => {
   if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
   try {
-    const db = require('../db/init').getDb();
-    const rows = db.prepare(`
-      SELECT date(created_at) as day,
-        SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
-        SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed
-      FROM turns
-      WHERE created_at > datetime('now', '-30 days')
-      GROUP BY day ORDER BY day
-    `).all();
-    res.json({ days: rows.map(r => r.day), completed: rows.map(r => r.completed), failed: rows.map(r => r.failed) });
+    const supabase = require('./supabase/client').getSupabase();
+    const { data: turns } = await supabase
+      .from('turns')
+      .select('status, created_at')
+      .gte('created_at', new Date(Date.now() - 30 * 86400000).toISOString())
+      .order('created_at', { ascending: true });
+
+    const byDay = {};
+    for (const t of (turns || [])) {
+      const day = t.created_at.slice(0, 10);
+      if (!byDay[day]) byDay[day] = { completed: 0, failed: 0 };
+      if (t.status === 'completed') byDay[day].completed++;
+      if (t.status === 'error' || t.status === 'failed') byDay[day].failed++;
+    }
+    const days = Object.keys(byDay).sort();
+    res.json({ days, completed: days.map(d => byDay[d].completed), failed: days.map(d => byDay[d].failed) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-app.get('/api/admin/events-by-type', authenticate, (req, res) => {
+app.get('/api/admin/events-by-type', authenticate, async (req, res) => {
   if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
   try {
-    const db = require('../db/init').getDb();
-    const rows = db.prepare("SELECT event_type as type, COUNT(*) as count FROM events WHERE ts > datetime('now', '-24 hours') GROUP BY event_type ORDER BY count DESC").all();
-    res.json(rows);
+    const supabase = require('./supabase/client').getSupabase();
+    const { data: rows } = await supabase.rpc('admin_event_counts_24h');
+    res.json(rows || []);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-app.get('/api/admin/recent-turns', authenticate, (req, res) => {
+app.get('/api/admin/recent-turns', authenticate, async (req, res) => {
   if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
   try {
-    const db = require('../db/init').getDb();
-    const turns = db.prepare(`
-      SELECT t.id, t.user_id as userId, t.status, t.task_count as taskCount, t.action_count as actionCount,
-        t.total_latency_ms as totalLatencyMs, t.created_at as createdAt, u.email as userEmail
-      FROM turns t LEFT JOIN users u ON t.user_id = u.id
-      ORDER BY t.created_at DESC LIMIT 50
-    `).all();
-    res.json(turns);
+    const supabase = require('./supabase/client').getSupabase();
+    const { data: turns } = await supabase
+      .from('turns')
+      .select('id, user_id, status, task_count, action_count, total_latency_ms, created_at, user:user_id(email)')
+      .order('created_at', { ascending: false })
+      .limit(50);
+
+    res.json((turns || []).map(t => ({
+      id: t.id,
+      userId: t.user_id,
+      userEmail: t.user?.email,
+      status: t.status,
+      taskCount: t.task_count,
+      actionCount: t.action_count,
+      totalLatencyMs: t.total_latency_ms,
+      createdAt: t.created_at,
+    })));
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

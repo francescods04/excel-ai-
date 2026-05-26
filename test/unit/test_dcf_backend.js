@@ -186,7 +186,9 @@ async function main() {
     const dcfSections = plan.tasks
       .filter(task => task.tool === 'finance.dcf.buildSection')
       .map(task => task.params.section);
-    assert.deepStrictEqual(dcfSections, ['shell', 'sources', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'scenarios', 'summary', 'audit', 'format']);
+    const uniqueDcfSections = Array.from(new Set(dcfSections));
+    assert.deepStrictEqual(uniqueDcfSections, ['shell', 'sources', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'scenarios', 'summary', 'audit', 'format']);
+    assert.ok(dcfSections.length >= 10, `expected at least 10 DCF section tasks, got ${dcfSections.length}`);
     plan.tasks
       .filter(task => task.tool === 'finance.dcf.buildSection')
       .forEach(task => {
@@ -227,7 +229,8 @@ async function main() {
     assert.ok(plan.tasks.some(task => task.tool === 'workbook.buildGraph'));
     assert.ok(!plan.tasks.some(task => task.tool === 'llm.writeFormulas' && task.params.section === 'full_model_review'));
     const dcfTasks = plan.tasks.filter(task => task.tool === 'finance.dcf.buildSection');
-    assert.deepStrictEqual(dcfTasks.map(task => task.params.section), ['shell', 'sources', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'scenarios', 'summary', 'audit', 'format']);
+    const repairUniqueSections = Array.from(new Set(dcfTasks.map(task => task.params.section)));
+    assert.deepStrictEqual(repairUniqueSections, ['shell', 'sources', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'scenarios', 'summary', 'audit', 'format']);
     dcfTasks.forEach(task => assert.strictEqual(task.params.mode, 'template'));
   });
 
@@ -247,7 +250,9 @@ async function main() {
     const dcfSections = plan.tasks
       .filter(task => task.tool === 'finance.dcf.buildSection')
       .map(task => task.params.section);
-    assert.deepStrictEqual(dcfSections, ['shell', 'sources', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'scenarios', 'summary', 'audit', 'format']);
+    const completeUniqueSections = Array.from(new Set(dcfSections));
+    assert.deepStrictEqual(completeUniqueSections, ['shell', 'sources', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'scenarios', 'summary', 'audit', 'format']);
+    assert.ok(dcfSections.length >= 10, `expected at least 10 DCF section tasks, got ${dcfSections.length}`);
   });
 
   await test('planner can force domain playbook for deterministic DCF runtime tests', async () => {
@@ -455,6 +460,38 @@ async function main() {
     assert.strictEqual(formula.params.workbookUnderstanding, understand.id);
   });
 
+  await test('planner skips workbook.understand for narrow continuity edits on existing model state', () => {
+    const rawPlan = {
+      objective: 'aggiorna la formula del wacc e colora meglio assumptions',
+      tasks: [
+        { id: 't1', agent: 'data', tool: 'workbook.readWorkbook', description: 'read', params: { maxRows: 20, maxCols: 10 }, deps: [], requiresApproval: false, status: 'pending' },
+        { id: 't2', agent: 'formula', tool: 'finance.dcf.buildSection', description: 'update assumptions', params: { section: 'assumptions', usesResults: ['t1'] }, deps: ['t1'], requiresApproval: false, status: 'pending' }
+      ]
+    };
+    const continuityContext = {
+      ...genericSalesContext,
+      recentSheets: ['Assumptions', 'WACC'],
+      lastModelState: {
+        turnId: 'turn-parent',
+        modelType: 'DCF',
+        sheets: ['Assumptions', 'WACC', 'DCF']
+      },
+      parentPlan: {
+        objective: 'crea un dcf completo',
+        tasks: []
+      },
+      parentResults: {
+        t9: {
+          data: { section: 'assumptions' },
+          actions: []
+        }
+      }
+    };
+
+    const plan = planner.ensureWorkbookUnderstandingPlan(rawPlan, continuityContext, rawPlan.objective);
+    assert.ok(!plan.tasks.some(task => task.tool === 'workbook.understand'));
+  });
+
   await test('workbook.understand deterministic fallback works for non-finance workbooks', async () => {
     const previous = process.env.WORKBOOK_UNDERSTANDING_ENABLED;
     process.env.WORKBOOK_UNDERSTANDING_ENABLED = 'false';
@@ -607,10 +644,12 @@ async function main() {
     assert.ok(!plan.tasks.some(task => task.tool.startsWith('yahoo.')));
 
     const dcfTasks = plan.tasks.filter(task => task.tool === 'finance.dcf.buildSection');
+    const fullValUniqueSections = Array.from(new Set(dcfTasks.map(task => task.params.section)));
     assert.deepStrictEqual(
-      dcfTasks.map(task => task.params.section),
+      fullValUniqueSections,
       ['shell', 'sources', 'assumptions', 'wacc', 'dcf', 'sensitivity', 'scenarios', 'summary', 'audit', 'format']
     );
+    assert.ok(dcfTasks.length >= 10, `expected at least 10 DCF section tasks, got ${dcfTasks.length}`);
     dcfTasks.forEach(task => {
       assert.strictEqual(task.params.sourcePriority, 'workbook_first');
       assert.strictEqual(task.params.ticker, undefined);
@@ -637,7 +676,8 @@ async function main() {
     assert.strictEqual(inferHarnessAgent({ tool: 'workbook.understand', params: {} }), 'workbookScout');
     assert.strictEqual(inferHarnessAgent({ tool: 'openbb.equity.fundamentals.income', params: {} }), 'marketScout');
     assert.strictEqual(inferHarnessAgent({ tool: 'finance.dcf.buildSection', params: { section: 'wacc' } }), 'modelAnalyst');
-    assert.strictEqual(inferHarnessAgent({ tool: 'finance.dcf.buildSection', params: { section: 'audit' } }), 'auditReviewer');
+    assert.strictEqual(inferHarnessAgent({ tool: 'finance.dcf.buildSection', params: { section: 'audit' } }), 'formulaEngineer');
+    assert.strictEqual(inferHarnessAgent({ tool: 'workbook.scan', description: 'audit review', params: {} }), 'workbookScout');
 
     const readTask = applyExcelHarnessToTask({
       id: 't1',
@@ -658,8 +698,10 @@ async function main() {
       'analizza questa azienda e fammi una full valuation completa',
       localItalianContext
     );
+    const previousHarnessAiOnly = process.env.HARNESS_AI_ONLY;
     const previous = process.env.AI_MANAGED_PLANNING;
     try {
+      delete process.env.HARNESS_AI_ONLY;
       delete process.env.AI_MANAGED_PLANNING;
       assert.strictEqual(
         planner.shouldUseDomainPlaybookFirst(
@@ -671,6 +713,7 @@ async function main() {
         ),
         false
       );
+      process.env.HARNESS_AI_ONLY = 'false';
       assert.strictEqual(
         planner.shouldUseDomainPlaybookFirst(
           null,
@@ -693,6 +736,8 @@ async function main() {
         true
       );
     } finally {
+      if (previousHarnessAiOnly === undefined) delete process.env.HARNESS_AI_ONLY;
+      else process.env.HARNESS_AI_ONLY = previousHarnessAiOnly;
       if (previous === undefined) delete process.env.AI_MANAGED_PLANNING;
       else process.env.AI_MANAGED_PLANNING = previous;
     }
