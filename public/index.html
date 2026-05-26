@@ -252,6 +252,26 @@
     .reveal-delay-4 { transition-delay: 0.4s; }
     .reveal-delay-5 { transition-delay: 0.5s; }
 
+    /* ── Video Embeds ── */
+    .hero-video-bg {
+      position: absolute; inset: 0; overflow: hidden; z-index: 0; pointer-events: none;
+    }
+    .hero-video-bg video {
+      width: 100%; height: 100%; object-fit: cover; opacity: 0.18;
+    }
+    .demo-video {
+      max-width: 720px; margin: 48px auto 0; border-radius: var(--radius-lg);
+      overflow: hidden; border: 1px solid var(--border);
+      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    }
+    .demo-video video { width: 100%; display: block; }
+    .usecase-video {
+      max-width: 800px; margin: 40px auto 0; border-radius: var(--radius-lg);
+      overflow: hidden; border: 1px solid var(--border);
+      box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+    }
+    .usecase-video video { width: 100%; display: block; }
+
     /* Counter animation */
     .counter { display: inline; }
 
@@ -288,7 +308,13 @@
 
   <main>
     <!-- ============ HERO ============ -->
-    <section class="hero" data-reveal>
+    <section class="hero" data-reveal style="position:relative;overflow:hidden;">
+      <div class="hero-video-bg">
+        <video autoplay muted loop playsinline preload="auto"
+               poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1920 1080'%3E%3Crect fill='%2306090d' width='1920' height='1080'/%3E%3C/svg%3E">
+          <source src="/public/videos/hero-bg.mp4" type="video/mp4">
+        </video>
+      </div>
       <div class="container">
         <div class="hero-badge reveal" data-reveal>
           <span class="dot"></span> DeepSeek v4 Pro &mdash; Disponibile su Excel
@@ -432,7 +458,15 @@
         <p class="section-subtitle reveal reveal-delay-2" data-reveal">
           Ecco esempi concreti di attivit&agrave; che richiederebbero ore. Con Excel AI bastano secondi.
         </p>
-        <div class="usecases reveal reveal-delay-3" data-reveal>
+
+        <div class="usecase-video reveal reveal-delay-3" data-reveal>
+          <video autoplay muted loop playsinline preload="none"
+                 poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 960 640'%3E%3Crect fill='%2306090d' width='960' height='640' rx='12'/%3E%3Ctext x='480' y='330' text-anchor='middle' fill='%234a5666' font-family='monospace' font-size='14'%3E▶ Slide casi d'\''uso%3C/text%3E%3C/svg%3E">
+            <source src="/public/videos/use-case-slides.mp4" type="video/mp4">
+          </video>
+        </div>
+
+        <div class="usecases reveal reveal-delay-4" data-reveal>
           <div class="uc-card">
             <span class="uc-tag">Contabilit&agrave;</span>
             <h4>Riconciliazione bancaria</h4>
@@ -488,22 +522,11 @@
           Opera su celle, formule, tabelle pivot e formattazione come farebbe un operatore esperto.
         </p>
 
-        <div class="terminal-window reveal reveal-delay-3" data-reveal>
-          <div class="terminal-bar">
-            <span class="terminal-dot"></span><span class="terminal-dot"></span><span class="terminal-dot"></span>
-            <span class="terminal-title">excel-agent ~ audit-trail</span>
-          </div>
-          <div class="terminal-body">
-            <div><span class="terminal-prompt">$</span> <span class="terminal-cmd">crea foglio di bilancio con ricavi, costi e margine</span></div>
-            <div style="margin:8px 0 4px;"><span class="terminal-output">&rarr; Analisi del foglio in corso...</span></div>
-            <div style="margin:4px 0;"><span class="terminal-output">&rarr; Struttura rilevata: Data, Descrizione, Importo, Categoria</span></div>
-            <div style="margin:4px 0;"><span class="terminal-output">&rarr; Piano: 6 azioni preparate</span></div>
-            <div style="margin:12px 0 4px;"><span class="terminal-highlight">[1/6] INSERT_ROW</span> <span class="terminal-output">| A1:C1 | Ricavi | Costi | Margine</span></div>
-            <div><span class="terminal-highlight">[2/6] SET_FORMULA</span> <span class="terminal-output">| C2 | =A2-B2</span></div>
-            <div><span class="terminal-highlight">[3/6] SET_FORMAT</span> <span class="terminal-output">| Valuta &euro;, grassetto intestazioni, bordi</span></div>
-            <div style="margin:12px 0 4px;"><span class="terminal-output">In attesa di autorizzazione...</span></div>
-            <div><span class="terminal-prompt">$</span> <span class="terminal-cursor"></span></div>
-          </div>
+        <div class="demo-video reveal reveal-delay-3" data-reveal>
+          <video autoplay muted loop playsinline preload="none"
+                 poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 960 640'%3E%3Crect fill='%23020408' width='960' height='640' rx='12'/%3E%3Ctext x='480' y='330' text-anchor='middle' fill='%234a5666' font-family='monospace' font-size='14'%3E▶ Demo interattiva%3C/text%3E%3C/svg%3E">
+            <source src="/public/videos/terminal-demo.mp4" type="video/mp4">
+          </video>
         </div>
 
         <div class="capabilities reveal reveal-delay-4" data-reveal>
@@ -823,44 +846,7 @@
     }, { threshold: 0.5 });
     document.querySelectorAll('.counter').forEach(el => counterObserver.observe(el));
 
-    // Terminal animation
-    (function typeTerminal() {
-      const lines = document.querySelectorAll('.terminal-body > div');
-      lines.forEach(l => l.style.opacity = '0');
-      let i = 0;
-      const delays = [300, 600, 400, 500, 300, 300, 200, 200];
-      function showNext() {
-        if (i >= lines.length) return;
-        lines[i].style.transition = 'opacity 0.3s';
-        lines[i].style.opacity = '1';
-        i++;
-        if (i < delays.length) { setTimeout(showNext, delays[i]); }
-        else { setTimeout(showNext, 200); }
-      }
-      const termWin = document.querySelector('.terminal-window');
-      const termObs = new IntersectionObserver((entries) => {
-        if (entries[0].isIntersecting) { showNext(); termObs.disconnect(); }
-      }, { threshold: 0.3 });
-      termObs.observe(termWin);
-    })();
-
-    // Install tabs
-    function switchInstallTab(os) {
-      document.querySelectorAll('#installa .os-tab').forEach(t => t.classList.toggle('active', t.dataset.os === os));
-      document.getElementById('panel-mac').classList.toggle('active', os === 'mac');
-      document.getElementById('panel-win').classList.toggle('active', os === 'windows');
-    }
-    function switchTermTab(os) {
-      document.querySelectorAll('#terminal-install .os-tab').forEach(t => t.classList.toggle('active', t.dataset.os === os));
-      document.getElementById('term-mac').classList.toggle('active', os === 'mac');
-      document.getElementById('term-win').classList.toggle('active', os === 'windows');
-    }
-    function toggleTerminal(e) {
-      e.preventDefault();
-      const el = document.getElementById('terminal-install');
-      el.style.display = el.style.display === 'none' ? 'block' : 'none';
-      if (el.style.display === 'block') el.scrollIntoView({ behavior: 'smooth' });
-    }
+    // Init
     (function() { switchInstallTab(navigator.platform.toUpperCase().indexOf('MAC') >= 0 ? 'mac' : 'windows'); })();
 
     // Copy command
