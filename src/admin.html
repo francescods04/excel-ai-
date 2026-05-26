@@ -124,8 +124,23 @@
 
 <script>
 const BASE = '/api/admin';
-const tok = localStorage.getItem('excelai_access_token');
-if (!tok) { document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:monospace;color:#f87171">Access denied — login first</div>'; throw new Error('no token'); }
+function getToken() {
+  // Prova da excelai_access_token (custom) o dal localStorage di Supabase
+  const custom = localStorage.getItem('excelai_access_token');
+  if (custom) return custom;
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key && key.includes('supabase') && key.includes('auth-token')) {
+      try {
+        const data = JSON.parse(localStorage.getItem(key));
+        return data?.access_token || null;
+      } catch (_) {}
+    }
+  }
+  return null;
+}
+const tok = getToken();
+if (!tok) { document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:monospace;color:#f87171">Access denied — login first in the Excel add-in</div>'; throw new Error('no token'); }
 const h = { Authorization: `Bearer ${tok}` };
 
 async function loadStats() {
