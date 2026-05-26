@@ -8,6 +8,36 @@
   <link rel="stylesheet" href="taskpane.css">
 </head>
 <body>
+  <!-- Login Overlay -->
+  <div id="login-overlay">
+    <div id="login-card">
+      <div id="login-brand">
+        <div id="brand-mark" aria-hidden="true">
+          <span></span><span></span><span></span><span></span>
+        </div>
+        <h2>Excel AI</h2>
+        <p>AI assistant per i tuoi fogli di calcolo</p>
+      </div>
+      <div id="login-tabs">
+        <button class="login-tab active" data-form="login-form">Accedi</button>
+        <button class="login-tab" data-form="register-form">Registrati</button>
+      </div>
+      <form id="login-form" class="auth-form active">
+        <input type="email" id="login-email" placeholder="Email" required autocomplete="email">
+        <input type="password" id="login-password" placeholder="Password" required autocomplete="current-password">
+        <div class="auth-error" id="login-error"></div>
+        <button type="submit" class="btn btn-primary btn-full">Accedi</button>
+      </form>
+      <form id="register-form" class="auth-form">
+        <input type="text" id="register-name" placeholder="Nome" required autocomplete="name">
+        <input type="email" id="register-email" placeholder="Email" required autocomplete="email">
+        <input type="password" id="register-password" placeholder="Password (min 6 caratteri)" required minlength="6" autocomplete="new-password">
+        <div class="auth-error" id="register-error"></div>
+        <button type="submit" class="btn btn-primary btn-full">Registrati</button>
+      </form>
+    </div>
+  </div>
+
   <div id="app">
     <div id="header">
       <div id="header-left">

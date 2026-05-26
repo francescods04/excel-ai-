@@ -19,6 +19,7 @@ import { enqueueActions, executeActions as execActions, undoLastSnapshot, waitFo
 import { startTurn, approveTurnExecution, postTurnResponse, postTurnResponseBatch, postTurnActionResult, getTurn, getErrorMessageFromResponse } from './api/turn.js';
 import { startAgent, resumeAgentWithResponse, postAgentClientResponse } from './api/agent.js';
 import { loadModelConfig, changeModel, warmupLLM } from './api/config.js';
+import { init as initAuth, getAccessToken, apiCall } from './auth/auth.js';
 
 const AGENT_KEYWORDS = ['dcf','wacc','lbo','model','modello','build','costruisci','valuation','finanziario','financial','forecast','proiezioni','sensitivity','scenario'];
 const MAX_HANDLED_IDS = 1500;
@@ -85,6 +86,7 @@ Office.onReady((info) => {
 });
 
 async function init() {
+  initAuth();
   initTabs();
   initExecutionLog();
   initApprovalModal();
@@ -319,7 +321,8 @@ async function runAgentMode(text) {
 
 function openAgentEventStream(agentId) {
   closeAgentEventStream();
-  const src = new EventSource(`${API_BASE}/api/agent/stream/${agentId}`);
+  const token = getAccessToken();
+  const src = new EventSource(`${API_BASE}/api/agent/stream/${agentId}${token ? '?token=' + encodeURIComponent(token) : ''}`);
   state.agentEventSource = src;
 
   src.addEventListener('agentStarted', () => {
@@ -778,7 +781,8 @@ function openTurnEventStream(turnId, planMsgId) {
 
   function connect() {
     if (state.currentTurnId !== turnId) return;
-    currentSource = new EventSource(`${API_BASE}/api/turn/stream/${turnId}`);
+    const token = getAccessToken();
+    currentSource = new EventSource(`${API_BASE}/api/turn/stream/${turnId}${token ? '?token=' + encodeURIComponent(token) : ''}`);
     state.eventSource = currentSource;
     setupListeners(currentSource);
   }

@@ -152,7 +152,7 @@ app.get('/api/admin/stats', authenticate, (req, res) => {
 
 /* ---------- Turn / Item Runtime (Codex-inspired) ---------- */
 
-app.post('/api/turn/start', async (req, res) => {
+app.post('/api/turn/start', authenticate, quotaCheck, async (req, res) => {
   try {
     const { message, context, parentTurnId, modelOverride } = req.body;
     if (!message) return res.status(400).json({ error: 'Messaggio richiesto' });
@@ -168,7 +168,7 @@ app.post('/api/turn/start', async (req, res) => {
   }
 });
 
-app.post('/api/turn/approve', async (req, res) => {
+app.post('/api/turn/approve', authenticate, async (req, res) => {
   try {
     const { turnId } = req.body;
     if (!turnId) return res.status(400).json({ error: 'turnId richiesto' });
@@ -184,7 +184,7 @@ app.post('/api/turn/approve', async (req, res) => {
   }
 });
 
-app.post('/api/turn/respond', async (req, res) => {
+app.post('/api/turn/respond', authenticate, async (req, res) => {
   try {
     const { turnId, requestId, response } = req.body;
     if (!turnId || !requestId) {
@@ -199,7 +199,7 @@ app.post('/api/turn/respond', async (req, res) => {
   }
 });
 
-app.post('/api/turn/respond-batch', async (req, res) => {
+app.post('/api/turn/respond-batch', authenticate, async (req, res) => {
   try {
     const { turnId, responses } = req.body;
     if (!turnId || !Array.isArray(responses)) {
@@ -222,7 +222,7 @@ app.post('/api/turn/respond-batch', async (req, res) => {
   }
 });
 
-app.post('/api/turn/action-result', async (req, res) => {
+app.post('/api/turn/action-result', authenticate, async (req, res) => {
   try {
     const { turnId, taskId } = req.body || {};
     if (!turnId || !taskId) {
@@ -237,7 +237,7 @@ app.post('/api/turn/action-result', async (req, res) => {
   }
 });
 
-app.get('/api/turn/stream/:turnId', async (req, res) => {
+app.get('/api/turn/stream/:turnId', authenticate, async (req, res) => {
   const { turnId } = req.params;
   const turn = turns.loadTurn(turnId);
   if (!turn) return res.status(404).json({ error: 'Turn non trovato' });
@@ -664,7 +664,7 @@ app.post('/api/agent/start', async (req, res) => {
   }
 });
 
-app.get('/api/agent/stream/:agentId', async (req, res) => {
+app.get('/api/agent/stream/:agentId', authenticate, async (req, res) => {
   const { agentId } = req.params;
   const agent = activeAgents.get(agentId);
   if (!agent) {

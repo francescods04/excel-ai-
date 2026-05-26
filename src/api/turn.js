@@ -1,11 +1,16 @@
-'use strict';
-
 import { API_BASE } from '../ui/tabs.js';
+import { getAccessToken } from '../auth/auth.js';
+
+function authHeaders(headers = {}) {
+  const token = getAccessToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  return headers;
+}
 
 async function startTurn(message, context, modelOverride, parentTurnId = null) {
   const res = await fetch(`${API_BASE}/api/turn/start`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ message, context, modelOverride, parentTurnId })
   });
   if (!res.ok) {
@@ -17,7 +22,7 @@ async function startTurn(message, context, modelOverride, parentTurnId = null) {
 async function approveTurnExecution(turnId) {
   const res = await fetch(`${API_BASE}/api/turn/approve`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ turnId })
   });
   if (!res.ok) {
@@ -28,7 +33,7 @@ async function approveTurnExecution(turnId) {
 async function postTurnResponse(turnId, requestId, response) {
   const res = await fetch(`${API_BASE}/api/turn/respond`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ turnId, requestId, response })
   });
   if (!res.ok) {
@@ -40,7 +45,7 @@ async function postTurnResponse(turnId, requestId, response) {
 async function postTurnResponseBatch(turnId, responses) {
   const res = await fetch(`${API_BASE}/api/turn/respond-batch`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ turnId, responses })
   });
   if (!res.ok) {
@@ -52,7 +57,7 @@ async function postTurnResponseBatch(turnId, responses) {
 async function postTurnActionResult(turnId, result) {
   const res = await fetch(`${API_BASE}/api/turn/action-result`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ turnId, ...(result || {}) })
   });
   if (!res.ok) {
@@ -63,7 +68,9 @@ async function postTurnActionResult(turnId, result) {
 }
 
 async function getTurn(turnId) {
-  const res = await fetch(`${API_BASE}/api/turn/${encodeURIComponent(turnId)}`);
+  const res = await fetch(`${API_BASE}/api/turn/${encodeURIComponent(turnId)}`, {
+    headers: authHeaders()
+  });
   if (!res.ok) {
     throw new Error(await getErrorMessageFromResponse(res, 'Errore lettura turn'));
   }
@@ -79,7 +86,7 @@ async function getErrorMessageFromResponse(response, fallbackMessage) {
       const text = await response.text();
       if (text) {
         if (text.includes('Cannot POST /api/turn/start')) {
-          return 'Il taskpane sta parlando con un server statico o non aggiornato. Riavvia il backend corretto con ./start-dev.sh.';
+          return 'Il taskpane sta parlando con un server statico o non aggiornato. Riavvia il backend corretto.';
         }
         return `${fallback}: ${text}`;
       }

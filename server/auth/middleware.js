@@ -3,11 +3,12 @@ const { getDb } = require('../db/init');
 
 function authenticate(req, res, next) {
   const header = req.headers.authorization;
-  if (!header || !header.startsWith('Bearer ')) {
+  const token = header?.startsWith('Bearer ') ? header.slice(7) : req.query?.token || null;
+
+  if (!token) {
     return res.status(401).json({ error: 'Token mancante' });
   }
 
-  const token = header.slice(7);
   try {
     const payload = verifyAccessToken(token);
     req.userId = payload.userId;
