@@ -150,6 +150,55 @@ app.get('/api/admin/stats', authenticate, (req, res) => {
   }
 });
 
+app.get('/api/admin/events-daily', authenticate, (req, res) => {
+  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const db = require('../db/init').getDb();
+    const rows = db.prepare(`
+      SELECT date(created_at) as day,
+        SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
+        SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed
+      FROM turns
+      WHERE created_at > datetime('now', '-30 days')
+      GROUP BY day ORDER BY day
+    `).all();
+    res.json({ days: rows.map(r => r.day), completed: rows.map(r => r.completed), failed: rows.map(r => r.failed) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/admin/events-by-type', authenticate, (req, res) => {
+  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const db = require('../db/init').getDb();
+    const rows = db.prepare("SELECT event_type as type, COUNT(*) as count FROM events WHERE ts > datetime('now', '-24 hours') GROUP BY event_type ORDER BY count DESC").all();
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/admin/recent-turns', authenticate, (req, res) => {
+  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const db = require('../db/init').getDb();
+    const turns = db.prepare(`
+      SELECT t.id, t.user_id as userId, t.status, t.task_count as taskCount, t.action_count as actionCount,
+        t.total_latency_ms as totalLatencyMs, t.created_at as createdAt, u.email as userEmail
+      FROM turns t LEFT JOIN users u ON t.user_id = u.id
+      ORDER BY t.created_at DESC LIMIT 50
+    `).all();
+    res.json(turns);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/admin', (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'src', 'admin.html'));
+});
+
 /* ---------- Turn / Item Runtime (Codex-inspired) ---------- */
 
 app.post('/api/turn/start', authenticate, quotaCheck, async (req, res) => {

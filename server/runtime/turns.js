@@ -3,6 +3,7 @@ const path = require('path');
 
 const logger = require('../utils/logger');
 const planner = require('../agents/planner');
+const { runAgentLoop } = require('../agents/agentLoop');
 const streaming = require('../agents/streaming');
 const conversationMemory = require('./conversationMemory');
 const { executeTool, registry } = require('../tools/registry');
@@ -19,6 +20,7 @@ const { computeLevels } = require('../utils/graph');
 const { buildUndoActions, summarizeUndo } = require('./undo');
 const { isPrefetchSafeTask } = require('./prefetchPolicy');
 const { LIMITS, assertActionBatchWithinLimits, allSettledLimit } = require('./safetyLimits');
+const { track } = require('../telemetry/tracker');
 
 const TURNS_DIR = path.join(__dirname, '..', 'turns');
 
@@ -32,6 +34,7 @@ const runningTaskPromises = new Map(); // `${turnId}:${taskId}` -> Promise
 
 const MAX_ACTIVE_TURNS = 20;
 const TURN_CLEANUP_DELAY_MS = 5 * 60 * 1000;
+const AGENT_LOOP_TASK_ID = 'agent-loop';
 
 function enforceActiveTurnsLimit() {
   if (activeTurns.size <= MAX_ACTIVE_TURNS) return;
@@ -196,6 +199,144 @@ function appendLog(turnId, message, level = 'info', extra = {}) {
   saveTurn(turn);
   streaming.sendEvent(turnId, 'log', entry);
   return entry;
+}
+
+function emitEphemeralLog(turnId, message, level = 'info', extra = {}) {
+  const entry = {
+    time: nowIso(),
+    level,
+    message,
+    ...extra
+  };
+  streaming.sendEvent(turnId, 'log', entry);
+  return entry;
+}
+
+function emitTodoWrite(turnId, todos = []) {
+  streaming.sendEvent(turnId, 'todoWrite', {
+    turnId,
+    todos
+  });
+}
+
+function startEphemeralProgress(turnId, {
+  initialMessage = null,
+  heartbeatLabel = null,
+  intervalMs = 12000,
+  level = 'info',
+  extra = {}
+} = {}) {
+  const startedAt = Date.now();
+  if (initialMessage) {
+    emitEphemeralLog(turnId, initialMessage, level, extra);
+  }
+  if (!heartbeatLabel) return () => {};
+
+  const timer = setInterval(() => {
+    const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+    emitEphemeralLog(turnId, `${heartbeatLabel} (${elapsedSeconds}s)`, level, extra);
+  }, intervalMs);
+  if (typeof timer.unref === 'function') timer.unref();
+  return () => clearInterval(timer);
+}
+
+function emitPlanningTodos(turnId, phase = 'context') {
+  const todos = [
+    {
+      content: 'Raccolgo il contesto del workbook',
+      activeForm: 'Sto leggendo il contesto del workbook',
+      status: phase === 'context' ? 'in_progress' : 'completed'
+    },
+    {
+      content: 'Genero il piano AI',
+      activeForm: 'Sto generando il piano AI',
+      status: phase === 'llm'
+        ? 'in_progress'
+        : (['review', 'awaiting_approval'].includes(phase) ? 'completed' : 'pending')
+    },
+    {
+      content: 'Preparo il piano eseguibile',
+      activeForm: 'Sto validando e normalizzando il piano',
+      status: phase === 'review'
+        ? 'in_progress'
+        : (phase === 'awaiting_approval' ? 'completed' : 'pending')
+    },
+    {
+      content: 'Attendo la tua conferma',
+      activeForm: 'Attendo la tua conferma per eseguire',
+      status: phase === 'awaiting_approval' ? 'in_progress' : 'pending'
+    }
+  ];
+  emitTodoWrite(turnId, todos);
+}
+
+function emitExecutionTodos(turnId, phase = 'queued', meta = {}) {
+  const levelLabel = meta.currentLevel !== undefined
+    ? `Eseguo i task del livello ${meta.currentLevel + 1}/${meta.totalLevels || meta.currentLevel + 1}`
+    : 'Eseguo i task del piano';
+  const levelActive = meta.activeForm || 'Sto eseguendo i task approvati';
+  const todos = [
+    {
+      content: 'Piano approvato',
+      status: ['queued', 'level', 'snapshot', 'summary', 'done'].includes(phase) ? 'completed' : 'in_progress'
+    },
+    {
+      content: levelLabel,
+      activeForm: levelActive,
+      status: phase === 'level'
+        ? 'in_progress'
+        : (['snapshot', 'summary', 'done'].includes(phase) ? 'completed' : 'pending')
+    },
+    {
+      content: 'Verifico il workbook finale',
+      activeForm: 'Sto verificando il workbook finale',
+      status: phase === 'snapshot'
+        ? 'in_progress'
+        : (['summary', 'done'].includes(phase) ? 'completed' : 'pending')
+    },
+    {
+      content: 'Preparo il riepilogo finale',
+      activeForm: 'Sto preparando il riepilogo finale',
+      status: phase === 'summary'
+        ? 'in_progress'
+        : (phase === 'done' ? 'completed' : 'pending')
+    }
+  ];
+  emitTodoWrite(turnId, todos);
+}
+
+function emitAgentLoopTodos(turnId, phase = 'inspect') {
+  const todos = [
+    {
+      content: 'Leggo solo il contesto necessario',
+      activeForm: 'Sto leggendo il contesto minimo utile del workbook',
+      status: ['apply', 'verify', 'awaiting_input', 'escalate', 'done'].includes(phase) ? 'completed' : (phase === 'inspect' ? 'in_progress' : 'pending')
+    },
+    {
+      content: 'Aggiorno il workbook in piccoli batch',
+      activeForm: 'Sto applicando modifiche incrementali al workbook',
+      status: phase === 'apply'
+        ? 'in_progress'
+        : (['verify', 'awaiting_input', 'escalate', 'done'].includes(phase) ? 'completed' : 'pending')
+    },
+    {
+      content: 'Verifico i risultati e correggo se serve',
+      activeForm: phase === 'awaiting_input'
+        ? 'Attendo una scelta per continuare la verifica'
+        : 'Sto verificando i risultati prodotti',
+      status: ['verify', 'awaiting_input'].includes(phase)
+        ? 'in_progress'
+        : (['escalate', 'done'].includes(phase) ? 'completed' : 'pending')
+    },
+    {
+      content: 'Escalo a un piano piu profondo solo se necessario',
+      activeForm: 'Sto passando a una pianificazione piu profonda per gestire la complessita emersa',
+      status: phase === 'escalate'
+        ? 'in_progress'
+        : (phase === 'done' ? 'completed' : 'pending')
+    }
+  ];
+  emitTodoWrite(turnId, todos);
 }
 
 function setTurnStatus(turnId, status, error) {
@@ -398,7 +539,7 @@ function emitTaskActions(turnId, task, actions) {
   streaming.sendEvent(turnId, 'taskActions', {
     turnId,
     taskId: task.id,
-    itemId: taskItemId(task.id),
+    itemId: task.itemId || taskItemId(task.id),
     actions
   });
 }
@@ -462,11 +603,13 @@ function emitToolRequestResolved(turnId, request, response, status = 'resolved')
 function buildTurn(message, context, parentTurnId = null, options = {}) {
   const turnId = makeTurnId();
   const createdAt = nowIso();
+  const strategy = chooseTurnStrategy(message, context || {}, parentTurnId, options);
 
   return {
     id: turnId,
     objective: message,
     context: context || {},
+    strategy,
     llm: {
       modelOverride: options.modelOverride || null
     },
@@ -480,6 +623,150 @@ function buildTurn(message, context, parentTurnId = null, options = {}) {
     parentTurnId,
     createdAt,
     updatedAt: createdAt
+  };
+}
+
+function normalizeObjectiveText(objective) {
+  return String(objective || '').toLowerCase();
+}
+
+function countWorkbookSheets(context = {}) {
+  if (Number.isFinite(context.sheetCount)) return Number(context.sheetCount);
+  if (Array.isArray(context.workbookSheets) && context.workbookSheets.length > 0) return context.workbookSheets.length;
+  if (context.allSheetsData && typeof context.allSheetsData === 'object') return Object.keys(context.allSheetsData).length;
+  return 0;
+}
+
+function detectExistingFinanceSurface(context = {}) {
+  const activeSheet = String(context.activeSheet || '');
+  const sheetNames = [
+    activeSheet,
+    ...(Array.isArray(context.workbookSheets) ? context.workbookSheets : []),
+    ...Object.keys(context.allSheetsData || {})
+  ].filter(Boolean).join(' ');
+  return /(dcf|wacc|sensitivity|summary|audit|scenario|assumption|valuation|sources)/i.test(sheetNames);
+}
+
+function objectiveLooksLikeInstitutionalBuild(lowerObjective) {
+  return /(from scratch|da zero|new model|nuovo modello|full dcf|institutional|investment committee|build a dcf|costruisci un dcf|crea un dcf|voglio fare un dcf|lbo|three[ -]?statement|three statement|comps|comparable companies|merger model|m&a model)/.test(lowerObjective);
+}
+
+function objectiveNeedsExternalData(lowerObjective) {
+  return /(ticker|public company|mercato|market data|beta|risk[- ]free|treasury|peer|peers|competitor|competitors|consensus|filing|sec|investor relations|quotazione)/.test(lowerObjective);
+}
+
+function objectiveLooksLocalAndIncremental(lowerObjective) {
+  return /(completa|complete|continua|continue|finish|fix|sistema|correggi|repair|update|aggiorna|analizza questo excel|analizza questo foglio|riempi|fill|sensitivity|formula|formule|sheet|foglio|tabella|model completion|repair task)/.test(lowerObjective);
+}
+
+function objectiveLooksComplexWorkbook(lowerObjective) {
+  return /(audit|cross[- ]sheet|multi[- ]sheet|multi sheet|piu fogli|più fogli|dashboard|restructure|ristruttura|riclassifica|consolidate|reconcile|riconcilia)/.test(lowerObjective);
+}
+
+function chooseTurnStrategy(objective, context = {}, parentTurnId = null, options = {}) {
+  if (options.strategy && typeof options.strategy === 'object') {
+    return { ...options.strategy };
+  }
+
+  const lowerObjective = normalizeObjectiveText(objective);
+  const sheetCount = countWorkbookSheets(context);
+  const hasParentContinuity = Boolean(parentTurnId);
+  const hasSelection = Boolean(context?.selectedRange);
+  const hasExistingFinanceSurface = detectExistingFinanceSurface(context);
+  const explicitInstitutionalBuild = objectiveLooksLikeInstitutionalBuild(lowerObjective);
+  const needsExternalData = objectiveNeedsExternalData(lowerObjective);
+  const localIncrementalIntent = objectiveLooksLocalAndIncremental(lowerObjective);
+  const complexWorkbookIntent = objectiveLooksComplexWorkbook(lowerObjective);
+
+  if (explicitInstitutionalBuild || (needsExternalData && !hasExistingFinanceSurface && !hasParentContinuity)) {
+    return {
+      mode: 'planned_dag',
+      label: 'Deep planned DAG',
+      reason: explicitInstitutionalBuild ? 'institutional_build_request' : 'external_data_first',
+      promptVariant: 'default',
+      allowEscalation: false
+    };
+  }
+
+  if (localIncrementalIntent || hasParentContinuity || hasSelection || hasExistingFinanceSurface) {
+    return {
+      mode: 'agent_loop',
+      label: complexWorkbookIntent || sheetCount > 2 ? 'Structured AI loop' : 'Fast local AI loop',
+      reason: hasParentContinuity
+        ? 'continuity_incremental_edit'
+        : (hasExistingFinanceSurface ? 'existing_finance_surface' : 'local_incremental_edit'),
+      promptVariant: complexWorkbookIntent || sheetCount > 2 ? 'default' : 'fast',
+      allowEscalation: true,
+      fallbackMode: 'planned_dag',
+      maxIterations: complexWorkbookIntent || sheetCount > 2 ? 90 : 45
+    };
+  }
+
+  if (sheetCount <= 2 && !needsExternalData) {
+    return {
+      mode: 'agent_loop',
+      label: 'Structured AI loop',
+      reason: 'lightweight_local_workbook',
+      promptVariant: 'default',
+      allowEscalation: true,
+      fallbackMode: 'planned_dag',
+      maxIterations: 70
+    };
+  }
+
+  return {
+    mode: 'planned_dag',
+    label: 'Deep planned DAG',
+    reason: 'default_deep_path',
+    promptVariant: 'default',
+    allowEscalation: false
+  };
+}
+
+function buildAgentLoopPlan(objective, context = {}, strategy = {}) {
+  const activeSheet = context?.activeSheet || 'foglio attivo';
+  return {
+    objective,
+    meta: {
+      strategyMode: strategy.mode,
+      strategyLabel: strategy.label,
+      promptVariant: strategy.promptVariant,
+      reason: strategy.reason
+    },
+    tasks: [
+      {
+        id: 'g1',
+        agent: 'ai',
+        tool: 'agent.loop.inspect',
+        description: `Leggi solo il contesto necessario sul foglio ${activeSheet}`,
+        deps: [],
+        requiresApproval: false
+      },
+      {
+        id: 'g2',
+        agent: 'ai',
+        tool: 'agent.loop.apply',
+        description: 'Applica modifiche in piccoli batch visibili all\'utente',
+        deps: ['g1'],
+        requiresApproval: false
+      },
+      {
+        id: 'g3',
+        agent: 'ai',
+        tool: 'agent.loop.verify',
+        description: 'Verifica i risultati e correggi eventuali problemi rilevati',
+        deps: ['g2'],
+        requiresApproval: false
+      },
+      {
+        id: 'g4',
+        agent: 'ai',
+        tool: 'agent.loop.escalate_if_needed',
+        description: 'Escala automaticamente a un piano più profondo solo se il task lo richiede',
+        deps: ['g3'],
+        requiresApproval: false
+      }
+    ]
   };
 }
 
@@ -709,6 +996,19 @@ function buildRuntimeHelpers(turnId, task) {
       });
     },
 
+    async requestQuestion(questions = [], params = {}) {
+      return requestClientResponse(turnId, {
+        id: makeRequestId('question'),
+        type: 'question',
+        taskId,
+        title: params.title || 'Mi serve una scelta per continuare',
+        prompt: params.prompt || 'Seleziona l\'opzione migliore per continuare il lavoro nel workbook.',
+        questions: Array.isArray(questions) ? questions : [questions],
+        submitLabel: params.submitLabel || 'Continua',
+        cancelLabel: params.cancelLabel || 'Annulla'
+      });
+    },
+
     async requestPermissions(params = {}) {
       return requestClientResponse(turnId, {
         id: makeRequestId('perm'),
@@ -756,10 +1056,19 @@ async function failTurn(turnId, errorMessage, itemPatch) {
     emitItemCompleted(turnId, errorItem);
   }
 
+  const turn = _getTurnRef(turnId);
+  track({
+    eventType: 'turn.failed',
+    userId: turn?.userId || null,
+    properties: { errorType: errorMessage?.split(':')[0] || 'unknown', errorMessage: errorMessage?.slice(0, 200) },
+    success: 0,
+  });
+
   appendLog(turnId, errorMessage, 'error');
-  const turn = setTurnStatus(turnId, 'error', errorMessage);
-  emitTurnCompleted(turn);
-  return turn;
+  emitTodoWrite(turnId, []);
+  const updated = setTurnStatus(turnId, 'error', errorMessage);
+  emitTurnCompleted(updated);
+  return updated;
 }
 
 function isSafeTask(task) {
@@ -844,6 +1153,11 @@ function extractTurnMemorySummary(turn, failedTaskIds = new Set()) {
       if (task.params?.section) dcfSections.add(String(task.params.section).toLowerCase());
       if (Array.isArray(task.params?.sheets)) task.params.sheets.forEach(sheet => addSheetName(sheets, sheet));
     }
+    if (task.tool === 'finance.model.buildSection') {
+      modelType = String(task.params?.modelType || 'custom').toUpperCase();
+      if (task.params?.section) dcfSections.add(String(task.params.section).toLowerCase());
+      if (Array.isArray(task.params?.sheets)) task.params.sheets.forEach(sheet => addSheetName(sheets, sheet));
+    }
   }
 
   for (const result of Object.values(turn.results || {})) {
@@ -881,34 +1195,79 @@ function extractTurnMemorySummary(turn, failedTaskIds = new Set()) {
   };
 }
 
+function buildTurnExecutionContext(turn) {
+  const { parentPlan, parentResults } = getParentContinuity(turn);
+  return {
+    ...turn.context,
+    conversationHistory: conversationMemory.getConversationContext(),
+    recentSheets: conversationMemory.getRecentSheets(),
+    lastModelState: conversationMemory.getLastModelState(),
+    parentResults,
+    parentPlan
+  };
+}
+
 async function planTurn(turnId) {
   const turn = _getTurnRef(turnId);
   if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
+  let stopPlanningHeartbeat = () => {};
 
   try {
     appendLog(turnId, 'Creo il piano di esecuzione agentico...');
+    emitPlanningTodos(turnId, 'context');
+    stopPlanningHeartbeat = startEphemeralProgress(turnId, {
+      initialMessage: 'Sto raccogliendo il contesto iniziale del workbook.',
+      heartbeatLabel: 'Sto ancora preparando il piano AI'
+    });
 
     // If this turn has a parent, include parent results in context so planner can do incremental work
     const { parentPlan, parentResults } = getParentContinuity(turn);
     if (turn.parentTurnId) {
       if (parentPlan || parentResults) {
-        appendLog(turnId, `Turn collegato a parent ${turn.parentTurnId}. Risultati precedenti disponibili per pianificazione incrementale.`);
+        emitEphemeralLog(turnId, `Turn collegato a parent ${turn.parentTurnId}. Riutilizzo i risultati precedenti per lavorare in continuita.`);
       } else {
         appendLog(turnId, `Turn parent ${turn.parentTurnId} non trovato. Procedo con il solo contesto corrente.`, 'warn');
       }
     }
+    const strategy = turn.strategy || chooseTurnStrategy(turn.objective, turn.context, turn.parentTurnId);
+    const enrichedContext = buildTurnExecutionContext(turn);
 
-    const enrichedContext = {
-      ...turn.context,
-      conversationHistory: conversationMemory.getConversationContext(),
-      recentSheets: conversationMemory.getRecentSheets(),
-      lastModelState: conversationMemory.getLastModelState(),
-      parentResults,
-      parentPlan
-    };
+    if (strategy.mode === 'agent_loop') {
+      emitPlanningTodos(turnId, 'llm');
+      appendLog(turnId, `Router: uso ${strategy.label} (${strategy.reason}) come primo gear.`);
+      const plan = buildAgentLoopPlan(turn.objective, turn.context, strategy);
+      emitPlanningTodos(turnId, 'review');
+
+      const updatedTurn = _getTurnRef(turnId);
+      updatedTurn.plan = plan;
+      updatedTurn.strategy = strategy;
+      updatedTurn.status = 'awaiting_approval';
+      saveTurn(updatedTurn);
+
+      const completedPlanItem = upsertItem(turnId, {
+        id: 'plan',
+        type: 'plan',
+        title: 'Piano proposto',
+        status: 'completed',
+        objective: plan.objective || turn.objective,
+        tasks: plan.tasks,
+        strategy: plan.meta || strategy
+      });
+
+      emitPlanUpdated(updatedTurn);
+      emitItemCompleted(turnId, completedPlanItem);
+      appendLog(turnId, `Piano rapido pronto: 4 step, prompt variant ${strategy.promptVariant}. Attendo conferma per eseguire.`);
+      emitPlanningTodos(turnId, 'awaiting_approval');
+      stopPlanningHeartbeat();
+      emitTurnAwaitingApproval(updatedTurn);
+      return;
+    }
+
+    emitPlanningTodos(turnId, 'llm');
     const plan = await planner.plan(turn.objective, enrichedContext, turnId, {
       modelOverride: turn.llm?.modelOverride || undefined
     });
+    emitPlanningTodos(turnId, 'review');
 
     const updatedTurn = _getTurnRef(turnId);
     updatedTurn.plan = plan;
@@ -927,6 +1286,8 @@ async function planTurn(turnId) {
     emitPlanUpdated(updatedTurn);
     emitItemCompleted(turnId, completedPlanItem);
     appendLog(turnId, `Piano pronto: ${plan.tasks.length} task. Attendo conferma per eseguire.`);
+    emitPlanningTodos(turnId, 'awaiting_approval');
+    stopPlanningHeartbeat();
 
     // Auto-execute safe tasks per-level while user reviews plan (prefetch).
     // Cascades: level 0 safe → wait → level 1 safe (deps now satisfied) → ...
@@ -966,6 +1327,8 @@ async function planTurn(turnId) {
       type: 'plan',
       title: 'Piano proposto'
     });
+  } finally {
+    stopPlanningHeartbeat();
   }
 }
 
@@ -997,13 +1360,19 @@ async function executeSingleTaskInner(turnId, task) {
   });
 
   emitItemStarted(turnId, runningItem);
-  appendLog(turnId, `[${task.id}] ${task.agent}/${task.tool} avviato`, 'info', { taskId: task.id, itemId });
+  emitEphemeralLog(turnId, `[${task.id}] ${task.agent}/${task.tool} avviato`, 'info', { taskId: task.id, itemId });
   if (task.harness?.agent) {
-    appendLog(turnId, `[${task.id}] Harness: ${task.harness.agent} (${task.harness.mode}, risk=${task.harness.risk})`, 'info', {
+    emitEphemeralLog(turnId, `[${task.id}] Harness: ${task.harness.agent} (${task.harness.mode}, risk=${task.harness.risk})`, 'info', {
       taskId: task.id,
       itemId
     });
   }
+
+  const stopTaskHeartbeat = startEphemeralProgress(turnId, {
+    initialMessage: `[${task.id}] Preparo il contesto per ${task.description || task.tool}`,
+    heartbeatLabel: `[${task.id}] Ancora al lavoro su ${task.description || task.tool}`,
+    extra: { taskId: task.id, itemId }
+  });
 
   try {
     const turn = _getTurnRef(turnId);
@@ -1013,7 +1382,8 @@ async function executeSingleTaskInner(turnId, task) {
     // Critic retry loop: re-prompt FormulaAgent on validation errors (max CRITIC_MAX_RETRY).
     const MAX_CRITIC_RETRY = Number(process.env.CRITIC_MAX_RETRY ?? 2);
     const isFormulaTask = task.tool === 'llm.writeFormulas'
-      || (task.tool === 'finance.dcf.buildSection' && task.agent === 'formula');
+      || (task.tool === 'finance.dcf.buildSection' && task.agent === 'formula')
+      || (task.tool === 'finance.model.buildSection' && task.agent === 'formula');
     let result;
     let criticResult;
     let attempt = 0;
@@ -1021,6 +1391,7 @@ async function executeSingleTaskInner(turnId, task) {
 
     while (true) {
       const executionMemory = buildExecutionMemory(turn, { ...task, params: activeParams }, runtime);
+      emitEphemeralLog(turnId, `[${task.id}] Eseguo ${task.agent}/${task.tool}`, 'info', { taskId: task.id, itemId });
       result = await executeTool(
         task.tool,
         activeParams,
@@ -1028,6 +1399,7 @@ async function executeSingleTaskInner(turnId, task) {
       );
       enforceHarnessResultPermissions(task, result);
       const layout = buildLayoutFromResults(executionMemory.results);
+      emitEphemeralLog(turnId, `[${task.id}] Valido il risultato`, 'info', { taskId: task.id, itemId });
       criticResult = validateTaskOutput(result, layout);
 
       const shouldRetry = isFormulaTask
@@ -1060,15 +1432,25 @@ async function executeSingleTaskInner(turnId, task) {
       appendLog(turnId, `[${task.id}] Warning: ${warnSummary}`, 'warn', { taskId: task.id, itemId });
     }
     if (result.data?.builder) {
-      appendLog(turnId, `[${task.id}] Builder: ${result.data.builder}`, result.data.aiError ? 'warn' : 'info', {
-        taskId: task.id,
-        itemId
-      });
+      if (result.data.aiError) {
+        appendLog(turnId, `[${task.id}] Builder: ${result.data.builder}`, 'warn', {
+          taskId: task.id,
+          itemId
+        });
+      } else {
+        emitEphemeralLog(turnId, `[${task.id}] Builder: ${result.data.builder}`, 'info', {
+          taskId: task.id,
+          itemId
+        });
+      }
     }
 
     // Log metriche critic (formula count, mutation count)
     if (criticResult.stats) {
-      appendLog(turnId, `[${task.id}] Stats: ${criticResult.stats.formulaCount} formule, ${criticResult.stats.mutationCount} mutazioni`, 'info');
+      emitEphemeralLog(turnId, `[${task.id}] Stats: ${criticResult.stats.formulaCount} formule, ${criticResult.stats.mutationCount} mutazioni`, 'info', {
+        taskId: task.id,
+        itemId
+      });
     }
 
     if (result.actions && result.actions.length > 0) {
@@ -1086,14 +1468,14 @@ async function executeSingleTaskInner(turnId, task) {
 
       if (needsApproval && (actionHasMutations || task.requiresApproval)) {
         const preview = buildActionPreview(result.actions, task);
-        appendLog(turnId, `[${task.id}] In attesa di conferma per ${preview.mutationCount} modifiche`, 'info', {
+        emitEphemeralLog(turnId, `[${task.id}] In attesa di conferma per ${preview.mutationCount} modifiche`, 'info', {
           taskId: task.id,
           itemId
         });
         await runtime.requestActionPermission(result.actions, preview);
       }
 
-      appendLog(turnId, `[${task.id}] Inviate ${result.actions.length} azioni Excel`, 'info', { taskId: task.id, itemId });
+      emitEphemeralLog(turnId, `[${task.id}] Invio ${result.actions.length} azioni Excel`, 'info', { taskId: task.id, itemId });
       emitTaskActions(turnId, task, result.actions);
     }
 
@@ -1114,7 +1496,8 @@ async function executeSingleTaskInner(turnId, task) {
     });
 
     emitItemCompleted(turnId, completedItem);
-    appendLog(turnId, `[${task.id}] completato`, 'info', { taskId: task.id, itemId });
+    emitEphemeralLog(turnId, `[${task.id}] completato`, 'info', { taskId: task.id, itemId });
+    stopTaskHeartbeat();
     return { ok: true, taskId: task.id, result };
   } catch (error) {
     logger.error(`[Turn ${turnId}][${task.id}] Task error: ${error.message}`);
@@ -1139,6 +1522,7 @@ async function executeSingleTaskInner(turnId, task) {
 
     emitItemCompleted(turnId, failedItem);
     appendLog(turnId, `[${task.id}] errore: ${error.message}`, 'error', { taskId: task.id, itemId });
+    stopTaskHeartbeat();
     // Non rilanciare: gli altri task dello stesso livello possono continuare,
     // ma il caller riceve un esito strutturato per marcare il turn come fallito.
     return { ok: false, taskId: task.id, error: error.message };
@@ -1174,7 +1558,265 @@ function skipTaskDueToFailedDeps(turnId, task, failedDeps) {
   return { ok: false, skipped: true, taskId: task.id, error: message };
 }
 
-async function executeTurn(turnId) {
+async function escalateAgentLoopTurn(turnId, strategy, attemptResult, collectedActions = []) {
+  const turn = _getTurnRef(turnId);
+  if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
+
+  storeTaskResult(turnId, `${AGENT_LOOP_TASK_ID}:attempt`, {
+    data: {
+      builder: 'agent-loop',
+      strategy: strategy.reason,
+      promptVariant: strategy.promptVariant,
+      status: attemptResult.status,
+      summary: attemptResult.summary,
+      iteration: attemptResult.iteration,
+      escalated: true
+    },
+    actions: collectedActions
+  });
+
+  appendLog(turnId, `Loop AI ${strategy.label} insufficiente (${attemptResult.status}). Escalo automaticamente al planner profondo.`, 'warn');
+  emitAgentLoopTodos(turnId, 'escalate');
+
+  const enrichedContext = buildTurnExecutionContext(turn);
+  const deepPlan = await planner.plan(turn.objective, enrichedContext, turnId, {
+    modelOverride: turn.llm?.modelOverride || undefined
+  });
+
+  turn.plan = deepPlan;
+  turn.strategy = {
+    mode: 'planned_dag',
+    label: 'Deep planned DAG',
+    reason: 'agent_loop_escalation',
+    promptVariant: 'default',
+    allowEscalation: false,
+    escalatedFrom: strategy.mode,
+    priorReason: strategy.reason
+  };
+  saveTurn(turn);
+
+  upsertItem(turnId, {
+    id: 'plan',
+    type: 'plan',
+    title: 'Piano proposto',
+    status: 'completed',
+    objective: deepPlan.objective || turn.objective,
+    tasks: deepPlan.tasks,
+    strategy: turn.strategy
+  });
+  emitPlanUpdated(turn);
+  appendLog(turnId, `Piano profondo pronto: ${deepPlan.tasks.length} task. Continuo automaticamente senza una nuova approvazione.`, 'info');
+
+  return executePlannedTurn(turnId);
+}
+
+async function executeAgentLoopTurn(turnId) {
+  const turn = _getTurnRef(turnId);
+  if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
+
+  const strategy = turn.strategy || chooseTurnStrategy(turn.objective, turn.context, turn.parentTurnId);
+  logger.info(`[Turn ${turnId}] Execute agent loop turn (${strategy.label})`);
+
+  const task = {
+    id: AGENT_LOOP_TASK_ID,
+    agent: 'ai',
+    tool: 'agent.loop',
+    description: strategy.label
+  };
+  const itemId = taskItemId(task.id);
+  const runningItem = upsertItem(turnId, {
+    id: itemId,
+    type: 'taskExecution',
+    taskId: task.id,
+    agent: task.agent,
+    tool: task.tool,
+    description: task.description,
+    deps: [],
+    status: 'inProgress'
+  });
+
+  emitItemStarted(turnId, runningItem);
+  appendLog(turnId, `Avvio ${strategy.label} (${strategy.reason}).`, 'info', { taskId: task.id, itemId });
+  emitAgentLoopTodos(turnId, 'inspect');
+
+  const runtime = buildRuntimeHelpers(turnId, task);
+  const context = buildTurnExecutionContext(turn);
+  const collectedActions = [];
+  let batchIndex = 0;
+
+  const onEvent = (eventType, data = {}) => {
+    if (eventType === 'thought') {
+      const toolName = data.tool || 'step';
+      if (toolName === 'todo_write' || toolName === 'done') return;
+      if (['read_workbook', 'read_sheet', 'get_cell_ranges', 'get_range_as_csv', 'build_workbook_graph'].includes(toolName)) {
+        emitAgentLoopTodos(turnId, 'inspect');
+      } else if (['set_cell_range', 'set_format', 'execute_excel_formula', 'create_sheet', 'rename_sheet', 'copy_range'].includes(toolName)) {
+        emitAgentLoopTodos(turnId, 'apply');
+      }
+      emitEphemeralLog(turnId, `[loop ${data.iteration || '?'}] ${toolName}: ${(data.thought || '').slice(0, 180)}`, 'info', {
+        taskId: task.id,
+        itemId
+      });
+      return;
+    }
+
+    if (eventType === 'todoWrite') {
+      if (Array.isArray(data.todos)) emitTodoWrite(turnId, data.todos);
+      return;
+    }
+
+    if (eventType === 'actions') {
+      const actions = Array.isArray(data.actions) ? clone(data.actions) : [];
+      if (actions.length === 0) return;
+      batchIndex += 1;
+      collectedActions.push(...actions);
+      emitAgentLoopTodos(turnId, 'apply');
+      emitTaskActions(turnId, {
+        id: task.id,
+        itemId: `${itemId}-batch-${batchIndex}`
+      }, actions);
+      emitEphemeralLog(turnId, `[loop ${data.iteration || '?'}] Invio ${actions.length} azioni Excel`, 'info', {
+        taskId: task.id,
+        itemId
+      });
+      return;
+    }
+
+    if (eventType === 'iterationError') {
+      appendLog(turnId, `[loop ${data.iteration || '?'}] ${data.error || 'errore sconosciuto'}`, data.fatal ? 'error' : 'warn', {
+        taskId: task.id,
+        itemId
+      });
+      return;
+    }
+
+    if (eventType === 'agentAutoAnswer') {
+      emitEphemeralLog(turnId, `[loop ${data.iteration || '?'}] Risposta automatica usata: ${data.answer}`, 'info', {
+        taskId: task.id,
+        itemId
+      });
+      return;
+    }
+
+    if (eventType === 'agentPaused' && data.handledInline) {
+      emitAgentLoopTodos(turnId, 'awaiting_input');
+      appendLog(turnId, `[loop ${data.iteration || '?'}] Serve una scelta utente per continuare.`, 'info', {
+        taskId: task.id,
+        itemId
+      });
+    }
+  };
+
+  try {
+    const agentResult = await runAgentLoop(turn.objective, context, {
+      turnId,
+      modelOverride: turn.llm?.modelOverride || undefined,
+      promptVariant: strategy.promptVariant || 'fast',
+      maxIterations: strategy.maxIterations || 60,
+      onEvent,
+      requestClientTool: runtime.requestClientTool,
+      requestQuestion: (questions) => runtime.requestQuestion(questions, {
+        title: 'Mi serve una scelta per continuare il task',
+        prompt: 'Seleziona l\'opzione migliore per far proseguire il loop AI sul workbook.'
+      })
+    });
+
+    storeTaskResult(turnId, task.id, {
+      data: {
+        builder: 'agent-loop',
+        strategy: strategy.reason,
+        promptVariant: strategy.promptVariant,
+        status: agentResult.status,
+        summary: agentResult.summary,
+        iteration: agentResult.iteration
+      },
+      actions: collectedActions
+    });
+
+    if (agentResult.status !== 'completed') {
+      if (strategy.allowEscalation) {
+        const completedItem = upsertItem(turnId, {
+          id: itemId,
+          type: 'taskExecution',
+          taskId: task.id,
+          agent: task.agent,
+          tool: task.tool,
+          description: task.description,
+          deps: [],
+          status: 'completed',
+          result: {
+            status: agentResult.status,
+            escalated: true,
+            summary: agentResult.summary
+          },
+          actionCount: collectedActions.length
+        });
+        emitItemCompleted(turnId, completedItem);
+        return escalateAgentLoopTurn(turnId, strategy, agentResult, collectedActions);
+      }
+      throw new Error(agentResult.summary || `Agent loop terminato con stato ${agentResult.status}`);
+    }
+
+    emitAgentLoopTodos(turnId, 'verify');
+    const completedTurn = setTurnStatus(turnId, 'completed');
+    completedTurn.narration = {
+      message: agentResult.summary || 'Task completato dal loop AI.',
+      suggestions: []
+    };
+    saveTurn(completedTurn);
+
+    track({
+      eventType: 'turn.completed',
+      userId: completedTurn.userId || null,
+      properties: { actionCount: collectedActions?.length || 0 },
+      success: 1,
+    });
+
+    const completedItem = upsertItem(turnId, {
+      id: itemId,
+      type: 'taskExecution',
+      taskId: task.id,
+      agent: task.agent,
+      tool: task.tool,
+      description: task.description,
+      deps: [],
+      status: 'completed',
+      result: {
+        status: agentResult.status,
+        summary: agentResult.summary,
+        iteration: agentResult.iteration
+      },
+      actionCount: collectedActions.length
+    });
+    emitItemCompleted(turnId, completedItem);
+
+    appendLog(turnId, agentResult.summary || 'Turn completato con il loop AI rapido.', 'info');
+    emitAgentLoopTodos(turnId, 'done');
+    emitTurnCompleted(completedTurn);
+
+    const memorySummary = extractTurnMemorySummary(completedTurn);
+    conversationMemory.addTurnMemory({
+      turnId,
+      objective: completedTurn.objective,
+      planSummary: `Loop AI completato in ${agentResult.iteration || 0} iterazioni`,
+      sheetsCreated: memorySummary.sheetsCreated,
+      modelType: memorySummary.modelType,
+      keyCells: memorySummary.keyCells
+    });
+  } catch (error) {
+    logger.error(`[Turn ${turnId}] Agent loop execution error: ${error.message}`);
+    await failTurn(turnId, `Errore esecuzione loop AI: ${error.message}`, {
+      id: itemId,
+      type: 'taskExecution',
+      taskId: task.id,
+      agent: task.agent,
+      tool: task.tool,
+      description: task.description
+    });
+  }
+}
+
+async function executePlannedTurn(turnId) {
   const turn = _getTurnRef(turnId);
   if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
   if (!turn.plan || !Array.isArray(turn.plan.tasks) || turn.plan.tasks.length === 0) {
@@ -1185,11 +1827,19 @@ async function executeTurn(turnId) {
   try {
     const levels = computeLevels(turn.plan.tasks);
     const sortedLevels = Array.from(levels.keys()).sort((left, right) => left - right);
+    emitExecutionTodos(turnId, 'queued');
 
     const failedTaskIds = new Set();
     for (const level of sortedLevels) {
       const taskIds = levels.get(level) || [];
       appendLog(turnId, `Livello ${level}: eseguo ${taskIds.length} task`, 'info', { level });
+      emitExecutionTodos(turnId, 'level', {
+        currentLevel: level,
+        totalLevels: sortedLevels.length,
+        activeForm: taskIds.length === 1
+          ? `Sto eseguendo 1 task del livello ${level + 1}`
+          : `Sto eseguendo ${taskIds.length} task in parallelo nel livello ${level + 1}`
+      });
 
       const results = await allSettledLimit(taskIds, LIMITS.maxParallelTasks, taskId => {
         const task = turn.plan.tasks.find(entry => entry.id === taskId);
@@ -1214,6 +1864,7 @@ async function executeTurn(turnId) {
       });
     }
 
+    emitExecutionTodos(turnId, 'snapshot');
     await capturePostExecutionSnapshotIfNeeded(turnId, failedTaskIds);
 
     const finalError = failedTaskIds.size > 0
@@ -1233,7 +1884,10 @@ async function executeTurn(turnId) {
 
     // NarratorAgent: genera sintesi in linguaggio naturale
     try {
-      const narration = await runNarratorAgent(completedTurn.objective, completedTurn.results);
+      emitExecutionTodos(turnId, 'summary');
+      const narration = await runNarratorAgent(completedTurn.objective, completedTurn.results, [], {
+        postSnapshot: completedTurn.results?.__postExecutionSnapshot || null
+      });
       appendLog(turnId, narration.message, 'info');
       if (narration.suggestions.length > 0) {
         appendLog(turnId, `Suggerimenti: ${narration.suggestions.join(' | ')}`, 'info');
@@ -1243,6 +1897,7 @@ async function executeTurn(turnId) {
       logger.warn(`[Turn ${turnId}] Narrator fallito: ${narrErr.message}`);
     }
 
+    emitExecutionTodos(turnId, 'done');
     emitTurnCompleted(completedTurn);
     if (failedTaskIds.size > 0) {
       logger.info(`[Turn ${turnId}] Turn completed with partial success (${failedTaskIds.size} failures)`);
@@ -1266,9 +1921,29 @@ async function executeTurn(turnId) {
   }
 }
 
+async function executeTurn(turnId) {
+  const turn = _getTurnRef(turnId);
+  if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
+
+  const strategy = turn.strategy || chooseTurnStrategy(turn.objective, turn.context, turn.parentTurnId);
+  if (strategy.mode === 'agent_loop') {
+    return executeAgentLoopTurn(turnId);
+  }
+  return executePlannedTurn(turnId);
+}
+
 function startTurn(message, context, parentTurnId = null, options = {}) {
   const turn = buildTurn(message, context, parentTurnId, options);
   saveTurn(turn);
+
+  track({
+    eventType: 'turn.started',
+    userId: turn.userId || null,
+    properties: {
+      inputLength: message?.length || 0,
+      sheetsCount: context?.sheets?.length || (context?.workbook?.worksheets?.length || 0),
+    }
+  });
 
   emitTurnStarted(turn);
 
@@ -1307,6 +1982,7 @@ function approveTurn(turnId) {
 
   const runningTurn = setTurnStatus(turnId, 'running');
   appendLog(turnId, 'Avvio esecuzione del piano approvato.');
+  emitExecutionTodos(turnId, 'queued');
   void executeTurn(turnId);
   return runningTurn;
 }
@@ -1374,6 +2050,7 @@ module.exports = {
   approveTurn,
   loadTurn,
   buildExecutionMemory,
+  chooseTurnStrategy,
   respondToTurnRequest,
   applyActionExecutionResult,
   recordActionExecution,
