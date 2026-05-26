@@ -1110,6 +1110,20 @@ function isSafeTask(task) {
   return isPrefetchSafeTask(task, registry);
 }
 
+function shouldAutoApprovePlan(plan, strategy) {
+  if (process.env.AUTO_APPROVE_ALL === 'true') return true;
+  if (!plan || !Array.isArray(plan.tasks) || plan.tasks.length === 0) return false;
+  // Agent-loop plans are 4 synthetic placeholder tasks — per-action gates apply inside the loop.
+  if (strategy?.mode === 'agent_loop') return true;
+  // Structured plan: auto-approve if no task explicitly demands approval and every task is safe by registry.
+  return plan.tasks.every(task => {
+    if (task.requiresApproval === true) return false;
+    const meta = registry.meta(task.tool);
+    if (meta?.requiresApproval === 'always') return false;
+    return isSafeTask(task);
+  });
+}
+
 function buildLayoutFromResults(results) {
   if (!results || typeof results !== 'object') return { sheets: [], references: new Set() };
   const sheets = new Set();
@@ -1291,10 +1305,18 @@ async function planTurn(turnId) {
 
       emitPlanUpdated(updatedTurn);
       emitItemCompleted(turnId, completedPlanItem);
-      appendLog(turnId, `Piano rapido pronto: 4 step, prompt variant ${strategy.promptVariant}. Attendo conferma per eseguire.`);
-      emitPlanningTodos(turnId, 'awaiting_approval');
+      const autoApproveAgentLoop = shouldAutoApprovePlan(plan, strategy);
+      const planReadyMsg = autoApproveAgentLoop
+        ? `Piano rapido pronto: 4 step, prompt variant ${strategy.promptVariant}. Auto-approvazione (modalità safe).`
+        : `Piano rapido pronto: 4 step, prompt variant ${strategy.promptVariant}. Attendo conferma per eseguire.`;
+      appendLog(turnId, planReadyMsg);
+      emitPlanningTodos(turnId, autoApproveAgentLoop ? 'queued' : 'awaiting_approval');
       stopPlanningHeartbeat();
-      emitTurnAwaitingApproval(updatedTurn);
+      if (autoApproveAgentLoop) {
+        approveTurn(turnId);
+      } else {
+        emitTurnAwaitingApproval(updatedTurn);
+      }
       return;
     }
 
@@ -1320,8 +1342,11 @@ async function planTurn(turnId) {
 
     emitPlanUpdated(updatedTurn);
     emitItemCompleted(turnId, completedPlanItem);
-    appendLog(turnId, `Piano pronto: ${plan.tasks.length} task. Attendo conferma per eseguire.`);
-    emitPlanningTodos(turnId, 'awaiting_approval');
+    const autoApprovePlan = shouldAutoApprovePlan(plan, strategy);
+    appendLog(turnId, autoApprovePlan
+      ? `Piano pronto: ${plan.tasks.length} task. Auto-approvazione (tutti safe).`
+      : `Piano pronto: ${plan.tasks.length} task. Attendo conferma per eseguire.`);
+    emitPlanningTodos(turnId, autoApprovePlan ? 'queued' : 'awaiting_approval');
     stopPlanningHeartbeat();
 
     // Auto-execute safe tasks per-level while user reviews plan (prefetch).
@@ -1355,7 +1380,11 @@ async function planTurn(turnId) {
       })();
     }
 
-    emitTurnAwaitingApproval(updatedTurn);
+    if (autoApprovePlan) {
+      approveTurn(turnId);
+    } else {
+      emitTurnAwaitingApproval(updatedTurn);
+    }
   } catch (error) {
     await failTurn(turnId, `Errore pianificazione: ${error.message}`, {
       id: 'plan',
@@ -1497,8 +1526,7 @@ async function executeSingleTaskInner(turnId, task) {
       const needsApproval = !AUTO_APPROVE && (
         task.requiresApproval === true ||
         toolMeta?.requiresApproval === 'always' ||
-        (toolMeta?.category === 'mutation' && actionHasMutations) ||
-        actionHasMutations
+        (toolMeta?.requiresApproval !== 'never' && actionHasMutations)
       );
 
       if (needsApproval && (actionHasMutations || task.requiresApproval)) {

@@ -1,6 +1,6 @@
 #!/bin/bash
-# Installa il manifest dell'add-in Excel AI su macOS
-# curl -s https://excel-ai-sigma.vercel.app/install.sh | bash
+# Excel AI — macOS Installer
+# bash <(curl -s https://excel-ai-sigma.vercel.app/install.sh)
 
 MANIFEST_DIR="$HOME/Library/Containers/com.microsoft.Excel/Data/Documents/wef"
 MANIFEST_FILE="$MANIFEST_DIR/manifest.xml"
@@ -10,8 +10,9 @@ mkdir -p "$MANIFEST_DIR"
 BASE_URL="${1:-https://excel-ai-sigma.vercel.app}"
 APP_DOMAIN=$(echo "$BASE_URL" | sed -E 's|^https?://||')
 
-echo "📋  Excel AI — Installazione add-in"
-echo "   URL:   $BASE_URL"
+echo ""
+echo "  Excel AI — Assistente per commercialisti e CPA"
+echo "  $BASE_URL"
 echo ""
 
 MANIFEST="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
@@ -42,13 +43,13 @@ MANIFEST="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 echo "$MANIFEST" > "$MANIFEST_FILE"
 
 if [ -f "$MANIFEST_FILE" ]; then
-  echo "✅ Add-in installato!"
-  echo "   Apri Excel → tab Home → Excel AI"
+  echo "  [OK] Add-in installato!"
+  echo "  Apri Excel → tab Home → Excel AI"
   echo ""
   if pgrep -iq microsoft.excel; then
-    echo "📌 Excel è aperto. Riavvia per vedere l'add-in."
+    echo "  Excel è aperto. Riavvia per vedere l'add-in."
   fi
 else
-  echo "❌ Errore: impossibile scrivere il manifest."
+  echo "  ERRORE: impossibile scrivere il manifest."
   exit 1
 fi
