@@ -1,6 +1,11 @@
 const fs = require('fs');
 const path = require('path');
-const pdfParse = require('pdf-parse');
+let pdfParse = null;
+try {
+  pdfParse = require('pdf-parse');
+} catch (_) {
+  // pdf-parse opzionale: installare con npm install pdf-parse per supporto PDF
+}
 const logger = require('../utils/logger');
 const { callLLM } = require('../tools/llm');
 
@@ -16,6 +21,10 @@ async function ingestPdf(filePath, options = {}) {
   const fileName = path.basename(filePath);
 
   logger.info(`[WikiIngest] Starting ingestion of ${fileName} into domain "${domain}"`);
+
+  if (!pdfParse) {
+    throw new Error('pdf-parse non installato. Esegui: npm install pdf-parse');
+  }
 
   // 1. Extract text from PDF
   const buffer = fs.readFileSync(filePath);

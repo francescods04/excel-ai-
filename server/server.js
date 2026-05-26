@@ -69,22 +69,23 @@ app.use((req, res, next) => {
   next();
 });
 
+/* ---------- Auth API ---------- */
+const auth = require('./auth/auth');
+const { authenticate, optionalAuth, quotaCheck } = require('./auth/middleware');
+
+app.post('/api/auth/register', auth.register);
+app.post('/api/auth/login', auth.login);
+app.post('/api/auth/refresh', auth.refresh);
+app.post('/api/auth/logout', auth.logout);
+app.get('/api/auth/me', authenticate, auth.me);
+
 const START_TIME = Date.now();
 
 app.get('/api/health', (req, res) => {
   const { TOOL_DEFINITIONS, PROMPT_VARIANTS } = require('./agents/agentLoop');
   const llmCfg = getLLMConfig();
-  const promptVariant = process.env.AGENT_PROMPT_VARIANT || 'default';
-  const activeModel = llmCfg.model
-    || (llmCfg.provider === 'openrouter' ? process.env.OPENROUTER_MODEL : null)
-    || (llmCfg.provider === 'deepseek' ? process.env.DEEPSEEK_MODEL : null)
-    || process.env.AI_MODEL
-    || 'kimi-k2.6';
-  const fallbackModel = llmCfg.fallbackModel
-    || (llmCfg.provider === 'openrouter' ? process.env.OPENROUTER_FALLBACK_MODEL : null)
-    || (llmCfg.provider === 'deepseek' ? process.env.DEEPSEEK_FALLBACK_MODEL : null)
-    || process.env.AI_FALLBACK_MODEL
-    || '';
+  const activeModel = llmCfg.model || process.env.OPENROUTER_MODEL || 'deepseek/deepseek-v4-pro';
+  const fallbackModel = llmCfg.fallbackModel || process.env.OPENROUTER_FALLBACK_MODEL || '';
 
   res.json({
     ok: true,
@@ -93,39 +94,60 @@ app.get('/api/health', (req, res) => {
     runtime: 'turn-item-v2',
     uptimeSec: Math.floor((Date.now() - START_TIME) / 1000),
     model: {
-      provider: llmCfg.provider,
+      provider: 'openrouter',
       primary: activeModel,
       fallback: fallbackModel,
-      maxTokens: Number(process.env.MAX_TOKENS) || 131072
     },
     tools: {
       count: TOOL_DEFINITIONS.length,
       list: TOOL_DEFINITIONS.map(t => t.function?.name || t.name)
     },
-    promptVariant,
-    promptVariantsAvailable: Object.keys(PROMPT_VARIANTS),
     features: [
-      'turn-runtime',
-      'workbook-tools',
-      'interactive-requests',
-      'preflight-read',
-      'context-snip',
-      'cache-breakpoint',
-      'skills-lazyload',
-      'bm25-tool-search',
-      'calculation-suspension',
-      'persistent-instructions',
-      'update-setting',
-      'auto-skill-suggest',
-      'bounded-task-concurrency',
-      'runtime-safety-limits'
+      'turn-runtime', 'workbook-tools', 'cache-breakpoint',
+      'skills-lazyload', 'bm25-tool-search', 'auth-jwt',
     ],
-    env: {
-      nodeEnv: process.env.NODE_ENV || 'development',
-      cacheBreakpointEnabled: process.env.CACHE_BREAKPOINT_ENABLED !== 'false',
-      autoCompactLimit: Number(process.env.AGENT_AUTO_COMPACT_LIMIT) || 80
-    }
   });
+});
+
+/* ---------- Office Add-in Manifest (dinamico) ---------- */
+app.get('/manifest.xml', (req, res) => {
+  const baseUrl = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xsi:type="TaskPaneApp">
+  <Id>1c7b92c5-a8f4-4e1b-9d3f-2a6e8c0b5d1f</Id>
+  <Version>1.0.0</Version>
+  <ProviderName>Excel AI</ProviderName>
+  <DefaultLocale>it-IT</DefaultLocale>
+  <DisplayName DefaultValue="Excel AI"/>
+  <Description DefaultValue="AI assistant for Excel"/>
+  <IconUrl DefaultValue="${baseUrl}/assets/icon-32.png"/>
+  <HighResolutionIconUrl DefaultValue="${baseUrl}/assets/icon-80.png"/>
+  <SupportUrl DefaultValue="${baseUrl}/support"/>
+  <AppDomains><AppDomain>${baseUrl.replace(/^https?:\/\//, '')}</AppDomain></AppDomains>
+  <Hosts><Host Name="Workbook"/></Hosts>
+  <DefaultSettings>
+    <SourceLocation DefaultValue="${baseUrl}/src/taskpane.html"/>
+  </DefaultSettings>
+  <Permissions>ReadWriteDocument</Permissions>
+</OfficeApp>`;
+  res.type('application/xml').send(xml);
+});
+
+/* ---------- Admin Dashboard API ---------- */
+app.get('/api/admin/stats', authenticate, (req, res) => {
+  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const db = require('../db/init').getDb();
+    const totalUsers = db.prepare('SELECT COUNT(*) as c FROM users').get().c;
+    const turnsToday = db.prepare("SELECT COUNT(*) as c FROM turns WHERE date(created_at) = date('now')").get().c;
+    const errors24h = db.prepare("SELECT COUNT(*) as c FROM events WHERE event_type = 'turn.failed' AND ts > datetime('now', '-24 hours')").get().c;
+    const llmCalls24h = db.prepare("SELECT COUNT(*) as c, SUM(tokens_in) as tin, SUM(tokens_out) as tout FROM events WHERE event_type = 'llm.response' AND ts > datetime('now', '-24 hours')").get();
+    res.json({ totalUsers, turnsToday, errors24h, llmCalls24h: llmCalls24h.c, tokensIn24h: llmCalls24h.tin || 0, tokensOut24h: llmCalls24h.tout || 0 });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 /* ---------- Turn / Item Runtime (Codex-inspired) ---------- */
