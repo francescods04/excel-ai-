@@ -3,31 +3,35 @@ require('dotenv').config();
 const logger = require('../utils/logger');
 const { track } = require('../telemetry/tracker');
 
-/* ---------- Configurazione LLM (solo OpenRouter) ---------- */
+/* ---------- Configurazione LLM (DeepSeek primario, OpenRouter fallback) ---------- */
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
+const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro';
+const DEEPSEEK_FALLBACK_MODEL = process.env.DEEPSEEK_FALLBACK_MODEL || 'deepseek-v4-flash';
+const DEEPSEEK_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT || 'high';
+const DEEPSEEK_THINKING_ENABLED = process.env.DEEPSEEK_THINKING_ENABLED !== 'false';
+
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'deepseek/deepseek-v4-pro';
 const OPENROUTER_FALLBACK_MODEL = process.env.OPENROUTER_FALLBACK_MODEL || 'qwen/qwen3-coder';
+
 const PUBLIC_URL = process.env.PUBLIC_URL || 'http://localhost:3000';
 const MAX_TOKENS = 131072;
-
 const DEFAULT_LLM_TIMEOUT_MS = 300000;
 const DEFAULT_LLM_FALLBACK_TIMEOUT_MS = 180000;
 
-/* ---------- Dynamic config (runtime switchable model per utente) ---------- */
+/* ---------- Dynamic config ---------- */
 let dynamicConfig = { model: null, fallbackModel: null };
 
 function setLLMConfig(config) {
   dynamicConfig = { ...dynamicConfig, ...config };
-  logger.info(`[LLM] Runtime config updated → model=${dynamicConfig.model || 'default'}`);
+  logger.info(`[LLM] Runtime config → model=${dynamicConfig.model || 'default'}`);
 }
 
 function getLLMConfig() {
-  return { ...dynamicConfig, provider: 'openrouter' };
+  return { ...dynamicConfig, provider: 'deepseek' };
 }
 
-/* ---------- Cache optimization ---------- */
-const CACHE_BREAKPOINT_ENABLED = true;
-
+/* ---------- Cache drift detection (DeepSeek auto-caches) ---------- */
 const _lastSystemHash = new Map();
 function _hashSystem(text) {
   if (!text) return '';
@@ -47,77 +51,6 @@ function checkSystemPrefixStability(provider, systemText) {
     logger.warn(`[Cache] ${provider} system prompt changed (${prev} → ${h}). Cache invalidated.`);
   }
   return { hash: h, changed: !!prev && prev !== h };
-}
-
-class CacheMessageBuilder {
-  constructor(provider, model) {
-    this.provider = provider;
-    this.model = model;
-  }
-
-  splitSystemPrompt(systemText) {
-    if (!systemText || typeof systemText !== 'string') {
-      return { identity: systemText || '', skills: '' };
-    }
-    const lines = systemText.split('\n');
-    let splitIdx = lines.length;
-    let blankCount = 0;
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].trim() === '') blankCount++;
-      if (blankCount >= 2 && i > 10) { splitIdx = i; break; }
-    }
-    const identity = lines.slice(0, splitIdx).join('\n').trim();
-    const skills = lines.slice(splitIdx).join('\n').trim();
-    return { identity, skills };
-  }
-
-  build(messages, systemText, cachePrompt = false) {
-    if (!CACHE_BREAKPOINT_ENABLED || !cachePrompt) return messages;
-
-    const { identity, skills } = this.splitSystemPrompt(systemText);
-    const optimized = [];
-
-    if (identity) {
-      optimized.push({
-        role: 'system',
-        content: [{ type: 'text', text: identity, cache_control: { type: 'ephemeral' } }],
-      });
-    }
-    if (skills) {
-      optimized.push({
-        role: 'system',
-        content: [{ type: 'text', text: skills, cache_control: { type: 'ephemeral' } }],
-      });
-    }
-
-    let lastToolIdx = -1;
-    for (let i = 0; i < messages.length; i++) {
-      const msg = messages[i];
-      if (msg.role === 'system') continue;
-      optimized.push(msg);
-      if (msg.role === 'tool' || (msg.content && typeof msg.content === 'string' && msg.content.includes('Tool result'))) {
-        lastToolIdx = optimized.length - 1;
-      }
-    }
-
-    if (lastToolIdx >= 0) {
-      const msg = optimized[lastToolIdx];
-      if (typeof msg.content === 'string') {
-        optimized[lastToolIdx] = { ...msg, content: [{ type: 'text', text: msg.content, cache_control: { type: 'ephemeral' } }] };
-      }
-    }
-
-    const lastAssistantIdx = optimized.findLastIndex(m => m.role === 'assistant');
-    if (lastAssistantIdx >= 0) {
-      const msg = optimized[lastAssistantIdx];
-      if (typeof msg.content === 'string') {
-        optimized[lastAssistantIdx] = { ...msg, content: [{ type: 'text', text: msg.content, cache_control: { type: 'ephemeral' } }] };
-      }
-    }
-
-    logger.info(`[Cache] Built ${optimized.length} messages with breakpoints (original: ${messages.length})`);
-    return optimized;
-  }
 }
 
 /* ---------- JSON helpers ---------- */
@@ -175,8 +108,8 @@ const ROLE_CONFIG = {
 };
 
 function tierToModel(tier) {
-  if (tier === 'flash') return OPENROUTER_FALLBACK_MODEL || 'qwen/qwen3-coder';
-  return OPENROUTER_MODEL || 'deepseek/deepseek-v4-pro';
+  if (tier === 'flash') return DEEPSEEK_FALLBACK_MODEL || 'deepseek-v4-flash';
+  return DEEPSEEK_MODEL || 'deepseek-v4-pro';
 }
 
 function resolveRoleConfig(role) {
@@ -196,14 +129,14 @@ function resolvePrimaryModel(modelOverride, role = null) {
     if (cfg && cfg.model) return cfg.model;
   }
   if (dynamicConfig.model) return dynamicConfig.model;
-  return OPENROUTER_MODEL;
+  return DEEPSEEK_MODEL;
 }
 
 function resolveFallbackModel(primaryModel, fallbackModelOverride) {
   if (fallbackModelOverride !== undefined) return fallbackModelOverride || '';
   if (dynamicConfig.fallbackModel) return dynamicConfig.fallbackModel;
-  if (OPENROUTER_FALLBACK_MODEL === primaryModel) return '';
-  return OPENROUTER_FALLBACK_MODEL;
+  if (DEEPSEEK_FALLBACK_MODEL === primaryModel) return '';
+  return DEEPSEEK_FALLBACK_MODEL;
 }
 
 function shouldRetryWithFallback(error, fallbackModel) {
@@ -222,22 +155,87 @@ function shouldRetryWithFallback(error, fallbackModel) {
   return false;
 }
 
-/* ---------- Core OpenRouter calls ---------- */
+/* ---------- DeepSeek API calls ---------- */
+
+async function callDeepSeek(messages, options = {}) {
+  const model = options.model || DEEPSEEK_MODEL;
+  const requestTimeoutMs = safeTimeoutMs(options.requestTimeoutMs, 120000);
+  const jsonMode = options.jsonMode !== undefined ? options.jsonMode : true;
+
+  const body = { model, messages, temperature: 0.2, max_tokens: MAX_TOKENS };
+  if (jsonMode) body.response_format = { type: 'json_object' };
+
+  if (options.thinkingDisabled) {
+    body.thinking = { type: 'disabled' };
+  } else if (DEEPSEEK_THINKING_ENABLED) {
+    body.thinking = { type: 'enabled' };
+    body.reasoning_effort = options.reasoningEffort || DEEPSEEK_REASONING_EFFORT;
+  }
+
+  const thinkingInfo = body.thinking?.type === 'enabled' ? ` thinking=enabled effort=${body.reasoning_effort}` : '';
+  logger.info(`[LLM] DeepSeek → ${model} (timeout ${requestTimeoutMs}ms${thinkingInfo})`);
+  const start = Date.now();
+
+  try {
+    const response = await axios.post(
+      'https://api.deepseek.com/chat/completions',
+      body,
+      {
+        headers: {
+          'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: requestTimeoutMs,
+      }
+    );
+    const elapsed = Date.now() - start;
+    const choice = response.data?.choices?.[0];
+    const content = choice?.message?.content || '';
+    if (!content) throw new Error(`DeepSeek returned empty content for ${model}`);
+
+    const usage = response.data?.usage
+      ? {
+          prompt_tokens: response.data.usage.prompt_tokens,
+          completion_tokens: response.data.usage.completion_tokens,
+          prompt_cache_hit_tokens: response.data.usage.prompt_cache_hit_tokens,
+          prompt_cache_miss_tokens: response.data.usage.prompt_cache_miss_tokens,
+        }
+      : null;
+
+    let cacheInfo = '';
+    if (usage?.prompt_cache_hit_tokens != null) {
+      const hit = usage.prompt_cache_hit_tokens;
+      const miss = usage.prompt_cache_miss_tokens || 0;
+      const total = hit + miss;
+      const pct = total > 0 ? ((hit / total) * 100).toFixed(1) : '0.0';
+      cacheInfo = ` cache=${pct}% hit`;
+    }
+    logger.info(`[LLM] DeepSeek ← ${model} in ${elapsed}ms (${content.length} chars)${cacheInfo}`);
+
+    const parsed = tryParseJSON(content);
+    if (parsed.ok) {
+      const result = parsed.value;
+      if (usage) result._usage = usage;
+      return result;
+    }
+    return { raw: content, jsonError: parsed.error.message, _usage: usage };
+  } catch (error) {
+    const elapsed = Date.now() - start;
+    logger.error(`[LLM] DeepSeek error ← ${model} after ${elapsed}ms: ${error.message}`);
+    throw error;
+  }
+}
+
+/* ---------- OpenRouter API (fallback) ---------- */
 
 async function callOpenRouter(messages, options = {}) {
   const model = options.model || OPENROUTER_MODEL;
   const requestTimeoutMs = safeTimeoutMs(options.requestTimeoutMs, 120000);
   const jsonMode = options.jsonMode !== undefined ? options.jsonMode : true;
-  logger.info(`[LLM] OpenRouter request → ${model} (timeout ${requestTimeoutMs}ms)`);
+  logger.info(`[LLM] OpenRouter fallback → ${model}`);
   const start = Date.now();
 
-  let bodyMessages = messages;
-  if (options.cachePrompt && messages && messages.length > 0) {
-    const builder = new CacheMessageBuilder('openrouter', model);
-    bodyMessages = builder.build(messages, options.systemText || '', true);
-  }
-
-  const body = { model, messages: bodyMessages, temperature: 0.2, max_tokens: MAX_TOKENS };
+  const body = { model, messages, temperature: 0.2, max_tokens: MAX_TOKENS };
   if (jsonMode) body.response_format = { type: 'json_object' };
 
   try {
@@ -263,7 +261,7 @@ async function callOpenRouter(messages, options = {}) {
       ? { prompt_tokens: response.data.usage.prompt_tokens, completion_tokens: response.data.usage.completion_tokens }
       : null;
 
-    logger.info(`[LLM] OpenRouter response ← ${model} in ${elapsed}ms (${content.length} chars)`);
+    logger.info(`[LLM] OpenRouter ← ${model} in ${elapsed}ms`);
     const parsed = tryParseJSON(content);
     if (parsed.ok) {
       const result = parsed.value;
@@ -285,17 +283,17 @@ async function callLLM({
   fallbackTimeoutMs = DEFAULT_LLM_FALLBACK_TIMEOUT_MS,
   modelOverride, fallbackModel,
   label = 'LLM call',
-  cachePrompt = false,
   systemReminder = null,
   role = null,
 }) {
-  // Role-based defaults
   let thinkingDisabled = false;
+  let reasoningEffort = null;
   if (role) {
     const roleCfg = resolveRoleConfig(role);
     if (roleCfg) {
       if (!modelOverride) modelOverride = roleCfg.model;
       thinkingDisabled = roleCfg.thinkingDisabled;
+      reasoningEffort = roleCfg.reasoningEffort;
       label = `${label} [role=${role}]`;
     }
   }
@@ -315,47 +313,61 @@ async function callLLM({
     }
   }
 
-  if (!OPENROUTER_API_KEY) throw new Error('OPENROUTER_API_KEY non configurata');
+  if (!DEEPSEEK_API_KEY && !OPENROUTER_API_KEY) {
+    throw new Error('Nessuna API key LLM configurata (DEEPSEEK_API_KEY o OPENROUTER_API_KEY)');
+  }
 
   const primaryModel = resolvePrimaryModel(modelOverride, role);
   const systemText = typeof system === 'string' ? system : (msgs.find(m => m.role === 'system')?.content || '');
 
+  if (systemText) checkSystemPrefixStability('deepseek', systemText);
+
   const start = Date.now();
-  const metric = { provider: 'openrouter', model: primaryModel, label };
+  const provider = DEEPSEEK_API_KEY ? 'deepseek' : 'openrouter';
 
   try {
-    logger.info(`[LLM] ${label} → ${primaryModel}`);
+    logger.info(`[LLM] ${label} → [${provider}] ${primaryModel}`);
     const result = await withTimeout(
-      callOpenRouter(msgs, { model: primaryModel, requestTimeoutMs: timeoutMs, cachePrompt, systemText }),
+      DEEPSEEK_API_KEY
+        ? callDeepSeek(msgs, { model: primaryModel, requestTimeoutMs: timeoutMs, thinkingDisabled, reasoningEffort })
+        : callOpenRouter(msgs, { model: OPENROUTER_MODEL, requestTimeoutMs: timeoutMs }),
       timeoutMs, label
     );
     const elapsed = Date.now() - start;
-    metric.latency_ms = elapsed;
-    metric.success = true;
     if (result?._usage) {
-      metric.prompt_tokens = result._usage.prompt_tokens;
-      metric.completion_tokens = result._usage.completion_tokens;
+      track({ eventType: 'llm.response', latencyMs: elapsed, tokensIn: result._usage.prompt_tokens, tokensOut: result._usage.completion_tokens, model: primaryModel, success: 1 });
     }
-    track({ eventType: 'llm.response', userId: options?.userId, latencyMs: elapsed, tokensIn: metric.prompt_tokens, tokensOut: metric.completion_tokens, model: primaryModel, success: 1 });
     logger.info(`[LLM] ${label} done ← ${primaryModel} in ${elapsed}ms`);
     return result;
   } catch (error) {
     const elapsed = Date.now() - start;
-    metric.latency_ms = elapsed;
-    metric.success = false;
-    track({ eventType: 'llm.error', userId: options?.userId, latencyMs: elapsed, model: primaryModel, success: 0, properties: { error: error.message } });
+    track({ eventType: 'llm.error', latencyMs: elapsed, model: primaryModel, success: 0, properties: { error: error.message } });
 
     const rescueModel = resolveFallbackModel(primaryModel, fallbackModel);
     logger.warn(`[LLM] ${label} failed on ${primaryModel}: ${error.message}. Fallback: ${rescueModel || 'none'}`);
+
     if (!shouldRetryWithFallback(error, rescueModel)) throw error;
 
+    // Fallback: usa OpenRouter se disponibile
+    if (OPENROUTER_API_KEY) {
+      logger.info(`[LLM] ${label} retry via OpenRouter → ${OPENROUTER_FALLBACK_MODEL}`);
+      const rescueStart = Date.now();
+      const rescueResult = await withTimeout(
+        callOpenRouter(msgs, { model: OPENROUTER_FALLBACK_MODEL || rescueModel, requestTimeoutMs: fallbackTimeoutMs }),
+        fallbackTimeoutMs, `${label} fallback`
+      );
+      track({ eventType: 'llm.response', latencyMs: Date.now() - rescueStart, model: OPENROUTER_FALLBACK_MODEL, success: 1 });
+      return rescueResult;
+    }
+
+    // Fallback: stesso DeepSeek, modello diverso
     logger.info(`[LLM] ${label} retry → ${rescueModel}`);
     const rescueStart = Date.now();
     const rescueResult = await withTimeout(
-      callOpenRouter(msgs, { model: rescueModel, requestTimeoutMs: fallbackTimeoutMs, cachePrompt, systemText }),
+      callDeepSeek(msgs, { model: rescueModel, requestTimeoutMs: fallbackTimeoutMs, thinkingDisabled: true }),
       fallbackTimeoutMs, `${label} fallback`
     );
-    track({ eventType: 'llm.response', userId: options?.userId, latencyMs: Date.now() - rescueStart, model: rescueModel, success: 1 });
+    track({ eventType: 'llm.response', latencyMs: Date.now() - rescueStart, model: rescueModel, success: 1 });
     return rescueResult;
   }
 }
@@ -363,24 +375,30 @@ async function callLLM({
 /* ---------- Streaming ---------- */
 const readline = require('readline');
 
-async function callOpenRouterStream(messages, options = {}, onChunk) {
-  const model = options.model || OPENROUTER_MODEL;
+async function callDeepSeekStream(messages, options = {}, onChunk) {
+  const model = options.model || DEEPSEEK_MODEL;
   const requestTimeoutMs = safeTimeoutMs(options.requestTimeoutMs, 120000);
   const jsonMode = options.jsonMode !== undefined ? options.jsonMode : true;
-  logger.info(`[LLM] OpenRouter stream → ${model}`);
 
   const body = { model, messages, temperature: 0.2, max_tokens: MAX_TOKENS, stream: true };
   if (jsonMode) body.response_format = { type: 'json_object' };
 
+  if (options.thinkingDisabled) {
+    body.thinking = { type: 'disabled' };
+  } else if (DEEPSEEK_THINKING_ENABLED) {
+    body.thinking = { type: 'enabled' };
+    body.reasoning_effort = options.reasoningEffort || DEEPSEEK_REASONING_EFFORT;
+  }
+
+  logger.info(`[LLM] DeepSeek stream → ${model}`);
+
   const response = await axios.post(
-    'https://openrouter.ai/api/v1/chat/completions',
+    'https://api.deepseek.com/chat/completions',
     body,
     {
       headers: {
-        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
         'Content-Type': 'application/json',
-        'HTTP-Referer': PUBLIC_URL,
-        'X-Title': 'Excel AI Agent',
       },
       timeout: requestTimeoutMs,
       responseType: 'stream',
@@ -403,7 +421,7 @@ async function callOpenRouterStream(messages, options = {}, onChunk) {
 
     let timeoutId;
     if (options.maxTotalMs && options.maxTotalMs > 0) {
-      timeoutId = setTimeout(() => finish(new Error(`Streaming max time exceeded (${options.maxTotalMs}ms)`)), options.maxTotalMs);
+      timeoutId = setTimeout(() => finish(new Error(`Stream timeout after ${options.maxTotalMs}ms`)), options.maxTotalMs);
     }
 
     rl.on('line', (line) => {
@@ -420,7 +438,7 @@ async function callOpenRouterStream(messages, options = {}, onChunk) {
       try {
         const parsed = JSON.parse(data);
         const deltaContent = parsed.choices?.[0]?.delta?.content || '';
-        const deltaReasoning = parsed.choices?.[0]?.delta?.reasoning || '';
+        const deltaReasoning = parsed.choices?.[0]?.delta?.reasoning_content || '';
         const delta = deltaContent || deltaReasoning;
         if (delta) {
           accumulated += delta;
@@ -452,11 +470,13 @@ async function callLLMStreaming({
   role = null,
 }) {
   let thinkingDisabled = false;
+  let reasoningEffort = null;
   if (role) {
     const roleCfg = resolveRoleConfig(role);
     if (roleCfg) {
       if (!modelOverride) modelOverride = roleCfg.model;
       thinkingDisabled = roleCfg.thinkingDisabled;
+      reasoningEffort = roleCfg.reasoningEffort;
       label = `${label} [role=${role}]`;
     }
   }
@@ -483,16 +503,20 @@ async function callLLMStreaming({
     ? [{ role: 'system', content: systemText }, ...msgs.filter(m => m.role !== 'system')]
     : msgs;
 
-  if (systemText) checkSystemPrefixStability('openrouter', systemText);
+  if (systemText) checkSystemPrefixStability('deepseek', systemText);
 
   const maxStreamMs = timeoutMs || 300000;
-  const start = Date.now();
 
   try {
     logger.info(`[LLM] ${label} stream → ${primaryModel}`);
-    const accumulated = await callOpenRouterStream(finalMessages, { model: primaryModel, maxTotalMs: maxStreamMs, requestTimeoutMs: maxStreamMs }, onChunk);
-    const elapsed = Date.now() - start;
-    logger.info(`[LLM] ${label} stream done ← ${primaryModel} in ${elapsed}ms (${accumulated.length} chars)`);
+    const accumulated = await callDeepSeekStream(finalMessages, {
+      model: primaryModel,
+      maxTotalMs: maxStreamMs,
+      requestTimeoutMs: maxStreamMs,
+      thinkingDisabled,
+      reasoningEffort,
+    }, onChunk);
+    logger.info(`[LLM] ${label} stream done ← ${primaryModel} (${accumulated.length} chars)`);
     return accumulated;
   } catch (error) {
     logger.error(`[LLM] ${label} stream error: ${error.message}`);

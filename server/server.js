@@ -120,30 +120,20 @@ app.get('/api/config', (req, res) => {
 const START_TIME = Date.now();
 
 app.get('/api/health', (req, res) => {
-  const { TOOL_DEFINITIONS, PROMPT_VARIANTS } = require('./agents/agentLoop');
   const llmCfg = getLLMConfig();
-  const activeModel = llmCfg.model || process.env.OPENROUTER_MODEL || 'deepseek/deepseek-v4-pro';
-  const fallbackModel = llmCfg.fallbackModel || process.env.OPENROUTER_FALLBACK_MODEL || '';
+  const activeModel = process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro';
+  const fallbackModel = process.env.DEEPSEEK_FALLBACK_MODEL || 'deepseek-v4-flash';
 
   res.json({
     ok: true,
     app: 'excel-ai-agent',
     version: '2.0.0',
-    runtime: 'turn-item-v2',
     uptimeSec: Math.floor((Date.now() - START_TIME) / 1000),
     model: {
-      provider: 'openrouter',
+      provider: 'deepseek',
       primary: activeModel,
       fallback: fallbackModel,
     },
-    tools: {
-      count: TOOL_DEFINITIONS.length,
-      list: TOOL_DEFINITIONS.map(t => t.function?.name || t.name)
-    },
-    features: [
-      'turn-runtime', 'workbook-tools', 'cache-breakpoint',
-      'skills-lazyload', 'bm25-tool-search', 'auth-jwt',
-    ],
   });
 });
 
