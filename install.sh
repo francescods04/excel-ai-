@@ -8,11 +8,17 @@ MANIFEST_FILE="$MANIFEST_DIR/manifest.xml"
 mkdir -p "$MANIFEST_DIR"
 
 # Se il server è locale, usa localhost; altrimenti chiedi URL
-if [ -n "$VERCEL_URL" ]; then
-  BASE_URL="$VERCEL_URL"
-else
-  BASE_URL="http://localhost:3000"
+BASE_URL="$1"
+
+if [ -z "$BASE_URL" ]; then
+  echo "Usage: bash install.sh <URL>"
+  echo "  bash install.sh http://localhost:3000"
+  echo "  bash install.sh https://excel-ai-sigma.vercel.app"
+  exit 1
 fi
+
+# Estrai il dominio senza protocollo per AppDomain
+APP_DOMAIN=$(echo "$BASE_URL" | sed -E 's|^https?://||')
 
 echo "📋 Generazione manifest per: $BASE_URL"
 
@@ -35,7 +41,7 @@ cat > "$MANIFEST_FILE" << MANIFESTEOF
   <SupportUrl DefaultValue="$BASE_URL/support" />
 
   <AppDomains>
-    <AppDomain>localhost:3000</AppDomain>
+    <AppDomain>$APP_DOMAIN</AppDomain>
   </AppDomains>
 
   <Hosts>

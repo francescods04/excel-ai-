@@ -4,7 +4,10 @@ dev:
 	node --watch server/server.js
 
 install:
-	bash install.sh
+	bash install.sh http://localhost:3000
+
+install-prod:
+	bash install.sh https://excel-ai-sigma.vercel.app
 
 certs:
 	mkcert -install
