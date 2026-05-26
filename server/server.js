@@ -195,7 +195,7 @@ app.get('/api/admin/recent-turns', authenticate, (req, res) => {
   }
 });
 
-app.get('/admin', (req, res) => {
+app.get('/admin', optionalAuth, (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'src', 'admin.html'));
 });
 
@@ -206,7 +206,7 @@ app.post('/api/turn/start', authenticate, quotaCheck, async (req, res) => {
     const { message, context, parentTurnId, modelOverride } = req.body;
     if (!message) return res.status(400).json({ error: 'Messaggio richiesto' });
 
-    const turn = turns.startTurn(message, context, parentTurnId || null, { modelOverride });
+    const turn = turns.startTurn(message, context, parentTurnId || null, { modelOverride, userId: req.userId });
     res.json({
       turnId: turn.id,
       status: turn.status

@@ -144,6 +144,30 @@ function saveTurn(turn) {
   turn.updatedAt = nowIso();
   activeTurns.set(turn.id, turn);
   enforceActiveTurnsLimit();
+
+  // Persist to SQLite
+  try {
+    const db = require('../db/init').getDb();
+    db.prepare(`
+      INSERT OR REPLACE INTO turns (id, user_id, status, input_message_length, plan_json, task_count, action_count, model, created_at, completed_at, total_latency_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      turn.id,
+      turn.userId || null,
+      turn.status,
+      turn.objective?.length || 0,
+      turn.plan ? JSON.stringify(turn.plan) : null,
+      turn.plan?.tasks?.length || 0,
+      turn.actionCount || 0,
+      turn.llm?.modelOverride || process.env.OPENROUTER_MODEL || null,
+      turn.createdAt,
+      turn.status === 'completed' || turn.status === 'error' ? nowIso() : null,
+      turn.totalLatencyMs || null
+    );
+  } catch (err) {
+    logger.warn(`[Turn] SQLite save error for ${turn.id}: ${err.message}`);
+  }
+
   // Terminal states flush immediately; intermediate states debounce
   if (turn.status === 'completed' || turn.status === 'error') {
     flushDiskWrite(turn.id);
@@ -607,6 +631,7 @@ function buildTurn(message, context, parentTurnId = null, options = {}) {
 
   return {
     id: turnId,
+    userId: options.userId || null,
     objective: message,
     context: context || {},
     strategy,

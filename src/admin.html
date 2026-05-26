@@ -125,6 +125,7 @@
 <script>
 const BASE = '/api/admin';
 const tok = localStorage.getItem('excelai_access_token');
+if (!tok) { document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:monospace;color:#f87171">Access denied — login first</div>'; throw new Error('no token'); }
 const h = { Authorization: `Bearer ${tok}` };
 
 async function loadStats() {

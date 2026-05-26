@@ -1,0 +1,12 @@
+# Caddyfile — Excel AI reverse proxy
+# Posiziona in /etc/caddy/Caddyfile sul VPS
+# Caddy gestisce automaticamente HTTPS via Let's Encrypt
+
+excelai.example.com {
+  reverse_proxy localhost:3000
+  encode gzip
+  header {
+    X-Content-Type-Options nosniff
+    Referrer-Policy no-referrer
+  }
+}
