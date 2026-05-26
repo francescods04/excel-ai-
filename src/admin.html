@@ -1,61 +1,134 @@
 <!DOCTYPE html>
-<html lang="it">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Excel AI — Admin Dashboard</title>
+  <title>Excel AI — Admin</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=DM+Sans:opsz,wght@9..40,400;9..40,500&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: system-ui, -apple-system, sans-serif; background: #f0f2f5; color: #111; padding: 20px; }
-    h1 { font-size: 20px; margin-bottom: 20px; }
-    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
-    .card { background: #fff; border-radius: 10px; padding: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
-    .card .label { font-size: 12px; color: #666; text-transform: uppercase; letter-spacing: .5px; }
-    .card .value { font-size: 28px; font-weight: 700; margin-top: 4px; }
-    .chart-container { background: #fff; border-radius: 10px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
-    .chart-container h3 { font-size: 14px; color: #444; margin-bottom: 12px; }
-    .section { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #eee; }
-    th { color: #666; font-weight: 600; }
-    .error { color: #e53935; }
-    .refresh { margin-bottom: 12px; }
-    .refresh button { padding: 6px 16px; border: 1px solid #ccc; background: #fff; border-radius: 6px; cursor: pointer; font-size: 13px; }
+    body {
+      font-family: 'DM Sans', system-ui, sans-serif; background: #0b0e11; color: #c8ccd0;
+      min-height: 100vh; padding: 28px;
+    }
+    body::before {
+      content: ''; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.012) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.012) 1px, transparent 1px);
+      background-size: 24px 24px;
+    }
+
+    header { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; margin-bottom: 28px; }
+    header h1 {
+      font-family: 'JetBrains Mono', monospace; font-size: 16px; font-weight: 500;
+      color: #f0a040; letter-spacing: 1px;
+    }
+    header h1 span { color: rgba(240,160,64,0.35); margin: 0 4px; }
+    .refresh-btn {
+      padding: 6px 16px; background: transparent; border: 1px solid rgba(255,255,255,0.08);
+      color: rgba(255,255,255,0.45); font-size: 11px; border-radius: 4px; cursor: pointer;
+      font-family: 'JetBrains Mono', monospace; letter-spacing: 0.5px; transition: all 0.2s;
+    }
+    .refresh-btn:hover { border-color: rgba(255,255,255,0.2); color: rgba(255,255,255,0.7); }
+
+    .kpis { position: relative; z-index: 1; display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
+    .kpi {
+      background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);
+      border-radius: 8px; padding: 18px 20px;
+    }
+    .kpi .label {
+      font-size: 9px; font-weight: 600; color: rgba(255,255,255,0.25);
+      text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 8px;
+    }
+    .kpi .value {
+      font-family: 'JetBrains Mono', monospace; font-size: 28px; font-weight: 600;
+      color: #e8ecf0;
+    }
+    .kpi .value.amber { color: #f0a040; }
+
+    .charts { position: relative; z-index: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 24px; }
+    .chart-box {
+      background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);
+      border-radius: 8px; padding: 20px;
+    }
+    .chart-box h3 {
+      font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 500;
+      color: rgba(255,255,255,0.25); text-transform: uppercase; letter-spacing: 1px;
+      margin-bottom: 16px;
+    }
+
+    .table-box {
+      position: relative; z-index: 1;
+      background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);
+      border-radius: 8px; padding: 20px;
+    }
+    .table-box h3 {
+      font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 500;
+      color: rgba(255,255,255,0.25); text-transform: uppercase; letter-spacing: 1px;
+      margin-bottom: 12px;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: 'JetBrains Mono', monospace; }
+    th {
+      text-align: left; padding: 8px 12px; font-size: 9px; font-weight: 500;
+      color: rgba(255,255,255,0.2); text-transform: uppercase; letter-spacing: 1px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+    td {
+      padding: 9px 12px; color: rgba(255,255,255,0.55);
+      border-bottom: 1px solid rgba(255,255,255,0.03);
+    }
+    tr:hover td { color: rgba(255,255,255,0.75); }
+    .status-completed { color: #26c97d; }
+    .status-failed { color: #f87171; }
+    .muted { color: rgba(255,255,255,0.2); }
+
+    @media (max-width: 900px) {
+      .kpis { grid-template-columns: repeat(2, 1fr); }
+      .charts { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
-  <h1>Excel AI — Admin</h1>
-  <div class="refresh"><button onclick="loadAll()">Aggiorna</button></div>
+  <header>
+    <h1>excel<span>·</span>ai<span>/</span>admin</h1>
+    <button class="refresh-btn" onclick="loadAll()">⟳ Refresh</button>
+  </header>
 
-  <div class="cards">
-    <div class="card"><div class="label">Utenti totali</div><div class="value" id="totalUsers">—</div></div>
-    <div class="card"><div class="label">Turn oggi</div><div class="value" id="turnsToday">—</div></div>
-    <div class="card"><div class="label">Errori 24h</div><div class="value error" id="errors24h">—</div></div>
-    <div class="card"><div class="label">Token out 24h</div><div class="value" id="tokensOut">—</div></div>
+  <div class="kpis">
+    <div class="kpi"><div class="label">Total Users</div><div class="value" id="totalUsers">—</div></div>
+    <div class="kpi"><div class="label">Turns Today</div><div class="value" id="turnsToday">—</div></div>
+    <div class="kpi"><div class="label">Errors 24h</div><div class="value amber" id="errors24h">—</div></div>
+    <div class="kpi"><div class="label">Tokens Out 24h</div><div class="value" id="tokensOut">—</div></div>
   </div>
 
-  <div class="section">
-    <div class="chart-container">
-      <h3>Turn / giorno (ultimi 30gg)</h3>
+  <div class="charts">
+    <div class="chart-box">
+      <h3>Turns / day (30d)</h3>
       <canvas id="turnsChart"></canvas>
     </div>
-    <div class="chart-container">
-      <h3>Eventi per tipo (ultime 24h)</h3>
+    <div class="chart-box">
+      <h3>Event distribution (24h)</h3>
       <canvas id="eventsChart"></canvas>
     </div>
   </div>
 
-  <div class="chart-container">
-    <h3>Ultimi turn</h3>
-    <table><thead><tr><th>Utente</th><th>Stato</th><th>Task</th><th>Azioni</th><th>Latenza</th><th>Data</th></tr></thead><tbody id="recentTurns"></tbody></table>
+  <div class="table-box">
+    <h3>Recent turns</h3>
+    <table>
+      <thead><tr><th>User</th><th>Status</th><th>Tasks</th><th>Actions</th><th>Latency</th><th>Created</th></tr></thead>
+      <tbody id="recentTurns"></tbody>
+    </table>
   </div>
 
 <script>
 const BASE = '/api/admin';
+const tok = localStorage.getItem('excelai_access_token');
+const h = { Authorization: `Bearer ${tok}` };
 
 async function loadStats() {
-  const r = await fetch(`${BASE}/stats`, { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } });
+  const r = await fetch(`${BASE}/stats`, { headers: h });
   const d = await r.json();
   document.getElementById('totalUsers').textContent = d.totalUsers;
   document.getElementById('turnsToday').textContent = d.turnsToday;
@@ -63,61 +136,65 @@ async function loadStats() {
   document.getElementById('tokensOut').textContent = (d.tokensOut24h || 0).toLocaleString();
 }
 
-async function loadCharts() {
-  const r = await fetch(`${BASE}/events-daily`, { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } });
-  const data = await r.json();
+const chartColors = { completed: '#26c97d', failed: '#f87171', grid: 'rgba(255,255,255,0.04)', tick: 'rgba(255,255,255,0.15)' };
 
-  // Turns chart
-  const ctx1 = document.getElementById('turnsChart').getContext('2d');
-  new Chart(ctx1, {
+async function loadCharts() {
+  document.querySelectorAll('canvas').forEach(c => { Chart.getChart(c)?.destroy(); });
+
+  const r = await fetch(`${BASE}/events-daily`, { headers: h });
+  const data = await r.json();
+  new Chart(document.getElementById('turnsChart'), {
     type: 'bar',
     data: {
       labels: data.days || [],
       datasets: [{
-        label: 'Turn completati', data: data.completed || [],
-        backgroundColor: '#0b7f5c', borderRadius: 4,
+        label: 'completed', data: data.completed || [],
+        backgroundColor: chartColors.completed, borderRadius: 2, borderSkipped: false,
       }, {
-        label: 'Falliti', data: data.failed || [],
-        backgroundColor: '#e53935', borderRadius: 4,
+        label: 'failed', data: data.failed || [],
+        backgroundColor: chartColors.failed, borderRadius: 2, borderSkipped: false,
       }]
     },
-    options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: chartColors.tick, font: { size: 9, family: 'JetBrains Mono' } } },
+        y: { grid: { color: chartColors.grid }, ticks: { color: chartColors.tick, font: { size: 9, family: 'JetBrains Mono' } }, beginAtZero: true }
+      }
+    }
   });
 
-  const r2 = await fetch(`${BASE}/events-by-type`, { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } });
+  const r2 = await fetch(`${BASE}/events-by-type`, { headers: h });
   const types = await r2.json();
-  const ctx2 = document.getElementById('eventsChart').getContext('2d');
-  new Chart(ctx2, {
+  new Chart(document.getElementById('eventsChart'), {
     type: 'doughnut',
     data: {
       labels: types.map(t => t.type),
-      datasets: [{ data: types.map(t => t.count), backgroundColor: ['#0b7f5c','#1f6f8b','#a65f00','#b42336','#78837c','#4d5b54'] }]
+      datasets: [{ data: types.map(t => t.count), backgroundColor: ['#26c97d','#3388aa','#f0a040','#f87171','#607088','#3a4050'], borderWidth: 0 }]
     },
-    options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { position: 'bottom', labels: { color: 'rgba(255,255,255,0.35)', font: { size: 9, family: 'JetBrains Mono' }, padding: 12, boxWidth: 8 } } }
+    }
   });
 }
 
 async function loadRecentTurns() {
-  const r = await fetch(`${BASE}/recent-turns`, { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } });
+  const r = await fetch(`${BASE}/recent-turns`, { headers: h });
   const turns = await r.json();
   document.getElementById('recentTurns').innerHTML = turns.map(t => `
     <tr>
-      <td>${t.userEmail || t.userId?.slice(0,8)}</td>
-      <td>${t.status}</td>
+      <td>${t.userEmail?.split('@')[0] || t.userId?.slice(0,6) || '—'}</td>
+      <td class="status-${t.status}">${t.status}</td>
       <td>${t.taskCount || 0}</td>
       <td>${t.actionCount || 0}</td>
-      <td>${t.totalLatencyMs ? (t.totalLatencyMs/1000).toFixed(1)+'s' : '—'}</td>
-      <td>${t.createdAt?.slice(0,16) || '—'}</td>
+      <td class="${!t.totalLatencyMs ? 'muted' : ''}">${t.totalLatencyMs ? (t.totalLatencyMs/1000).toFixed(1)+'s' : '—'}</td>
+      <td class="muted">${t.createdAt?.slice(0,16) || '—'}</td>
     </tr>`).join('');
 }
 
-function loadAll() {
-  document.querySelectorAll('canvas').forEach(c => { const ctx = c.getContext('2d'); Chart.getChart(c)?.destroy(); });
-  loadStats();
-  loadCharts();
-  loadRecentTurns();
-}
-
+function loadAll() { loadStats(); loadCharts(); loadRecentTurns(); }
 loadAll();
 </script>
 </body>
