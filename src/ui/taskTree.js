@@ -22,26 +22,87 @@ function resetTaskTree() {
   stopElapsedTimer();
 }
 
-function renderTaskTree(tasks) {
-  const html = tasks.map(t => {
-    const badgeClass = {
-      data: 'badge-data',
-      layout: 'badge-layout',
-      formula: 'badge-formula',
-      format: 'badge-format'
-    }[t.agent] || 'badge-formula';
-    return `
-      <div class="task-item" id="task-${t.id}" data-task-id="${t.id}">
-        <span class="task-status-icon" id="icon-${t.id}">⏳</span>
-        <span class="task-badge ${badgeClass}">${escapeHtml(t.agent)}</span>
-        <span class="task-desc">${escapeHtml(t.description || t.tool)}</span>
-        <span class="task-tool">${escapeHtml(t.tool)}</span>
-      </div>
-    `;
-  }).join('');
-  taskTreeEl.innerHTML = html;
+function computeWaves(tasks) {
+  // Topological levels from deps. Returns Map<taskId, waveIndex>.
+  const ids = new Set(tasks.map(t => t.id));
+  const depMap = new Map();
+  for (const t of tasks) {
+    depMap.set(t.id, (t.deps || []).filter(d => ids.has(d)));
+  }
+  const level = new Map();
+  const queue = tasks.filter(t => (depMap.get(t.id) || []).length === 0).map(t => t.id);
+  for (const id of queue) level.set(id, 0);
+  let safety = tasks.length * tasks.length;
+  while (safety-- > 0) {
+    let changed = false;
+    for (const t of tasks) {
+      if (level.has(t.id)) continue;
+      const deps = depMap.get(t.id) || [];
+      if (deps.every(d => level.has(d))) {
+        const d = deps.length === 0 ? 0 : Math.max(...deps.map(x => level.get(x))) + 1;
+        level.set(t.id, d);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  return level;
+}
 
+function renderTaskTree(tasks) {
   taskTreeCache.clear();
+
+  const isOrchestratorPlan = tasks.length > 0 && tasks.every(t => t.tool === 'orchestrator.slice');
+  if (isOrchestratorPlan) {
+    const levels = computeWaves(tasks);
+    const waveGroups = new Map();
+    for (const t of tasks) {
+      const w = levels.get(t.id) ?? 0;
+      if (!waveGroups.has(w)) waveGroups.set(w, []);
+      waveGroups.get(w).push(t);
+    }
+    const sortedWaves = [...waveGroups.keys()].sort((a, b) => a - b);
+    const html = sortedWaves.map(w => {
+      const items = waveGroups.get(w);
+      const parallelBadge = items.length > 1
+        ? `<span class="wave-parallel">∥ ${items.length} in parallelo</span>`
+        : '';
+      const tasksHtml = items.map(t => `
+        <div class="task-item slice-item" id="task-${t.id}" data-task-id="${t.id}">
+          <span class="task-status-icon" id="icon-${t.id}">⏳</span>
+          <span class="task-badge badge-slice">slice</span>
+          <span class="task-desc">${escapeHtml(t.description || t.id)}</span>
+          ${(t.deps && t.deps.length) ? `<span class="task-deps">← ${escapeHtml(t.deps.join(', '))}</span>` : ''}
+        </div>
+      `).join('');
+      return `
+        <div class="wave-group" data-wave="${w}">
+          <div class="wave-header">Wave ${w + 1} ${parallelBadge}</div>
+          ${tasksHtml}
+        </div>
+      `;
+    }).join('');
+    taskTreeEl.innerHTML = html;
+  } else {
+    const html = tasks.map(t => {
+      const badgeClass = {
+        data: 'badge-data',
+        layout: 'badge-layout',
+        formula: 'badge-formula',
+        format: 'badge-format'
+      }[t.agent] || 'badge-formula';
+      return `
+        <div class="task-item" id="task-${t.id}" data-task-id="${t.id}">
+          <span class="task-status-icon" id="icon-${t.id}">⏳</span>
+          <span class="task-badge ${badgeClass}">${escapeHtml(t.agent)}</span>
+          <span class="task-desc">${escapeHtml(t.description || t.tool)}</span>
+          <span class="task-tool">${escapeHtml(t.tool)}</span>
+        </div>
+      `;
+    }).join('');
+    taskTreeEl.innerHTML = html;
+  }
+
   tasks.forEach(t => {
     taskTreeCache.set(t.id, {
       el: document.getElementById('task-' + t.id),

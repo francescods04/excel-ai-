@@ -51,6 +51,10 @@ function requirePlan(plan) {
 }
 
 async function quotaCheck(req, res, next) {
+  // Dev/admin bypass
+  if (process.env.DISABLE_QUOTA === 'true') return next();
+  if (req.userPlan === 'admin') return next();
+
   try {
     const supabase = getSupabase();
 

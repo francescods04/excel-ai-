@@ -635,6 +635,40 @@ body {
 .badge-layout { background: #e8f2f7; color: #1f5a73; }
 .badge-formula { background: #e4f5ee; color: #086347; }
 .badge-format { background: #f0edf9; color: #4f3b78; }
+.badge-slice { background: #efe7fb; color: #4c1d95; }
+
+.wave-group {
+  margin-bottom: var(--spacing-sm);
+  border-left: 2px solid #ddd6fe;
+  padding-left: 8px;
+}
+.wave-header {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.wave-parallel {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: none;
+  background: #ede9fe;
+  color: #5b21b6;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+.task-deps {
+  font-size: 9px;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+}
+[data-theme="dark"] .wave-group { border-left-color: #4c1d95; }
+[data-theme="dark"] .wave-parallel { background: #2e1065; color: #ddd6fe; }
 
 .task-desc { flex: 1; color: var(--color-text); }
 .task-tool { color: var(--color-text-muted); font-size: 9px; font-family: var(--font-mono); flex-shrink: 0; }

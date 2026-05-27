@@ -679,6 +679,15 @@ function openTurnEventStream(turnId, planMsgId) {
       showApproveBar();
     });
 
+    src.addEventListener('triageDecision', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        const tag = data.mode === 'architect_then_parallel' ? '🧬 Architect+Parallel'
+          : (data.mode === 'single_deep_plan' ? '📋 Deep planner' : '⚡ Single agent');
+        addLog(`Triage: ${tag} — ${data.complexity} (~${data.estimated_iterations} iter): ${data.reasoning}`);
+      } catch (err) {}
+    });
+
     src.addEventListener('steerQueued', (e) => {
       try {
         const data = JSON.parse(e.data);

@@ -640,7 +640,10 @@ function emitToolRequestResolved(turnId, request, response, status = 'resolved')
 function buildTurn(message, context, parentTurnId = null, options = {}) {
   const turnId = makeTurnId();
   const createdAt = nowIso();
-  const strategy = chooseTurnStrategy(message, context || {}, parentTurnId, options);
+  // Strategy is computed by planTurn (via triage). Only honor an explicit override here.
+  const strategy = options.strategy
+    ? { ...options.strategy }
+    : null;
 
   return {
     id: turnId,
@@ -1447,6 +1450,7 @@ async function planTurn(turnId) {
 
     const updatedTurn = _getTurnRef(turnId);
     updatedTurn.plan = plan;
+    updatedTurn.strategy = strategy;
     updatedTurn.status = 'awaiting_approval';
     saveTurn(updatedTurn);
 
