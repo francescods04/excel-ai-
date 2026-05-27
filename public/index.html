@@ -259,18 +259,74 @@
     .hero-video-bg video {
       width: 100%; height: 100%; object-fit: cover; opacity: 0.18;
     }
+
+    /* ── Video Showcase Carousel ── */
+    .video-showcase { margin-top: 48px; }
+    .showcase-stage {
+      position: relative; max-width: 800px; margin: 0 auto;
+      border-radius: var(--radius-lg); overflow: hidden;
+      border: 1px solid var(--border);
+      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+      background: #020408;
+      aspect-ratio: 16 / 10;
+    }
+    .showcase-video {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      object-fit: cover; opacity: 0; transition: opacity 0.6s ease;
+      pointer-events: none;
+    }
+    .showcase-video.active { opacity: 1; }
+    .showcase-controls {
+      position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 8px; z-index: 2;
+      opacity: 0; transition: opacity 0.3s;
+    }
+    .showcase-stage:hover .showcase-controls { opacity: 1; }
+    .showcase-btn {
+      width: 36px; height: 36px; border-radius: 50%;
+      background: rgba(0,0,0,0.7); border: 1px solid rgba(255,255,255,0.15);
+      color: var(--text-primary); font-size: 13px;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      transition: all 0.2s; backdrop-filter: blur(8px);
+    }
+    .showcase-btn:hover { background: var(--accent); color: var(--bg-deep); border-color: var(--accent); }
+    .showcase-info {
+      max-width: 800px; margin: 12px auto 0;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 16px;
+    }
+    .showcase-labels {
+      display: flex; gap: 16px;
+    }
+    .showcase-label {
+      font-family: 'JetBrains Mono', monospace; font-size: 11px;
+      color: var(--text-muted); letter-spacing: 1px;
+      text-transform: uppercase; transition: color 0.3s;
+      display: none;
+    }
+    .showcase-label.active { display: inline; color: var(--accent); }
+    .showcase-dots { display: flex; gap: 6px; }
+    .showcase-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--border); transition: all 0.3s;
+      cursor: pointer;
+    }
+    .showcase-dot.active { background: var(--accent); width: 18px; border-radius: 4px; }
+    .showcase-progress {
+      flex: 1; max-width: 120px; height: 2px;
+      background: var(--border); border-radius: 1px; overflow: hidden;
+    }
+    .showcase-progress-bar {
+      height: 100%; background: var(--accent); width: 0%;
+      transition: width 0.1s linear;
+    }
+
     .demo-video {
       max-width: 720px; margin: 48px auto 0; border-radius: var(--radius-lg);
       overflow: hidden; border: 1px solid var(--border);
       box-shadow: 0 20px 60px rgba(0,0,0,0.5);
     }
     .demo-video video { width: 100%; display: block; }
-    .usecase-video {
-      max-width: 800px; margin: 40px auto 0; border-radius: var(--radius-lg);
-      overflow: hidden; border: 1px solid var(--border);
-      box-shadow: 0 20px 60px rgba(0,0,0,0.4);
-    }
-    .usecase-video video { width: 100%; display: block; }
 
     /* Counter animation */
     .counter { display: inline; }
@@ -459,14 +515,7 @@
           Ecco esempi concreti di attivit&agrave; che richiederebbero ore. Con Excel AI bastano secondi.
         </p>
 
-        <div class="usecase-video reveal reveal-delay-3" data-reveal>
-          <video autoplay muted loop playsinline preload="none"
-                 poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 960 640'%3E%3Crect fill='%2306090d' width='960' height='640' rx='12'/%3E%3Ctext x='480' y='330' text-anchor='middle' fill='%234a5666' font-family='monospace' font-size='14'%3E▶ Slide casi d'\''uso%3C/text%3E%3C/svg%3E">
-            <source src="/public/videos/use-case-slides.mp4" type="video/mp4">
-          </video>
-        </div>
-
-        <div class="usecases reveal reveal-delay-4" data-reveal>
+        <div class="usecases reveal reveal-delay-3" data-reveal>
           <div class="uc-card">
             <span class="uc-tag">Contabilit&agrave;</span>
             <h4>Riconciliazione bancaria</h4>
@@ -522,11 +571,29 @@
           Opera su celle, formule, tabelle pivot e formattazione come farebbe un operatore esperto.
         </p>
 
-        <div class="demo-video reveal reveal-delay-3" data-reveal>
-          <video autoplay muted loop playsinline preload="none"
-                 poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 960 640'%3E%3Crect fill='%23020408' width='960' height='640' rx='12'/%3E%3Ctext x='480' y='330' text-anchor='middle' fill='%234a5666' font-family='monospace' font-size='14'%3E▶ Demo interattiva%3C/text%3E%3C/svg%3E">
-            <source src="/public/videos/terminal-demo.mp4" type="video/mp4">
-          </video>
+        <div class="video-showcase reveal reveal-delay-3" data-reveal>
+          <div class="showcase-stage">
+            <video class="showcase-video active" src="/public/videos/terminal-demo.mp4" muted playsinline preload="none"
+                   poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 960 640'%3E%3Crect fill='%23020408' width='960' height='640' rx='12'/%3E%3C/svg%3E"></video>
+            <video class="showcase-video" src="/public/videos/use-case-slides.mp4" muted playsinline preload="none"
+                   poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 960 640'%3E%3Crect fill='%2306090d' width='960' height='640' rx='12'/%3E%3C/svg%3E"></video>
+            <div class="showcase-controls">
+              <button class="showcase-btn" id="showcase-prev" title="Precedente">&#8592;</button>
+              <button class="showcase-btn" id="showcase-play" title="Play / Pausa">&#10074;&#10074;</button>
+              <button class="showcase-btn" id="showcase-next" title="Successivo">&#8594;</button>
+            </div>
+          </div>
+          <div class="showcase-info">
+            <div class="showcase-labels">
+              <span class="showcase-label active">Demo interattiva</span>
+              <span class="showcase-label">Casi d'uso reali</span>
+            </div>
+            <div class="showcase-dots">
+              <span class="showcase-dot active"></span>
+              <span class="showcase-dot"></span>
+            </div>
+            <div class="showcase-progress"><div class="showcase-progress-bar"></div></div>
+          </div>
         </div>
 
         <div class="capabilities reveal reveal-delay-4" data-reveal>
@@ -848,6 +915,84 @@
 
     // Init
     (function() { switchInstallTab(navigator.platform.toUpperCase().indexOf('MAC') >= 0 ? 'mac' : 'windows'); })();
+
+    // ── Video Showcase Carousel ──
+    (function initShowcase() {
+      const stage = document.querySelector('.showcase-stage');
+      if (!stage) return;
+      const videos = stage.querySelectorAll('.showcase-video');
+      const labels = document.querySelectorAll('.showcase-label');
+      const dots = document.querySelectorAll('.showcase-dot');
+      const progressBar = document.querySelector('.showcase-progress-bar');
+      const playBtn = document.getElementById('showcase-play');
+      const prevBtn = document.getElementById('showcase-prev');
+      const nextBtn = document.getElementById('showcase-next');
+      if (videos.length < 2) return;
+
+      let current = 0;
+      let playing = true;
+      const interval = 10000; // 10s per video
+      let timer = null;
+      let progressRAF = null;
+      let segmentStart = 0;
+
+      function playVideo(i) {
+        videos.forEach((v, idx) => { v.classList.toggle('active', idx === i); if (idx === i) v.play(); else v.pause(); });
+        labels.forEach((l, idx) => l.classList.toggle('active', idx === i));
+        dots.forEach((d, idx) => d.classList.toggle('active', idx === i));
+        current = i;
+        segmentStart = performance.now();
+        progressBar.style.transition = 'none';
+        progressBar.style.width = '0%';
+      }
+
+      function startProgress() {
+        segmentStart = performance.now();
+        function tick(now) {
+          if (!playing) { progressRAF = requestAnimationFrame(tick); return; }
+          const elapsed = now - segmentStart;
+          const pct = Math.min((elapsed / interval) * 100, 100);
+          progressBar.style.width = pct + '%';
+          if (pct >= 100) {
+            playVideo((current + 1) % videos.length);
+            segmentStart = performance.now();
+          }
+          progressRAF = requestAnimationFrame(tick);
+        }
+        progressRAF = requestAnimationFrame(tick);
+      }
+
+      function startTimer() {
+        clearTimeout(timer);
+        timer = setTimeout(() => { if (playing) playVideo((current + 1) % videos.length); startTimer(); }, interval);
+      }
+
+      function togglePlay() {
+        playing = !playing;
+        playBtn.textContent = playing ? '⏸' : '▶';
+        if (playing) { videos[current].play(); segmentStart = performance.now(); }
+        else videos[current].pause();
+      }
+
+      playVideo(0);
+      startTimer();
+      startProgress();
+
+      playBtn.addEventListener('click', togglePlay);
+      prevBtn.addEventListener('click', () => { clearTimeout(timer); playVideo((current - 1 + videos.length) % videos.length); startTimer(); });
+      nextBtn.addEventListener('click', () => { clearTimeout(timer); playVideo((current + 1) % videos.length); startTimer(); });
+      dots.forEach((d, i) => d.addEventListener('click', () => { clearTimeout(timer); playVideo(i); startTimer(); }));
+
+      // Pause when not visible
+      const visObs = new IntersectionObserver((entries) => {
+        entries.forEach(e => {
+          if (e.isIntersecting && !playing) return;
+          if (e.isIntersecting) { videos[current].play(); segmentStart = performance.now(); }
+          else videos[current].pause();
+        });
+      }, { threshold: 0.2 });
+      visObs.observe(stage);
+    })();
 
     // Copy command
     function copyInstall(el) {
