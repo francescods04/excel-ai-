@@ -1,7 +1,7 @@
 'use strict';
 
 import state from './store/state.js';
-import { restoreTurnMemory, persistTurnStarted, persistTurnCompleted, forgetActiveTurn } from './store/turnMemory.js';
+import { restoreTurnMemory, persistTurnStarted, persistTurnCompleted, forgetActiveTurn, forgetAll, computeContextFingerprint } from './store/turnMemory.js';
 import { escapeHtml, formatActionTarget, isRangeWriteAction, summarizeMatrix } from './utils/html.js';
 import { initTabs, switchTab, updateProgressBadge, API_BASE } from './ui/tabs.js';
 import { addMessage, removeMessage, showTypingIndicator, hideTypingIndicator, showQuestionOptionsInChat, getChatContainer } from './ui/chat.js';
@@ -139,9 +139,13 @@ async function init() {
     // Close SSE connections
     if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
     if (state.agentEventSource) { state.agentEventSource.close(); state.agentEventSource = null; }
-    // Reset state
+    // Reset state — including continuity so the NEXT turn starts fresh, no parent
     state.isProcessing = false;
     state.currentTurnId = null;
+    state.lastTurnId = null;
+    state.lastCompletedTurnId = null;
+    state.lastContextFingerprint = null;
+    forgetAll();
     state.currentPlanTasks = null;
     state.requestQueue = [];
     state.excelActionQueue = [];
@@ -586,7 +590,8 @@ async function resumeAgent(agentId, userResponse) {
 }
 
 async function runTurnMode(text) {
-  const parentTurnId = state.currentTurnId || state.lastCompletedTurnId || state.lastTurnId || null;
+  // Tentative parent: previous completed/running turn from memory.
+  let parentTurnId = state.currentTurnId || state.lastCompletedTurnId || state.lastTurnId || null;
   resetAgent();
   switchTab('progress');
   closeAgentEventStream();
@@ -598,10 +603,23 @@ async function runTurnMode(text) {
     const context = await getExcelContext();
     addLog('Lettura contesto Excel completata');
 
+    // If the workbook fingerprint changed since the last turn, drop the parent —
+    // we're on a different file / completely restructured sheet, so previous context is stale.
+    const currentFingerprint = computeContextFingerprint(context);
+    if (parentTurnId && state.lastContextFingerprint && currentFingerprint
+      && currentFingerprint !== state.lastContextFingerprint) {
+      addLog(`Nuovo workbook rilevato (fingerprint diverso). Ignoro turn precedente ${parentTurnId}.`, 'info');
+      parentTurnId = null;
+      state.lastCompletedTurnId = null;
+      state.lastTurnId = null;
+      forgetAll();
+    }
+
     const startData = await startTurn(text, context, modelSelect.value, parentTurnId);
     state.currentTurnId = startData.turnId;
     state.lastTurnId = startData.turnId;
-    persistTurnStarted(startData.turnId);
+    state.lastContextFingerprint = currentFingerprint;
+    persistTurnStarted(startData.turnId, currentFingerprint);
     addLog('Turn creato: ' + startData.turnId);
     if (parentTurnId) addLog('Continuità chat: uso il contesto del turn precedente ' + parentTurnId);
     openTurnEventStream(startData.turnId, planMsgId);
@@ -818,7 +836,7 @@ function openTurnEventStream(turnId, planMsgId) {
         if (!(data.status === 'error' || data.error)) {
           state.lastCompletedTurnId = data.turnId || turnId;
         }
-        persistTurnCompleted(data.turnId || turnId, !(data.status === 'error' || data.error));
+        persistTurnCompleted(data.turnId || turnId, !(data.status === 'error' || data.error), state.lastContextFingerprint);
         removeMessage(planMsgId);
         hideApproveBar();
         hideTypingIndicator();

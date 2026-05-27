@@ -19,8 +19,16 @@ function normalizeMemory(raw, now = Date.now()) {
   return {
     lastTurnId: typeof raw.lastTurnId === 'string' ? raw.lastTurnId : null,
     lastCompletedTurnId: typeof raw.lastCompletedTurnId === 'string' ? raw.lastCompletedTurnId : null,
+    lastContextFingerprint: typeof raw.lastContextFingerprint === 'string' ? raw.lastContextFingerprint : null,
     updatedAt
   };
+}
+
+function computeContextFingerprint(ctx) {
+  if (!ctx || typeof ctx !== 'object') return null;
+  const sheets = Array.isArray(ctx.workbookSheets) ? [...ctx.workbookSheets].sort() : [];
+  if (sheets.length === 0) return null;
+  return sheets.join('|') + '#' + sheets.length;
 }
 
 function readTurnMemory(now = Date.now()) {
@@ -62,24 +70,35 @@ function restoreTurnMemory(state) {
   if (!memory || !state) return null;
   state.lastTurnId = memory.lastTurnId || state.lastTurnId || null;
   state.lastCompletedTurnId = memory.lastCompletedTurnId || state.lastCompletedTurnId || null;
+  state.lastContextFingerprint = memory.lastContextFingerprint || state.lastContextFingerprint || null;
   return memory;
 }
 
-function persistTurnStarted(turnId) {
+function persistTurnStarted(turnId, contextFingerprint = null) {
   if (!turnId) return null;
-  return writeTurnMemory({ lastTurnId: turnId });
+  const patch = { lastTurnId: turnId };
+  if (contextFingerprint) patch.lastContextFingerprint = contextFingerprint;
+  return writeTurnMemory(patch);
 }
 
-function persistTurnCompleted(turnId, ok = true) {
+function persistTurnCompleted(turnId, ok = true, contextFingerprint = null) {
   if (!turnId) return null;
-  return writeTurnMemory({
+  const patch = {
     lastTurnId: turnId,
     ...(ok ? { lastCompletedTurnId: turnId } : {})
-  });
+  };
+  if (contextFingerprint) patch.lastContextFingerprint = contextFingerprint;
+  return writeTurnMemory(patch);
 }
 
 function forgetActiveTurn() {
   return writeTurnMemory({ lastTurnId: null });
+}
+
+function forgetAll() {
+  const storage = getStorage();
+  if (!storage) return;
+  try { storage.removeItem(TURN_MEMORY_KEY); } catch (err) {}
 }
 
 export {
@@ -89,5 +108,7 @@ export {
   restoreTurnMemory,
   persistTurnStarted,
   persistTurnCompleted,
-  forgetActiveTurn
+  forgetActiveTurn,
+  forgetAll,
+  computeContextFingerprint
 };
