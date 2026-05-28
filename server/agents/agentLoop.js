@@ -1643,16 +1643,16 @@ async function runAgentLoop(objective, context, options = {}) {
         label: `AgentLoop iter ${iteration}`,
         modelOverride: modelForRun,
         thinkingDisabled: !useThinking,
-        // Tiered reasoning_effort for thinking iter:
-        //   - 'high' only when recovering from an error / parse failure
-        //     (the model explicitly NEEDS more deliberation)
-        //   - 'medium' for all other thinking turns (default for normal build)
-        // Per-env overrides: DEEPSEEK_REASONING_EFFORT_HEAVY (default high),
-        // DEEPSEEK_REASONING_EFFORT (default medium).
+        // Reasoning effort for thinking iterations. Bench v3 (2026-05-28)
+        // showed that downgrading thinking iter from 'high' to 'medium' as a
+        // default lost bulk_set_cell_ranges adoption (6×→0×) and pushed
+        // wallclock from 190s back to 388s. Keep 'high' as default — the
+        // batch decision lives in the reasoning step. Set
+        // DEEPSEEK_REASONING_EFFORT=medium to opt back into the cheaper
+        // medium tier when latency-over-quality is acceptable (e.g. the
+        // "fast" speed mode preset).
         reasoningEffort: useThinking
-          ? ((forceThinkingNext || consecutiveErrors > 0 || parseFailureStreak > 0)
-              ? (process.env.DEEPSEEK_REASONING_EFFORT_HEAVY || 'high')
-              : (process.env.DEEPSEEK_REASONING_EFFORT || 'medium'))
+          ? (process.env.DEEPSEEK_REASONING_EFFORT || 'high')
           : AGENT_REASONING_EFFORT
       };
 
