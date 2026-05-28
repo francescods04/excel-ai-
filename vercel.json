@@ -25,6 +25,8 @@
     { "src": "/favicon.ico", "dest": "/public/favicon.svg" },
     { "src": "/favicon.svg", "dest": "/public/favicon.svg" },
     { "src": "/", "dest": "/public/index.html" },
+    { "src": "/privacy.html", "dest": "/public/privacy.html" },
+    { "src": "/faq.html", "dest": "/public/faq.html" },
     { "src": "/install.sh", "dest": "/public/install.sh" },
     { "src": "/install.ps1", "dest": "/public/install.ps1" },
     { "src": "/manifest.xml", "dest": "/api/index.js" },
