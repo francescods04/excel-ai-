@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Excel AI — Assistente intelligente per Microsoft Excel</title>
   <link rel="icon" type="image/svg+xml" href="/public/favicon.svg">
-  <meta name="description" content="Un assistente intelligente che lavora direttamente nei tuoi fogli Excel. Per analisti finanziari, investment banker, commercialisti, controller e chiunque usi Excel professionalmente. Prova gratuita.">
+  <meta name="description" content="Un assistente intelligente che lavora direttamente nei tuoi fogli Excel. Per analisti finanziari, investment banker, commercialisti, controller e chiunque usi Excel professionalmente.">
   <meta property="og:title" content="Excel AI — Assistente intelligente per Microsoft Excel">
   <meta property="og:description" content="Lavora nei tuoi fogli Excel con un assistente che capisce il tuo linguaggio. Chiedi in italiano, rivedi le modifiche, conferma con un click.">
   <meta property="og:type" content="website">
@@ -163,27 +163,43 @@
     .what-is-list li:last-child { border-bottom: none; }
     .what-is-list .check { width: 20px; height: 20px; border-radius: 50%; background: var(--accent-glow); color: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 11px; flex-shrink: 0; margin-top: 1px; }
 
-    .excel-mockup { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; box-shadow: 0 24px 70px rgba(0,0,0,0.12); }
+    /* Improved Excel Mockup */
+    .excel-mockup { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; box-shadow: 0 24px 70px rgba(0,0,0,0.12); font-family: 'DM Sans', sans-serif; }
     html[data-theme="dark"] .excel-mockup { box-shadow: 0 24px 70px rgba(0,0,0,0.45); }
+    .excel-ribbon { background: var(--accent); height: 28px; display: flex; align-items: center; padding: 0 12px; gap: 18px; }
+    .excel-ribbon span { font-size: 11px; color: rgba(255,255,255,0.9); font-weight: 500; }
+    .excel-ribbon span.active { color: #fff; font-weight: 700; background: rgba(0,0,0,0.15); padding: 2px 8px; border-radius: 3px; }
+    .excel-formula-bar { background: var(--bg-raised); padding: 6px 12px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); }
+    .excel-formula-label { font-size: 11px; color: var(--text-muted); font-weight: 600; width: 24px; }
+    .excel-formula-input { flex: 1; background: var(--bg-card); border: 1px solid var(--border); border-radius: 3px; padding: 3px 8px; font-size: 12px; color: var(--text-secondary); }
     .excel-topbar { background: var(--bg-raised); padding: 8px 12px; display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--border); }
     .excel-circle { width: 10px; height: 10px; border-radius: 50%; }
     .excel-circle.r { background: var(--red); }
     .excel-circle.y { background: var(--amber); }
     .excel-circle.g { background: var(--accent); }
-    .excel-title { margin-left: 8px; font-size: 11px; color: var(--text-muted); }
-    .excel-body { display: flex; height: 320px; }
-    .excel-sheet { flex: 1; background: var(--bg-deep); padding: 16px; position: relative; }
-    .sheet-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
-    .sheet-cell { height: 28px; background: var(--bg-card); border-radius: 3px; border: 1px solid var(--border); }
-    .sheet-cell.hl { background: var(--accent-glow); border-color: rgba(0,143,122,0.25); }
-    html[data-theme="dark"] .sheet-cell.hl { background: rgba(0,201,167,0.08); border-color: rgba(0,201,167,0.25); }
-    .sheet-tabbar { position: absolute; bottom: 0; left: 0; right: 0; height: 28px; background: var(--bg-raised); border-top: 1px solid var(--border); display: flex; align-items: center; padding: 0 12px; gap: 16px; font-size: 11px; color: var(--text-muted); }
+    .excel-title { margin-left: 8px; font-size: 11px; color: var(--text-muted); font-weight: 500; }
+    .excel-body { display: flex; height: 340px; }
+    .excel-sheet-area { flex: 1; display: flex; flex-direction: column; background: var(--bg-deep); }
+    .sheet-header-row { display: flex; height: 22px; background: var(--bg-raised); border-bottom: 1px solid var(--border); }
+    .sheet-corner { width: 32px; border-right: 1px solid var(--border); }
+    .sheet-col-h { flex: 1; display: flex; align-items: center; justify-content: center; font-size: 10px; color: var(--text-muted); font-weight: 600; border-right: 1px solid var(--border); }
+    .sheet-rows { flex: 1; overflow: hidden; }
+    .sheet-row { display: flex; height: 26px; }
+    .sheet-row-h { width: 32px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: var(--text-muted); background: var(--bg-raised); border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); }
+    .sheet-cell { flex: 1; padding: 2px 6px; font-size: 11px; color: var(--text-primary); border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); display: flex; align-items: center; overflow: hidden; white-space: nowrap; }
+    .sheet-cell.text { color: var(--text-primary); }
+    .sheet-cell.num { color: var(--text-secondary); justify-content: flex-end; }
+    .sheet-cell.hl { background: var(--accent-glow); color: var(--accent); font-weight: 600; }
+    .sheet-cell.hl2 { background: rgba(199,125,26,0.08); color: var(--amber); font-weight: 600; }
+    .sheet-tabbar { height: 26px; background: var(--bg-raised); border-top: 1px solid var(--border); display: flex; align-items: center; padding: 0 12px; gap: 2px; font-size: 11px; color: var(--text-muted); }
+    .sheet-tabbar .tab { padding: 4px 12px; border-radius: 4px 4px 0 0; }
+    .sheet-tabbar .tab.active { background: var(--bg-deep); color: var(--text-primary); font-weight: 500; border: 1px solid var(--border); border-bottom: none; }
     .excel-sidebar { width: 260px; background: var(--bg-card); border-left: 1px solid var(--border); display: flex; flex-direction: column; }
-    .sidebar-header { padding: 14px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
-    .sidebar-icon { width: 24px; height: 24px; background: var(--accent); border-radius: 5px; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #fff; font-weight: 700; }
+    .sidebar-header { padding: 12px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+    .sidebar-icon { width: 22px; height: 22px; background: var(--accent); border-radius: 5px; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #fff; font-weight: 700; }
     .sidebar-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
-    .sidebar-body { padding: 16px; flex: 1; display: flex; flex-direction: column; gap: 10px; }
-    .chat-bubble { padding: 10px 12px; border-radius: 10px; font-size: 12px; line-height: 1.5; max-width: 90%; }
+    .sidebar-body { padding: 14px; flex: 1; display: flex; flex-direction: column; gap: 10px; }
+    .chat-bubble { padding: 10px 12px; border-radius: 10px; font-size: 12px; line-height: 1.5; max-width: 95%; }
     .chat-bubble.user { background: var(--bg-raised); color: var(--text-primary); align-self: flex-end; border: 1px solid var(--border); }
     .chat-bubble.ai { background: var(--accent-glow); color: var(--accent); align-self: flex-start; border: 1px solid rgba(0,143,122,0.18); }
     html[data-theme="dark"] .chat-bubble.ai { border-color: rgba(0,201,167,0.18); }
@@ -237,27 +253,6 @@
     .cap-icon { width: 36px; height: 36px; border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center; font-size: 16px; margin-bottom: 16px; }
     .cap-card h4 { font-size: 15px; font-weight: 600; margin-bottom: 6px; color: var(--text-primary); }
     .cap-card p { color: var(--text-secondary); font-size: 13.5px; line-height: 1.65; }
-
-    /* Pricing */
-    .pricing-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 20px; margin-top: 56px; }
-    .price-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 32px 24px; text-align: center; transition: all 0.3s; position: relative; }
-    .price-card:hover { transform: translateY(-3px); border-color: var(--border-light); }
-    .price-card.featured { border-color: var(--accent); }
-    .price-card.featured::before { content: 'PIÙ SCELTO'; position: absolute; top: -11px; left: 50%; transform: translateX(-50%); background: var(--accent); color: #fff; font-size: 10px; letter-spacing: 1.5px; padding: 4px 14px; border-radius: 100px; font-weight: 700; }
-    .price-name { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 14px; font-weight: 600; }
-    .price-amount { font-family: 'Cormorant Garamond', serif; font-size: 44px; font-weight: 600; color: var(--text-primary); line-height: 1; margin-bottom: 4px; }
-    .price-amount.free { color: var(--accent); }
-    .price-period { font-size: 13px; color: var(--text-muted); margin-bottom: 24px; }
-    .price-features { list-style: none; text-align: left; margin-bottom: 24px; }
-    .price-features li { padding: 8px 0; font-size: 13px; color: var(--text-secondary); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
-    .price-features li:last-child { border-bottom: none; }
-    .price-features .check { color: var(--accent); font-weight: 600; }
-    .price-features .cross { color: var(--text-muted); }
-    .btn-price { display: block; padding: 11px; border-radius: var(--radius); font-size: 14px; font-weight: 600; cursor: pointer; text-decoration: none; font-family: inherit; transition: all 0.2s; text-align: center; }
-    .btn-price.green { background: var(--accent); color: #fff; }
-    .btn-price.green:hover { background: var(--accent-hover); }
-    .btn-price.outline { border: 1px solid var(--border-light); color: var(--text-primary); }
-    .btn-price.outline:hover { background: var(--bg-raised); border-color: var(--text-muted); }
 
     /* For whom */
     .audiences { display: grid; grid-template-columns: repeat(3,1fr); gap: 20px; margin-top: 56px; }
@@ -320,6 +315,25 @@
     .demo-success p { color: var(--text-secondary); font-size: 14px; line-height: 1.6; }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 
+    /* Enterprise */
+    .enterprise-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: center; margin-top: 56px; }
+    .enterprise-text h3 { font-family: 'Cormorant Garamond', serif; font-size: 26px; font-weight: 500; color: var(--text-primary); margin-bottom: 14px; }
+    .enterprise-text p { color: var(--text-secondary); font-size: 15px; line-height: 1.7; margin-bottom: 18px; }
+    .enterprise-list { list-style: none; }
+    .enterprise-list li { display: flex; align-items: flex-start; gap: 10px; padding: 8px 0; font-size: 14px; color: var(--text-primary); }
+    .enterprise-list .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); margin-top: 7px; flex-shrink: 0; }
+    .enterprise-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 36px; text-align: center; }
+    .enterprise-card h4 { font-size: 18px; font-weight: 600; color: var(--text-primary); margin-bottom: 8px; }
+    .enterprise-card p { color: var(--text-secondary); font-size: 14px; margin-bottom: 24px; }
+
+    /* Privacy Policy */
+    .privacy-content { max-width: 760px; margin: 48px auto 0; }
+    .privacy-content h4 { font-size: 18px; font-weight: 600; color: var(--text-primary); margin: 32px 0 12px; }
+    .privacy-content p, .privacy-content li { color: var(--text-secondary); font-size: 14px; line-height: 1.7; margin-bottom: 10px; }
+    .privacy-content ul { margin-left: 20px; margin-bottom: 16px; }
+    .privacy-content a { color: var(--accent); text-decoration: none; }
+    .privacy-content a:hover { text-decoration: underline; }
+
     /* Footer */
     footer { padding: 56px 0 36px; border-top: 1px solid var(--border); }
     .footer-grid { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 40px; max-width: 1140px; margin: 0 auto; padding: 0 24px; }
@@ -339,109 +353,20 @@
     .reveal-delay-4 { transition-delay: 0.4s; }
     .reveal-delay-5 { transition-delay: 0.5s; }
 
-    /* Video Embeds */
-    .hero-video-bg {
-      position: absolute; inset: 0; overflow: hidden; z-index: 0; pointer-events: none;
-    }
-    .hero-video-bg video {
-      width: 100%; height: 100%; object-fit: cover; opacity: 0.10;
-    }
-    html[data-theme="dark"] .hero-video-bg video { opacity: 0.14; }
-
-    /* Video Showcase Carousel */
-    .video-showcase { margin-top: 48px; }
-    .showcase-stage {
-      position: relative; max-width: 800px; margin: 0 auto;
-      border-radius: var(--radius-lg); overflow: hidden;
-      border: 1px solid var(--border);
-      box-shadow: 0 20px 60px rgba(0,0,0,0.12);
-      background: #020408;
-    }
-    html[data-theme="dark"] .showcase-stage { box-shadow: 0 20px 60px rgba(0,0,0,0.45); }
-    .showcase-video {
-      position: absolute; inset: 0; width: 100%; height: 100%;
-      object-fit: cover; opacity: 0; transition: opacity 0.6s ease;
-      pointer-events: none;
-    }
-    .showcase-video.active { opacity: 1; }
-    .showcase-controls {
-      position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
-      display: flex; gap: 8px; z-index: 2;
-      opacity: 0; transition: opacity 0.3s;
-    }
-    .showcase-stage:hover .showcase-controls { opacity: 1; }
-    .showcase-btn {
-      width: 36px; height: 36px; border-radius: 50%;
-      background: rgba(0,0,0,0.7); border: 1px solid rgba(255,255,255,0.12);
-      color: #fff; font-size: 13px;
-      cursor: pointer; display: flex; align-items: center; justify-content: center;
-      transition: all 0.2s; backdrop-filter: blur(8px);
-    }
-    .showcase-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
-    .showcase-info {
-      max-width: 800px; margin: 12px auto 0;
-      display: flex; align-items: center; justify-content: space-between;
-      gap: 16px;
-    }
-    .showcase-labels { display: flex; gap: 16px; }
-    .showcase-label {
-      font-size: 11px; color: var(--text-muted); letter-spacing: 1px;
-      text-transform: uppercase; transition: color 0.3s; display: none;
-    }
-    .showcase-label.active { display: inline; color: var(--accent); }
-    .showcase-dots { display: flex; gap: 6px; }
-    .showcase-dot {
-      width: 7px; height: 7px; border-radius: 50%;
-      background: var(--border); transition: all 0.3s; cursor: pointer;
-    }
-    .showcase-dot.active { background: var(--accent); width: 18px; border-radius: 4px; }
-    .showcase-progress {
-      flex: 1; max-width: 120px; height: 2px;
-      background: var(--border); border-radius: 1px; overflow: hidden;
-    }
-    .showcase-progress-bar {
-      height: 100%; background: var(--accent); width: 0%;
-      transition: width 0.1s linear;
-    }
-
-    .demo-video {
-      max-width: 720px; margin: 48px auto 0; border-radius: var(--radius-lg);
-      overflow: hidden; border: 1px solid var(--border);
-      box-shadow: 0 20px 60px rgba(0,0,0,0.12);
-    }
-    html[data-theme="dark"] .demo-video { box-shadow: 0 20px 60px rgba(0,0,0,0.45); }
-    .demo-video video { width: 100%; display: block; }
-
-    .counter { display: inline; }
-
     /* Mobile menu */
     .mobile-nav { display: none; position: fixed; inset: 0; z-index: 99; background: var(--bg-surface); padding: 100px 32px 32px; flex-direction: column; gap: 8px; }
     .mobile-nav.open { display: flex; }
     .mobile-nav a { color: var(--text-primary); text-decoration: none; font-size: 18px; font-weight: 500; padding: 12px 0; border-bottom: 1px solid var(--border); }
     .mobile-nav a.btn-nav { text-align: center; margin-top: 12px; border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: var(--radius); padding: 14px; }
 
-    /* Terminal */
-    .terminal-window { background: #020408; border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; max-width: 720px; margin: 48px auto 0; box-shadow: 0 20px 60px rgba(0,0,0,0.45); }
-    .terminal-bar { background: var(--bg-raised); padding: 10px 16px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); }
-    .terminal-dot { width: 10px; height: 10px; border-radius: 50%; }
-    .terminal-dot:nth-child(1) { background: var(--red); }
-    .terminal-dot:nth-child(2) { background: var(--amber); }
-    .terminal-dot:nth-child(3) { background: var(--accent); }
-    .terminal-title { margin-left: 12px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-muted); }
-    .terminal-body { padding: 24px; font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.8; }
-    .terminal-prompt { color: var(--accent); }
-    .terminal-cmd { color: var(--text-primary); }
-    .terminal-output { color: var(--text-secondary); }
-    .terminal-highlight { color: var(--amber); }
-    .terminal-cursor { display: inline-block; width: 8px; height: 16px; background: var(--accent); vertical-align: middle; margin-left: 2px; animation: blink 1s step-end infinite; }
-    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+    .counter { display: inline; }
 
     @media (max-width: 900px) {
       .what-is-wrap { grid-template-columns: 1fr; }
-      .excel-mockup { max-width: 500px; margin: 0 auto; }
-      .excel-body { height: 280px; }
-      .excel-sidebar { width: 200px; }
+      .excel-mockup { max-width: 520px; margin: 0 auto; }
+      .excel-sidebar { width: 210px; }
       .audiences { grid-template-columns: repeat(2,1fr); }
+      .enterprise-grid { grid-template-columns: 1fr; }
     }
     @media (max-width: 768px) {
       .ledger-steps, .pricing-grid, .usecases { grid-template-columns: 1fr; }
@@ -455,6 +380,8 @@
       .form-row { grid-template-columns: 1fr; }
       .demo-card { padding: 32px 24px; }
       .audiences { grid-template-columns: 1fr; }
+      .excel-sidebar { width: 180px; }
+      .sheet-cell { font-size: 10px; padding: 2px 4px; }
     }
   </style>
 </head>
@@ -473,8 +400,8 @@
         <a href="#come-funziona">Come funziona</a>
         <a href="#casi-duso">Casi d'uso</a>
         <a href="#funzionalita">Funzionalit&agrave;</a>
-        <a href="#prezzi">Prezzi</a>
-        <a href="#demo" class="btn-nav">Prova gratis</a>
+        <a href="#demo">Prova gratis</a>
+        <a href="#demo" class="btn-nav">Registrati</a>
       </nav>
       <div class="header-actions">
         <button class="theme-toggle" id="theme-toggle" title="Cambia tema">&#9728;</button>
@@ -488,22 +415,16 @@
     <a href="#come-funziona" onclick="toggleMobileMenu()">Come funziona</a>
     <a href="#casi-duso" onclick="toggleMobileMenu()">Casi d'uso</a>
     <a href="#funzionalita" onclick="toggleMobileMenu()">Funzionalit&agrave;</a>
-    <a href="#prezzi" onclick="toggleMobileMenu()">Prezzi</a>
-    <a href="#demo" class="btn-nav" onclick="toggleMobileMenu()">Prova gratis</a>
+    <a href="#demo" onclick="toggleMobileMenu()">Prova gratis</a>
+    <a href="#demo" class="btn-nav" onclick="toggleMobileMenu()">Registrati</a>
   </div>
 
   <main>
     <!-- ============ HERO ============ -->
-    <section class="hero" style="position:relative;overflow:hidden;">
-      <div class="hero-video-bg">
-        <video autoplay muted loop playsinline preload="auto"
-               poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1920 1080'%3E%3Crect fill='%23f4f6f9' width='1920' height='1080'/%3E%3C/svg%3E">
-          <source src="/public/videos/hero-bg.mp4" type="video/mp4">
-        </video>
-      </div>
+    <section class="hero">
       <div class="container">
         <div class="hero-badge reveal" data-reveal>
-          <span class="dot"></span> Prova gratuita &mdash; 7 giorni, nessuna carta di credito
+          <span class="dot"></span> Accesso demo gratuito &mdash; nessuna carta di credito
         </div>
         <h1 class="reveal reveal-delay-1" data-reveal>
           Un assistente esperto che lavora <em>direttamente nel tuo Excel</em>
@@ -559,6 +480,13 @@
             </ul>
           </div>
           <div class="excel-mockup">
+            <div class="excel-ribbon">
+              <span>File</span><span>Home</span><span class="active">Inserisci</span><span>Layout</span><span>Dati</span><span>Revisione</span><span>Visualizza</span>
+            </div>
+            <div class="excel-formula-bar">
+              <span class="excel-formula-label">fx</span>
+              <div class="excel-formula-input">=RICLASSIFICA(CE;"margine di contribuzione")</div>
+            </div>
             <div class="excel-topbar">
               <div class="excel-circle r"></div>
               <div class="excel-circle y"></div>
@@ -566,19 +494,28 @@
               <span class="excel-title">Bilancio_2025.xlsx</span>
             </div>
             <div class="excel-body">
-              <div class="excel-sheet">
-                <div class="sheet-grid">
-                  <div class="sheet-cell hl"></div><div class="sheet-cell hl"></div><div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div>
-                  <div class="sheet-cell hl"></div><div class="sheet-cell hl"></div><div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div>
-                  <div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div>
-                  <div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div>
-                  <div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div>
-                  <div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div><div class="sheet-cell"></div>
+              <div class="excel-sheet-area">
+                <div class="sheet-header-row">
+                  <div class="sheet-corner"></div>
+                  <div class="sheet-col-h">A</div><div class="sheet-col-h">B</div><div class="sheet-col-h">C</div>
+                  <div class="sheet-col-h">D</div><div class="sheet-col-h">E</div><div class="sheet-col-h">F</div>
+                </div>
+                <div class="sheet-rows">
+                  <div class="sheet-row"><div class="sheet-row-h">1</div><div class="sheet-cell text">Ricavi</div><div class="sheet-cell num">1.250.000</div><div class="sheet-cell num">1.180.000</div><div class="sheet-cell num">1.320.000</div><div class="sheet-cell num">+5,6%</div><div class="sheet-cell"></div></div>
+                  <div class="sheet-row"><div class="sheet-row-h">2</div><div class="sheet-cell text">Costi variabili</div><div class="sheet-cell num">420.000</div><div class="sheet-cell num">395.000</div><div class="sheet-cell num">445.000</div><div class="sheet-cell num">+5,9%</div><div class="sheet-cell"></div></div>
+                  <div class="sheet-row"><div class="sheet-row-h">3</div><div class="sheet-cell text">Margine contrib.</div><div class="sheet-cell num hl">830.000</div><div class="sheet-cell num hl">785.000</div><div class="sheet-cell num hl">875.000</div><div class="sheet-cell num">+5,4%</div><div class="sheet-cell"></div></div>
+                  <div class="sheet-row"><div class="sheet-row-h">4</div><div class="sheet-cell text">Costi fissi</div><div class="sheet-cell num">310.000</div><div class="sheet-cell num">305.000</div><div class="sheet-cell num">315.000</div><div class="sheet-cell num">+1,6%</div><div class="sheet-cell"></div></div>
+                  <div class="sheet-row"><div class="sheet-row-h">5</div><div class="sheet-cell text">EBITDA</div><div class="sheet-cell num hl2">520.000</div><div class="sheet-cell num hl2">480.000</div><div class="sheet-cell num hl2">560.000</div><div class="sheet-cell num">+7,7%</div><div class="sheet-cell"></div></div>
+                  <div class="sheet-row"><div class="sheet-row-h">6</div><div class="sheet-cell text">Ammortamenti</div><div class="sheet-cell num">80.000</div><div class="sheet-cell num">78.000</div><div class="sheet-cell num">82.000</div><div class="sheet-cell num">+2,5%</div><div class="sheet-cell"></div></div>
+                  <div class="sheet-row"><div class="sheet-row-h">7</div><div class="sheet-cell text">EBIT</div><div class="sheet-cell num">440.000</div><div class="sheet-cell num">402.000</div><div class="sheet-cell num">478.000</div><div class="sheet-cell num">+8,6%</div><div class="sheet-cell"></div></div>
+                  <div class="sheet-row"><div class="sheet-row-h">8</div><div class="sheet-cell text">Tasse</div><div class="sheet-cell num">132.000</div><div class="sheet-cell num">120.600</div><div class="sheet-cell num">143.400</div><div class="sheet-cell num">+8,6%</div><div class="sheet-cell"></div></div>
+                  <div class="sheet-row"><div class="sheet-row-h">9</div><div class="sheet-cell text">Utile netto</div><div class="sheet-cell num">308.000</div><div class="sheet-cell num">281.400</div><div class="sheet-cell num">334.600</div><div class="sheet-cell num">+8,6%</div><div class="sheet-cell"></div></div>
                 </div>
                 <div class="sheet-tabbar">
-                  <span style="color:var(--text-primary);font-weight:500;">Bilancio</span>
-                  <span>CE</span>
-                  <span>Stato Patrimoniale</span>
+                  <span class="tab active">Bilancio</span>
+                  <span class="tab">CE</span>
+                  <span class="tab">SP</span>
+                  <span class="tab">KPI</span>
                 </div>
               </div>
               <div class="excel-sidebar">
@@ -593,77 +530,6 @@
                 </div>
               </div>
             </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ============ INSTALL ============ -->
-    <section id="installa">
-      <div class="container">
-        <div class="section-label reveal" data-reveal>Installazione</div>
-        <h2 class="section-title reveal reveal-delay-1" data-reveal>Pronto in un minuto, senza configurazione</h2>
-        <p class="section-subtitle reveal reveal-delay-2" data-reveal>
-          Scarica il file di installazione per il tuo sistema operativo, fai doppio clic e troverai Excel AI nella barra laterale di Excel. Nessun terminale, nessuna impostazione complicata.
-        </p>
-
-        <div class="install-os-tabs reveal reveal-delay-3" data-reveal>
-          <div class="os-tab active" data-os="mac" onclick="switchInstallTab('mac')">macOS</div>
-          <div class="os-tab" data-os="windows" onclick="switchInstallTab('windows')">Windows</div>
-        </div>
-
-        <div class="install-panel active" id="panel-mac">
-          <div style="text-align:center;padding:16px 0 32px;">
-            <a href="/public/install-mac.command" download class="dl-btn">
-              <span style="font-size:20px;">&#8595;</span> Scarica per Mac
-            </a>
-            <p style="margin-top:12px;font-size:12px;color:var(--text-muted);">File .command &mdash; 2 KB &mdash; Doppio clic per installare</p>
-          </div>
-          <div class="steps-grid-3">
-            <div><div class="step-num">1</div><p><strong>Scarica</strong> il file<br>dal pulsante sopra</p></div>
-            <div><div class="step-num">2</div><p><strong>Doppio clic</strong><br>sul file .command</p></div>
-            <div><div class="step-num">3</div><p><strong>Apri Excel</strong><br>e trovi il pannello nella Home</p></div>
-          </div>
-          <p style="margin-top:16px;font-size:11px;color:var(--text-muted);text-align:center;">
-            Se macOS mostra un avviso: tasto destro &rarr; Apri
-          </p>
-        </div>
-
-        <div class="install-panel" id="panel-win">
-          <div style="text-align:center;padding:16px 0 32px;">
-            <a href="/public/install-win.bat" download class="dl-btn">
-              <span style="font-size:20px;">&#8595;</span> Scarica per Windows
-            </a>
-            <p style="margin-top:12px;font-size:12px;color:var(--text-muted);">File .bat &mdash; 2 KB &mdash; Doppio clic per installare</p>
-          </div>
-          <div class="steps-grid-3">
-            <div><div class="step-num">1</div><p><strong>Scarica</strong> il file<br>qui sopra</p></div>
-            <div><div class="step-num">2</div><p><strong>Doppio clic</strong><br>sul file .bat</p></div>
-            <div><div class="step-num">3</div><p><strong>Apri Excel</strong><br>Inserisci &rarr; Componenti aggiuntivi</p></div>
-          </div>
-          <p style="margin-top:16px;font-size:11px;color:var(--text-muted);text-align:center;">
-            Se Windows SmartScreen blocca: clicca "Ulteriori informazioni" &rarr; "Esegui comunque"
-          </p>
-        </div>
-
-        <p style="margin-top:20px;font-size:12px;color:var(--text-muted);text-align:center;line-height:1.8;">
-          <span style="font-family:'JetBrains Mono',monospace;font-size:11px;">Utente avanzato?</span>
-          <a href="#terminal-install" onclick="toggleTerminal(event)" style="color:var(--accent);text-decoration:none;margin-left:6px;">Usa il terminale &rarr;</a>
-          &nbsp;&middot;&nbsp;
-          Dopo l&rsquo;installazione <strong style="color:var(--accent);">registrati con la tua email</strong> per iniziare.
-        </p>
-
-        <div id="terminal-install" style="display:none;margin-top:20px;padding:24px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);">
-          <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--accent);margin-bottom:12px;">// Terminale</div>
-          <div class="install-os-tabs" style="margin-top:0;">
-            <div class="os-tab active" data-os="mac" onclick="switchTermTab('mac')">macOS</div>
-            <div class="os-tab" data-os="windows" onclick="switchTermTab('windows')">Windows</div>
-          </div>
-          <div class="install-panel active" id="term-mac" style="background:transparent;border:none;padding:16px 0;">
-            <div class="install-cmd" data-copy="bash <(curl -s https://excel-ai-sigma.vercel.app/install.sh)" onclick="copyInstall(this)">$ bash &lt;(curl -s https://excel-ai-sigma.vercel.app/install.sh)<span class="copy-hint">Clicca per copiare</span></div>
-          </div>
-          <div class="install-panel" id="term-win" style="background:transparent;border:none;padding:16px 0;">
-            <div class="install-cmd" data-copy="irm https://excel-ai-sigma.vercel.app/install.ps1 | iex" onclick="copyInstall(this)">PS&gt; irm https://excel-ai-sigma.vercel.app/install.ps1 | iex<span class="copy-hint">Clicca per copiare</span></div>
           </div>
         </div>
       </div>
@@ -762,32 +628,7 @@
           Opera su celle, formule, tabelle pivot e formattazione come farebbe un operatore esperto.
         </p>
 
-        <div class="video-showcase reveal reveal-delay-3" data-reveal>
-          <div class="showcase-stage">
-            <video class="showcase-video active" src="/public/videos/terminal-demo.mp4" muted playsinline preload="none"
-                   poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 960 640'%3E%3Crect fill='%23020408' width='960' height='640' rx='12'/%3E%3C/svg%3E"></video>
-            <video class="showcase-video" src="/public/videos/use-case-slides.mp4" muted playsinline preload="none"
-                   poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 960 640'%3E%3Crect fill='%23070a0f' width='960' height='640' rx='12'/%3E%3C/svg%3E"></video>
-            <div class="showcase-controls">
-              <button class="showcase-btn" id="showcase-prev" title="Precedente">&#8592;</button>
-              <button class="showcase-btn" id="showcase-play" title="Play / Pausa">&#10074;&#10074;</button>
-              <button class="showcase-btn" id="showcase-next" title="Successivo">&#8594;</button>
-            </div>
-          </div>
-          <div class="showcase-info">
-            <div class="showcase-labels">
-              <span class="showcase-label active">Demo interattiva</span>
-              <span class="showcase-label">Casi d'uso reali</span>
-            </div>
-            <div class="showcase-dots">
-              <span class="showcase-dot active"></span>
-              <span class="showcase-dot"></span>
-            </div>
-            <div class="showcase-progress"><div class="showcase-progress-bar"></div></div>
-          </div>
-        </div>
-
-        <div class="capabilities reveal reveal-delay-4" data-reveal>
+        <div class="capabilities reveal reveal-delay-3" data-reveal>
           <div class="cap-card">
             <div class="cap-icon" style="background:var(--accent-glow);color:var(--accent);">&#x1F4C8;</div>
             <h4>Analisi finanziaria</h4>
@@ -822,66 +663,8 @@
       </div>
     </section>
 
-    <!-- ============ PRICING ============ -->
-    <section class="alt-section" id="prezzi">
-      <div class="container">
-        <div class="section-label reveal" data-reveal>Prezzi</div>
-        <h2 class="section-title reveal reveal-delay-1" data-reveal>Semplice. Senza sorprese.</h2>
-        <p class="section-subtitle reveal reveal-delay-2" data-reveal>
-          Inizia gratis. Quando ti serve di pi&ugrave;, passa al piano superiore. Nessuna carta di credito richiesta.
-        </p>
-        <div class="pricing-grid reveal reveal-delay-3" data-reveal>
-          <div class="price-card">
-            <div class="price-name">Starter</div>
-            <div class="price-amount free">Gratis</div>
-            <div class="price-period">per sempre</div>
-            <ul class="price-features">
-              <li><span class="check">&#10003;</span> 50 richieste al mese</li>
-              <li><span class="check">&#10003;</span> Tutte le funzionalit&agrave; Excel</li>
-              <li><span class="check">&#10003;</span> Cronologia sessioni (7gg)</li>
-              <li><span class="cross">&mdash;</span> Priorit&agrave; nelle code</li>
-              <li><span class="cross">&mdash;</span> Assistenza prioritaria</li>
-            </ul>
-            <a href="#installa" class="btn-price outline">Inizia gratis</a>
-          </div>
-
-          <div class="price-card featured">
-            <div class="price-name">Pro</div>
-            <div class="price-amount">&euro;19</div>
-            <div class="price-period">/ mese</div>
-            <ul class="price-features">
-              <li><span class="check">&#10003;</span> 500 richieste al mese</li>
-              <li><span class="check">&#10003;</span> Tutte le funzionalit&agrave; Excel</li>
-              <li><span class="check">&#10003;</span> Cronologia illimitata</li>
-              <li><span class="check">&#10003;</span> Priorit&agrave; nelle code</li>
-              <li><span class="cross">&mdash;</span> Assistenza prioritaria</li>
-            </ul>
-            <a href="#installa" class="btn-price green">Inizia prova gratis</a>
-          </div>
-
-          <div class="price-card">
-            <div class="price-name">Business</div>
-            <div class="price-amount">&euro;49</div>
-            <div class="price-period">/ mese</div>
-            <ul class="price-features">
-              <li><span class="check">&#10003;</span> 2000 richieste al mese</li>
-              <li><span class="check">&#10003;</span> Tutte le funzionalit&agrave; Excel</li>
-              <li><span class="check">&#10003;</span> Cronologia illimitata</li>
-              <li><span class="check">&#10003;</span> Priorit&agrave; massima</li>
-              <li><span class="check">&#10003;</span> Assistenza via email &lt;2h</li>
-            </ul>
-            <a href="#installa" class="btn-price outline">Inizia prova gratis</a>
-          </div>
-        </div>
-        <p style="text-align:center;margin-top:24px;font-size:13px;color:var(--text-muted);">
-          Tutti i piani includono 7 giorni di prova gratuita. Nessuna carta di credito.
-          <br>Passa da un piano all&rsquo;altro in qualsiasi momento.
-        </p>
-      </div>
-    </section>
-
     <!-- ============ FOR WHOM ============ -->
-    <section id="per-chi">
+    <section class="alt-section" id="per-chi">
       <div class="container">
         <div class="section-label reveal" data-reveal>Professionisti</div>
         <h2 class="section-title reveal reveal-delay-1" data-reveal>Progettato per chi vive di numeri</h2>
@@ -923,42 +706,13 @@
       </div>
     </section>
 
-    <!-- ============ TRUST ============ -->
-    <section class="alt-section" id="sicurezza">
-      <div class="container">
-        <div class="section-label reveal" data-reveal>Sicurezza e privacy</div>
-        <h2 class="section-title reveal reveal-delay-1" data-reveal>I tuoi dati restano tuoi</h2>
-        <p class="section-subtitle reveal reveal-delay-2" data-reveal>
-          Progettato per standard professionali. I dati finanziari dei tuoi clienti non lasciano mai il tuo controllo.
-        </p>
-        <div class="trust-grid reveal reveal-delay-3" data-reveal>
-          <div class="trust-item">
-            <h4>Crittografia TLS 1.3</h4>
-            <p>Tutte le comunicazioni avvengono su HTTPS. I dati in transito sono crittografati con standard bancari.</p>
-          </div>
-          <div class="trust-item">
-            <h4>Autenticazione sicura</h4>
-            <p>Login via email con JWT. Row-Level Security su PostgreSQL. Ogni utente vede solo i propri dati.</p>
-          </div>
-          <div class="trust-item">
-            <h4>Zero training sui tuoi dati</h4>
-            <p>I contenuti dei fogli Excel non vengono mai usati per addestrare modelli AI. Nessuna conservazione dei dati di richiesta.</p>
-          </div>
-          <div class="trust-item">
-            <h4>GDPR compliant</h4>
-            <p>Cancellazione account in autonomia, esportazione dati, audit log completo. Conforme al regolamento UE 2016/679.</p>
-          </div>
-        </div>
-      </div>
-    </section>
-
     <!-- ============ DEMO REGISTRATION ============ -->
     <section class="demo-section" id="demo">
       <div class="container">
         <div class="section-label reveal" data-reveal>Prova gratuita</div>
         <h2 class="section-title reveal reveal-delay-1" data-reveal>Crea il tuo account demo</h2>
         <p class="section-subtitle reveal reveal-delay-2" data-reveal>
-          Prova Excel AI senza impegno. 7 giorni gratis, nessuna carta di credito richiesta.
+          Prova Excel AI senza impegno. Accesso demo gratuito con tutte le funzionalit&agrave; attive.
         </p>
         <div class="demo-card reveal reveal-delay-3" data-reveal>
           <h2>Inizia subito</h2>
@@ -1003,15 +757,231 @@
             </div>
             <div class="form-check">
               <input type="checkbox" id="demo-privacy" name="privacy" required>
-              <label for="demo-privacy">Accetto la <a href="#">Privacy Policy</a> e i <a href="#">Termini di servizio</a></label>
+              <label for="demo-privacy">Ho letto e accetto la <a href="#privacy" onclick="document.getElementById('privacy').scrollIntoView({behavior:'smooth'})">Privacy Policy</a> e i <a href="#privacy" onclick="document.getElementById('privacy').scrollIntoView({behavior:'smooth'})">Termini di servizio</a></label>
             </div>
             <button type="submit" class="btn-submit" id="demo-submit">Crea account demo gratuito</button>
           </form>
           <div class="demo-success" id="demo-success">
             <div class="demo-success-icon">&#10003;</div>
             <h3>Account demo creato!</h3>
-            <p>Ti abbiamo inviato un&rsquo;email con le istruzioni per installare Excel AI e attivare la prova gratuita di 7 giorni.</p>
+            <p>Ti abbiamo inviato un&rsquo;email con le istruzioni per installare Excel AI e attivare l&rsquo;accesso demo gratuito.</p>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ INSTALL ============ -->
+    <section class="alt-section" id="installa">
+      <div class="container">
+        <div class="section-label reveal" data-reveal>Installazione</div>
+        <h2 class="section-title reveal reveal-delay-1" data-reveal>Pronto in un minuto, senza configurazione</h2>
+        <p class="section-subtitle reveal reveal-delay-2" data-reveal>
+          Scarica il file di installazione per il tuo sistema operativo, fai doppio clic e troverai Excel AI nella barra laterale di Excel. Nessun terminale, nessuna impostazione complicata.
+        </p>
+
+        <div class="install-os-tabs reveal reveal-delay-3" data-reveal>
+          <div class="os-tab active" data-os="mac" onclick="switchInstallTab('mac')">macOS</div>
+          <div class="os-tab" data-os="windows" onclick="switchInstallTab('windows')">Windows</div>
+        </div>
+
+        <div class="install-panel active" id="panel-mac">
+          <div style="text-align:center;padding:16px 0 32px;">
+            <a href="/public/install-mac.command" download class="dl-btn">
+              <span style="font-size:20px;">&#8595;</span> Scarica per Mac
+            </a>
+            <p style="margin-top:12px;font-size:12px;color:var(--text-muted);">File .command &mdash; 2 KB &mdash; Doppio clic per installare</p>
+          </div>
+          <div class="steps-grid-3">
+            <div><div class="step-num">1</div><p><strong>Scarica</strong> il file<br>dal pulsante sopra</p></div>
+            <div><div class="step-num">2</div><p><strong>Doppio clic</strong><br>sul file .command</p></div>
+            <div><div class="step-num">3</div><p><strong>Apri Excel</strong><br>e trovi il pannello nella Home</p></div>
+          </div>
+          <p style="margin-top:16px;font-size:11px;color:var(--text-muted);text-align:center;">
+            Se macOS mostra un avviso: tasto destro &rarr; Apri
+          </p>
+        </div>
+
+        <div class="install-panel" id="panel-win">
+          <div style="text-align:center;padding:16px 0 32px;">
+            <a href="/public/install-win.bat" download class="dl-btn">
+              <span style="font-size:20px;">&#8595;</span> Scarica per Windows
+            </a>
+            <p style="margin-top:12px;font-size:12px;color:var(--text-muted);">File .bat &mdash; 2 KB &mdash; Doppio clic per installare</p>
+          </div>
+          <div class="steps-grid-3">
+            <div><div class="step-num">1</div><p><strong>Scarica</strong> il file<br>qui sopra</p></div>
+            <div><div class="step-num">2</div><p><strong>Doppio clic</strong><br>sul file .bat</p></div>
+            <div><div class="step-num">3</div><p><strong>Apri Excel</strong><br>Inserisci &rarr; Componenti aggiuntivi</p></div>
+          </div>
+          <p style="margin-top:16px;font-size:11px;color:var(--text-muted);text-align:center;">
+            Se Windows SmartScreen blocca: clicca "Ulteriori informazioni" &rarr; "Esegui comunque"
+          </p>
+        </div>
+
+        <p style="margin-top:20px;font-size:12px;color:var(--text-muted);text-align:center;line-height:1.8;">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:11px;">Utente avanzato?</span>
+          <a href="#terminal-install" onclick="toggleTerminal(event)" style="color:var(--accent);text-decoration:none;margin-left:6px;">Usa il terminale &rarr;</a>
+          &nbsp;&middot;&nbsp;
+          Dopo l&rsquo;installazione <strong style="color:var(--accent);">registrati con la tua email</strong> per iniziare.
+        </p>
+
+        <div id="terminal-install" style="display:none;margin-top:20px;padding:24px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--accent);margin-bottom:12px;">// Terminale</div>
+          <div class="install-os-tabs" style="margin-top:0;">
+            <div class="os-tab active" data-os="mac" onclick="switchTermTab('mac')">macOS</div>
+            <div class="os-tab" data-os="windows" onclick="switchTermTab('windows')">Windows</div>
+          </div>
+          <div class="install-panel active" id="term-mac" style="background:transparent;border:none;padding:16px 0;">
+            <div class="install-cmd" data-copy="bash <(curl -s https://excel-ai-sigma.vercel.app/install.sh)" onclick="copyInstall(this)">$ bash &lt;(curl -s https://excel-ai-sigma.vercel.app/install.sh)<span class="copy-hint">Clicca per copiare</span></div>
+          </div>
+          <div class="install-panel" id="term-win" style="background:transparent;border:none;padding:16px 0;">
+            <div class="install-cmd" data-copy="irm https://excel-ai-sigma.vercel.app/install.ps1 | iex" onclick="copyInstall(this)">PS&gt; irm https://excel-ai-sigma.vercel.app/install.ps1 | iex<span class="copy-hint">Clicca per copiare</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ TRUST ============ -->
+    <section id="sicurezza">
+      <div class="container">
+        <div class="section-label reveal" data-reveal>Sicurezza e privacy</div>
+        <h2 class="section-title reveal reveal-delay-1" data-reveal>I tuoi dati restano tuoi</h2>
+        <p class="section-subtitle reveal reveal-delay-2" data-reveal>
+          Progettato per standard professionali. I dati finanziari dei tuoi clienti non lasciano mai il tuo controllo.
+        </p>
+        <div class="trust-grid reveal reveal-delay-3" data-reveal>
+          <div class="trust-item">
+            <h4>Crittografia TLS 1.3</h4>
+            <p>Tutte le comunicazioni avvengono su HTTPS. I dati in transito sono crittografati con standard bancari.</p>
+          </div>
+          <div class="trust-item">
+            <h4>Autenticazione sicura</h4>
+            <p>Login via email con JWT. Row-Level Security su PostgreSQL. Ogni utente vede solo i propri dati.</p>
+          </div>
+          <div class="trust-item">
+            <h4>Zero training sui tuoi dati</h4>
+            <p>I contenuti dei fogli Excel non vengono mai usati per addestrare modelli AI. Nessuna conservazione dei dati di richiesta.</p>
+          </div>
+          <div class="trust-item">
+            <h4>GDPR compliant</h4>
+            <p>Cancellazione account in autonomia, esportazione dati, audit log completo. Conforme al regolamento UE 2016/679.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ ENTERPRISE ============ -->
+    <section class="alt-section" id="enterprise">
+      <div class="container">
+        <div class="section-label reveal" data-reveal>Soluzioni aziendali</div>
+        <h2 class="section-title reveal reveal-delay-1" data-reveal>Excel AI per il tuo team</h2>
+        <p class="section-subtitle reveal reveal-delay-2" data-reveal>
+          Soluzioni personalizzate per studi professionali, banche, societ&agrave; di consulenza e team corporate.
+        </p>
+        <div class="enterprise-grid reveal reveal-delay-3" data-reveal>
+          <div class="enterprise-text">
+            <h3>Contattaci per un piano su misura</h3>
+            <p>
+              Offriamo deployment dedicati, integrazioni con i tuoi sistemi interni, training per il team e supporto prioritario.
+            </p>
+            <ul class="enterprise-list">
+              <li><span class="dot"></span> Account manager dedicato</li>
+              <li><span class="dot"></span> Onboarding e training per il team</li>
+              <li><span class="dot"></span> Integrazioni API con i tuoi sistemi</li>
+              <li><span class="dot"></span> SLA garantito e supporto 24/7</li>
+              <li><span class="dot"></span> Hosting on-premise o cloud privato</li>
+              <li><span class="dot"></span> Conformit&agrave; GDPR e audit completo</li>
+            </ul>
+          </div>
+          <div class="enterprise-card">
+            <h4>Richiedi informazioni</h4>
+            <p>Parliamo delle esigenze del tuo team e troviamo la soluzione migliore.</p>
+            <a href="mailto:enterprise@excel-ai-sigma.vercel.app" class="btn-primary" style="display:block;text-align:center;">Contatta il team Enterprise &rarr;</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ PRIVACY POLICY ============ -->
+    <section id="privacy">
+      <div class="container">
+        <div class="section-label reveal" data-reveal>Privacy e GDPR</div>
+        <h2 class="section-title reveal reveal-delay-1" data-reveal>Privacy Policy</h2>
+        <p class="section-subtitle reveal reveal-delay-2" data-reveal>
+          Informativa sul trattamento dei dati personali ai sensi del Regolamento UE 2016/679 (GDPR).
+        </p>
+        <div class="privacy-content reveal reveal-delay-3" data-reveal>
+          <h4>1. Titolare del trattamento</h4>
+          <p>Il titolare del trattamento dei dati &egrave; Excel AI. Per qualsiasi informazione o richiesta &egrave; possibile contattarci all&rsquo;indirizzo email <a href="mailto:privacy@excel-ai-sigma.vercel.app">privacy@excel-ai-sigma.vercel.app</a>.</p>
+
+          <h4>2. Dati raccolti</h4>
+          <p>Raccogliamo i seguenti dati personali:</p>
+          <ul>
+            <li>Dati di registrazione: nome, cognome, email, professione, azienda/studio, telefono (facoltativo).</li>
+            <li>Dati di utilizzo: log delle operazioni eseguite nell&rsquo;audit trail, timestamp e metadati delle richieste.</li>
+            <li>Dati tecnici: indirizzo IP, tipo di browser, sistema operativo, log di errore.</li>
+          </ul>
+
+          <h4>3. Finalit&agrave; del trattamento</h4>
+          <p>I dati sono trattati per le seguenti finalit&agrave;:</p>
+          <ul>
+            <li>Erogazione del servizio Excel AI e gestione degli account demo.</li>
+            <li>Assistenza tecnica e risoluzione di problemi.</li>
+            <li>Invio di comunicazioni relative al servizio (aggiornamenti, sicurezza).</li>
+            <li>Adempimenti legali e fiscali.</li>
+            <li>Miglioramento del prodotto su base aggregata e anonima.</li>
+          </ul>
+
+          <h4>4. Base giuridica</h4>
+          <p>Il trattamento si basa su:</p>
+          <ul>
+            <li><strong>Esecuzione di un contratto</strong> (art. 6.1.b GDPR): fornitura del servizio agli utenti registrati.</li>
+            <li><strong>Consenso</strong> (art. 6.1.a GDPR): per comunicazioni marketing (facoltativo, revocabile in ogni momento).</li>
+            <li><strong>Obbligo legale</strong> (art. 6.1.c GDPR): conservazione di log per finalit&agrave; fiscali e di sicurezza.</li>
+            <li><strong>Legittimo interesse</strong> (art. 6.1.f GDPR): prevenzione frodi, garantire la sicurezza dei sistemi.</li>
+          </ul>
+
+          <h4>5. Conservazione</h4>
+          <p>I dati personali sono conservati per il tempo strettamente necessario alle finalit&agrave; indicate:</p>
+          <ul>
+            <li>Dati account: fino alla cancellazione dell&rsquo;account da parte dell&rsquo;utente, o dopo 24 mesi di inattivit&agrave;.</li>
+            <li>Audit log: 12 mesi dalla data dell&rsquo;operazione.</li>
+            <li>Dati tecnici e log: 6 mesi.</li>
+          </ul>
+
+          <h4>6. Condivisione dei dati</h4>
+          <p>I dati personali non sono venduti a terzi. Possono essere condivisi esclusivamente con:</p>
+          <ul>
+            <li>Fornitori di servizi cloud (hosting, database) sotto contratto e vincolo di riservatezza.</li>
+            <li>Autorit&agrave; competenti, su richiesta legittima.</li>
+          </ul>
+          <p>I contenuti dei fogli Excel non vengono mai utilizzati per addestrare modelli di intelligenza artificiale di terze parti.</p>
+
+          <h4>7. Trasferimenti internazionali</h4>
+          <p>I dati sono ospitati principalmente nell&rsquo;Unione Europea. Qualora si rendesse necessario un trasferimento extra-UE, garantiremo adeguate garanzie (clausole contrattuali standard, certificazioni Privacy Shield dove applicabile).</p>
+
+          <h4>8. Diritti dell&rsquo;interessato</h4>
+          <p>In qualit&agrave; di interessato, hai diritto di:</p>
+          <ul>
+            <li>Accedere ai tuoi dati personali (art. 15 GDPR).</li>
+            <li>Rettificare dati inesatti (art. 16 GDPR).</li>
+            <li>Cancellare i tuoi dati (&ldquo;diritto all&rsquo;oblio&rdquo;, art. 17 GDPR).</li>
+            <li>Limitare il trattamento (art. 18 GDPR).</li>
+            <li>Opporsi al trattamento (art. 21 GDPR).</li>
+            <li>Richiedere la portabilit&agrave; dei dati (art. 20 GDPR).</li>
+            <li>Revocare il consenso in qualsiasi momento.</li>
+          </ul>
+          <p>Per esercitare i tuoi diritti, scrivi a <a href="mailto:privacy@excel-ai-sigma.vercel.app">privacy@excel-ai-sigma.vercel.app</a>. Rispondiamo entro 30 giorni.</p>
+
+          <h4>9. Cookie e tecnologie simili</h4>
+          <p>Utilizziamo solo cookie tecnici necessari al funzionamento del servizio (autenticazione, preferenze tema). Non utilizziamo cookie di profilazione o tracciamento di terze parti.</p>
+
+          <h4>10. Sicurezza</h4>
+          <p>Adottiamo misure tecniche e organizzative per proteggere i dati: crittografia TLS 1.3 in transito, password hashate, accesso ristretto ai server, backup cifrati, monitoraggio continuo.</p>
+
+          <h4>11. Modifiche alla privacy policy</h4>
+          <p>Ci riserviamo il diritto di aggiornare la presente informativa. Le modifiche saranno pubblicate su questa pagina con la data di ultimo aggiornamento. Ti invitiamo a consultarla periodicamente.</p>
+          <p style="margin-top:24px;font-size:13px;color:var(--text-muted);">Ultimo aggiornamento: 28 maggio 2026</p>
         </div>
       </div>
     </section>
@@ -1062,28 +1032,25 @@
           </div>
           <div class="faq-item">
             <button class="faq-q" onclick="toggleFAQ(this)">
-              Come funziona la prova gratuita?
+              Come funziona l&rsquo;account demo gratuito?
               <span class="faq-arrow">+</span>
             </button>
-            <div class="faq-a"><p>Il piano Starter &egrave; gratuito per sempre con 50 richieste al mese. I piani Pro e Business hanno 7 giorni di prova gratuita senza impegno. Nessuna carta di credito richiesta per la prova. Puoi passare al piano gratuito in qualsiasi momento.</p></div>
+            <div class="faq-a"><p>L&rsquo;account demo ti d&agrave; accesso completo a tutte le funzionalit&agrave; di Excel AI per un periodo illimitato con un numero di richieste giornaliero limitato. Nessuna carta di credito richiesta. Al termine puoi contattarci per passare a un piano aziendale personalizzato.</p></div>
           </div>
         </div>
       </div>
     </section>
 
     <!-- ============ FINAL CTA ============ -->
-    <section class="cta-section alt-section" id="inizia">
+    <section class="cta-section" id="inizia">
       <div class="container">
         <div class="cta-box reveal" data-reveal>
           <h2>Pronto a provare?</h2>
           <p>
-            Installa l&rsquo;add-in in 30 secondi. Gratis. Nessuna carta di credito.<br>
+            Crea il tuo account demo gratuito in un minuto. Nessuna carta di credito.<br>
             Funziona su Excel per Mac e Windows.
           </p>
           <a href="#demo" class="btn-primary" style="margin-bottom:20px;">Crea account demo gratuito &rarr;</a>
-          <p style="font-size:11px;color:var(--text-muted);margin:0;">
-            Anche da terminale: <span style="color:var(--accent);">bash &lt;(curl -s https://excel-ai-sigma.vercel.app/install.sh)</span>
-          </p>
         </div>
       </div>
     </section>
@@ -1103,7 +1070,6 @@
         <a href="#come-funziona">Come funziona</a>
         <a href="#casi-duso">Casi d&rsquo;uso</a>
         <a href="#funzionalita">Funzionalit&agrave;</a>
-        <a href="#prezzi">Prezzi</a>
         <a href="#faq">FAQ</a>
       </div>
       <div class="footer-col">
@@ -1114,10 +1080,11 @@
         <a href="/manifest.xml">Manifest XML</a>
       </div>
       <div class="footer-col">
-        <h5>Contatti</h5>
-        <a href="mailto:info@excel-ai-sigma.vercel.app">Email</a>
-        <a href="https://github.com/francescods04/excel-ai-" target="_blank" rel="noopener">GitHub</a>
-        <a href="/admin">Dashboard</a>
+        <h5>Legale</h5>
+        <a href="#privacy">Privacy Policy</a>
+        <a href="#privacy">Termini di servizio</a>
+        <a href="#enterprise">Enterprise</a>
+        <a href="mailto:info@excel-ai-sigma.vercel.app">Contatti</a>
       </div>
     </div>
     <div class="footer-bottom">
@@ -1192,83 +1159,6 @@
     // Init install tab
     (function() { switchInstallTab(navigator.platform.toUpperCase().indexOf('MAC') >= 0 ? 'mac' : 'windows'); })();
 
-    // ── Video Showcase Carousel ──
-    (function initShowcase() {
-      const stage = document.querySelector('.showcase-stage');
-      if (!stage) return;
-      const videos = stage.querySelectorAll('.showcase-video');
-      const labels = document.querySelectorAll('.showcase-label');
-      const dots = document.querySelectorAll('.showcase-dot');
-      const progressBar = document.querySelector('.showcase-progress-bar');
-      const playBtn = document.getElementById('showcase-play');
-      const prevBtn = document.getElementById('showcase-prev');
-      const nextBtn = document.getElementById('showcase-next');
-      if (videos.length < 2) return;
-
-      let current = 0;
-      let playing = true;
-      const interval = 10000;
-      let timer = null;
-      let progressRAF = null;
-      let segmentStart = 0;
-
-      function playVideo(i) {
-        videos.forEach((v, idx) => { v.classList.toggle('active', idx === i); if (idx === i) v.play(); else v.pause(); });
-        labels.forEach((l, idx) => l.classList.toggle('active', idx === i));
-        dots.forEach((d, idx) => d.classList.toggle('active', idx === i));
-        current = i;
-        segmentStart = performance.now();
-        progressBar.style.transition = 'none';
-        progressBar.style.width = '0%';
-      }
-
-      function startProgress() {
-        segmentStart = performance.now();
-        function tick(now) {
-          if (!playing) { progressRAF = requestAnimationFrame(tick); return; }
-          const elapsed = now - segmentStart;
-          const pct = Math.min((elapsed / interval) * 100, 100);
-          progressBar.style.width = pct + '%';
-          if (pct >= 100) {
-            playVideo((current + 1) % videos.length);
-            segmentStart = performance.now();
-          }
-          progressRAF = requestAnimationFrame(tick);
-        }
-        progressRAF = requestAnimationFrame(tick);
-      }
-
-      function startTimer() {
-        clearTimeout(timer);
-        timer = setTimeout(() => { if (playing) playVideo((current + 1) % videos.length); startTimer(); }, interval);
-      }
-
-      function togglePlay() {
-        playing = !playing;
-        playBtn.textContent = playing ? '⏸' : '▶';
-        if (playing) { videos[current].play(); segmentStart = performance.now(); }
-        else videos[current].pause();
-      }
-
-      playVideo(0);
-      startTimer();
-      startProgress();
-
-      playBtn.addEventListener('click', togglePlay);
-      prevBtn.addEventListener('click', () => { clearTimeout(timer); playVideo((current - 1 + videos.length) % videos.length); startTimer(); });
-      nextBtn.addEventListener('click', () => { clearTimeout(timer); playVideo((current + 1) % videos.length); startTimer(); });
-      dots.forEach((d, i) => d.addEventListener('click', () => { clearTimeout(timer); playVideo(i); startTimer(); }));
-
-      const visObs = new IntersectionObserver((entries) => {
-        entries.forEach(e => {
-          if (e.isIntersecting && !playing) return;
-          if (e.isIntersecting) { videos[current].play(); segmentStart = performance.now(); }
-          else videos[current].pause();
-        });
-      }, { threshold: 0.2 });
-      visObs.observe(stage);
-    })();
-
     // Install tabs
     function switchInstallTab(os) {
       document.querySelectorAll('.install-os-tabs .os-tab').forEach(t => t.classList.toggle('active', t.dataset.os === os));
@@ -1314,7 +1204,6 @@
       const success = document.getElementById('demo-success');
       submitBtn.disabled = true;
       submitBtn.textContent = 'Creazione in corso...';
-      // Simulate API call
       setTimeout(() => {
         form.style.display = 'none';
         success.classList.add('show');
