@@ -17,11 +17,13 @@ const MUTATION_TOOLS = new Set([
   'execute_office_js',
   'execute_python',
   'create_sheet',
+  'bulk_create_sheets',
   'rename_sheet',
   'delete_sheet',
   'duplicate_sheet',
   'copy_range',
   'create_named_range',
+  'bulk_create_named_ranges',
   'execute_excel_formula',
   'set_format',
   'add_chart',
@@ -327,13 +329,58 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'create_sheet',
-      description: 'Create a new Excel sheet',
+      description: 'Create a new Excel sheet. For multiple sheets in one go, prefer bulk_create_sheets (1 iteration vs N).',
       parameters: {
         type: 'object',
         properties: {
           name: { type: 'string', description: 'Sheet name' }
         },
         required: ['name']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'bulk_create_sheets',
+      description: 'Create MANY sheets in one iteration. Pass the full list of sheet names. The client creates them all in a single batch. Use this at the start of any multi-sheet build (DCF, LBO, 3-statement, template scaffolding) instead of issuing N separate create_sheet calls — saves N-1 LLM round-trips.\n\nExample: { "names": ["Assumptions", "WACC", "DCF", "Sensitivity"] }',
+      parameters: {
+        type: 'object',
+        required: ['names'],
+        properties: {
+          names: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 32,
+            items: { type: 'string', description: 'Sheet name to create' }
+          }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'bulk_create_named_ranges',
+      description: 'Create MANY named ranges in one iteration. Pass an array of {name, refers_to} objects. Use this at setup of any model with multiple shared inputs (Revenue, WACC, TaxRate, etc.) instead of issuing N separate create_named_range calls.\n\nExample: { "ranges": [ { "name": "Revenue", "refers_to": "=Assumptions!B3" }, { "name": "TaxRate", "refers_to": "=Assumptions!B5" } ] }',
+      parameters: {
+        type: 'object',
+        required: ['ranges'],
+        properties: {
+          ranges: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 32,
+            items: {
+              type: 'object',
+              required: ['name', 'refers_to'],
+              properties: {
+                name: { type: 'string', description: 'Named range name (no spaces, no special chars)' },
+                refers_to: { type: 'string', description: 'Cell reference (e.g. "=Assumptions!B3")' }
+              }
+            }
+          }
+        }
       }
     }
   },
@@ -2204,6 +2251,67 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
     case 'create_sheet': {
       return {
         actions: [{ type: 'createSheet', name: params.name }]
+      };
+    }
+    case 'bulk_create_sheets': {
+      const names = Array.isArray(params && params.names) ? params.names.filter(n => typeof n === 'string' && n.trim()) : [];
+      if (names.length === 0) {
+        return { error: 'bulk_create_sheets: "names" must be a non-empty array of strings' };
+      }
+      if (names.length > 32) {
+        return { error: `bulk_create_sheets: max 32 sheets per call, got ${names.length}` };
+      }
+      // Dedupe while preserving order
+      const seen = new Set();
+      const unique = [];
+      for (const n of names) {
+        const trimmed = n.trim();
+        if (!seen.has(trimmed)) {
+          seen.add(trimmed);
+          unique.push(trimmed);
+        }
+      }
+      return {
+        ok: true,
+        sheetsCreated: unique,
+        count: unique.length,
+        actions: unique.map(name => ({ type: 'createSheet', name }))
+      };
+    }
+    case 'bulk_create_named_ranges': {
+      const ranges = Array.isArray(params && params.ranges) ? params.ranges : [];
+      if (ranges.length === 0) {
+        return { error: 'bulk_create_named_ranges: "ranges" must be a non-empty array' };
+      }
+      if (ranges.length > 32) {
+        return { error: `bulk_create_named_ranges: max 32 named ranges per call, got ${ranges.length}` };
+      }
+      const skipped = [];
+      const accepted = [];
+      const seen = new Set();
+      for (const r of ranges) {
+        const name = r && typeof r.name === 'string' ? r.name.trim() : '';
+        const refersTo = r && typeof r.refers_to === 'string' ? r.refers_to.trim() : '';
+        if (!name || !refersTo) {
+          skipped.push({ name, reason: 'missing name or refers_to' });
+          continue;
+        }
+        if (seen.has(name)) {
+          skipped.push({ name, reason: 'duplicate name in batch' });
+          continue;
+        }
+        seen.add(name);
+        accepted.push({ name, refersTo });
+      }
+      if (accepted.length === 0) {
+        return { error: 'bulk_create_named_ranges: no valid {name, refers_to} entries', skipped };
+      }
+      return {
+        ok: true,
+        rangesCreated: accepted.map(a => a.name),
+        count: accepted.length,
+        skipped: skipped.length ? skipped : undefined,
+        actions: accepted.map(a => ({ type: 'createNamedRange', name: a.name, refersTo: a.refersTo }))
       };
     }
     case 'rename_sheet': {

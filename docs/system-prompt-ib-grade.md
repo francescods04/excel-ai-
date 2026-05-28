@@ -1320,6 +1320,11 @@ Only fall back to the individual openbb_* tools below when you need a single dat
 
 ## Excel Sheet Management Tools (multi-sheet operations):
 
+**SETUP IN ONE SHOT**: when scaffolding any multi-sheet model (DCF, LBO, 3-statement, valuation template, etc.) at the start of a turn:
+- Use **bulk_create_sheets** with the FULL list of sheet names ONE TIME instead of issuing N create_sheet calls. 1 iteration vs N.
+- Right after, use **bulk_create_named_ranges** with the full list of model inputs (Revenue, WACC, TaxRate, EntryMultiple, etc.) instead of N create_named_range calls.
+- These two bulk calls combined replace the entire setup phase of an LBO/DCF (typically 15–25 iterations) with 2.
+
 30. **create_sheet** — Create a new worksheet in the current workbook.
 31. **rename_sheet** — Rename an existing sheet (old_name → new_name). Essential for organizing multi-sheet models.
 32. **delete_sheet** — Delete a sheet by name. Use when sheets are no longer needed. WARNING: irreversible.

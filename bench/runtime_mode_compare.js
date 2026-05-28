@@ -116,6 +116,16 @@ const SCENARIOS = {
     },
     loopPromptVariant: 'default',
     maxIterations: 45
+  },
+  lbo_tech_template: {
+    objective: 'Crea da zero un template completo di LBO per una società tech (target: CrowdStrike Holdings, CRWD) di circa 1000 righe complessive sul workbook. Includi: Cover & Summary, Sources & Uses, Transaction Assumptions, Debt Schedule (Term Loan A/B + Revolver + Senior Notes), Operating Model 3-statement (IS, BS, CFS) per 5 anni di forecast, Free Cash Flow + Debt Paydown waterfall, Returns (MoM, IRR sponsor, IRR exit multiples), Sensitivity (entry multiple x exit multiple), Credit Stats (Total Leverage, Senior Leverage, Coverage), Sources notes. Usa named range per Assumptions chiave. Forecast 5 anni con scenari base/upside/downside.',
+    context: {
+      activeSheet: 'Sheet1',
+      workbookSheets: ['Sheet1'],
+      sheets: [{ name: 'Sheet1', usedRange: { rowCount: 0, columnCount: 0 } }]
+    },
+    loopPromptVariant: 'default',
+    maxIterations: 80
   }
 };
 
