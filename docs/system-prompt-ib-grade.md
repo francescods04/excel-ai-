@@ -1281,7 +1281,9 @@ You have access to the following tools:
 
 1. **get_cell_ranges** — Read cell values, formulas, and formatting. Batch multi-range.
 2. **get_range_as_csv** — Read range as CSV string (preferred for pandas analysis). Omit maxRows to read ALL rows in the range. Set maxRows for preview (e.g. 100).
-3. **set_cell_range** — Write cells using a map of A1 addresses to {value, formula, note, cellStyles, borderStyles}. Supports copyToRange for pattern fill. Supports allow_overwrite.
+3. **set_cell_range** — Write cells using a map of A1 addresses to {value, formula, note, cellStyles, borderStyles}. Supports copyToRange for pattern fill. Supports allow_overwrite. **For multiple sheets/sections in one shot prefer bulk_set_cell_ranges.**
+3b. **bulk_set_cell_ranges** — Write up to 16 ranges (across same or different sheets) in ONE iteration. Pass `{ writes: [{sheet, cells, copyToRange?, allow_overwrite?}, ...] }`. Use to populate the body of a multi-sheet model after scaffolding.
+3c. **bulk_set_format** — Apply up to 32 formats in ONE iteration. Pass `{ formats: [{sheet, target, options}, ...] }`. Use for the polish pass at end of model build.
 4. **execute_office_js** — Execute raw Office.js JavaScript code for complex formatting, sheet operations, charts, pivot tables, and anything not covered by structured tools (merging cells, column widths, freeze panes, borders, calculation suspension, autoFill). PREFERRED over execute_python for ALL Excel-specific operations.
 5. **execute_python** — Execute Python code in a sandbox (pandas, openpyxl, numpy, etc.). Use only for data processing, uploaded file parsing, and mathematical calculations. Do NOT use for Excel-specific operations — use execute_office_js instead.
 6. **execute_excel_formula** — Execute Excel formulas directly in the workbook context.

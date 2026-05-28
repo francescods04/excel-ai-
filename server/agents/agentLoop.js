@@ -14,6 +14,7 @@ const clientReadCache = require('../utils/clientReadCache');
 // workbook-read cache must be invalidated so the next read sees fresh state.
 const MUTATION_TOOLS = new Set([
   'set_cell_range',
+  'bulk_set_cell_ranges',
   'execute_office_js',
   'execute_python',
   'create_sheet',
@@ -26,12 +27,22 @@ const MUTATION_TOOLS = new Set([
   'bulk_create_named_ranges',
   'execute_excel_formula',
   'set_format',
+  'bulk_set_format',
   'add_chart',
   'suspend_calculation',
   'resume_calculation'
 ]);
 
 const AGENT_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT_AGENT || 'high';
+const AGENT_POSTWRITE_CRITIC = process.env.AGENT_POSTWRITE_CRITIC === 'true';
+const AGENT_POSTWRITE_CRITIC_TIMEOUT_MS = Number(process.env.AGENT_POSTWRITE_CRITIC_TIMEOUT_MS) || 8000;
+const AGENT_POSTWRITE_CRITIC_MIN_ACTIONS = Number(process.env.AGENT_POSTWRITE_CRITIC_MIN_ACTIONS) || 1;
+const POSTWRITE_CRITIC_TOOLS = new Set([
+  'set_cell_range',
+  'bulk_set_cell_ranges',
+  'execute_office_js',
+  'execute_excel_formula'
+]);
 const AGENT_THINKING_FIRST_ITER = process.env.AGENT_THINKING_FIRST_ITER !== 'false';
 const AGENT_THINKING_EVERY_ITER = process.env.AGENT_THINKING_EVERY_ITER === 'true';
 const AGENT_THINKING_INTERVAL = Math.max(2, Number(process.env.AGENT_THINKING_INTERVAL) || 6);
@@ -57,9 +68,31 @@ function resolveAgentLoopModel(modelOverride, promptVariant) {
   return AGENT_LOOP_DEFAULT_MODEL;
 }
 
+// Tools whose follow-up iteration almost never needs thinking — pure UI / read /
+// scaffolding. Lets the loop skip the reasoning_effort=high cost for those.
+const CHEAP_FOLLOWUP_TOOLS = new Set([
+  'todo_write',
+  'ask_user_question',
+  'context_snip',
+  'retrieve_snipped',
+  'read_skill',
+  'read_instructions',
+  'list_named_ranges',
+  'search_tools',
+  'create_sheet',
+  'bulk_create_sheets',
+  'create_named_range',
+  'bulk_create_named_ranges',
+  'suspend_calculation',
+  'resume_calculation'
+]);
+
 function shouldUseAgentThinking(iteration, state = {}) {
   if (AGENT_THINKING_EVERY_ITER) return true;
   if (state.forceThinkingNext) return true;
+  // Skip thinking right after a "cheap" tool — the model just needs to pick
+  // the next obvious step, not reason hard. Wins ~1-3s per iteration on those.
+  if (state.lastToolName && CHEAP_FOLLOWUP_TOOLS.has(state.lastToolName)) return false;
   if (AGENT_THINKING_FIRST_ITER && iteration === 1) return true;
   if (AGENT_THINKING_INTERVAL > 0 && iteration % AGENT_THINKING_INTERVAL === 0) return true;
   if (AGENT_FORCE_THINKING_AFTER_ERROR && ((state.consecutiveErrors || 0) > 0 || (state.parseFailureStreak || 0) > 0)) {
@@ -475,7 +508,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'set_cell_range',
-      description: `Write cells using a map of A1 addresses to {value, formula, note, cellStyles, borderStyles}. Supports copyToRange for pattern fill. Supports allow_overwrite for overwrite protection. This is the PRIMARY write tool.\n\nExample:\n{\n  "sheet": "Sheet1",\n  "cells": {\n    "A1": { "value": "Revenue" },\n    "B1": { "value": 100, "cellStyles": { "fontColor": "#0000FF" } },\n    "B2": { "formula": "=B1*1.05" }\n  },\n  "copyToRange": "B2:B10",\n  "allow_overwrite": false\n}`,
+      description: `Write cells using a map of A1 addresses to {value, formula, note, cellStyles, borderStyles}. Supports copyToRange for pattern fill. Supports allow_overwrite for overwrite protection. This is the PRIMARY write tool.\n\nFor MULTIPLE sheets / sections in one shot, prefer bulk_set_cell_ranges (1 iteration vs N).\n\nExample:\n{\n  "sheet": "Sheet1",\n  "cells": {\n    "A1": { "value": "Revenue" },\n    "B1": { "value": 100, "cellStyles": { "fontColor": "#0000FF" } },\n    "B2": { "formula": "=B1*1.05" }\n  },\n  "copyToRange": "B2:B10",\n  "allow_overwrite": false\n}`,
       // Schema sourced from server/tools/schemas.js (single source of truth, also used by registry.js)
       parameters: SHARED_SCHEMAS.SET_CELL_RANGE
     }
@@ -483,8 +516,36 @@ const TOOL_DEFINITIONS = [
   {
     type: 'function',
     function: {
+      name: 'bulk_set_cell_ranges',
+      description: `Write MANY independent ranges (across the same or different sheets) in ONE iteration. Each entry has the same shape as a set_cell_range call. Use this when you would otherwise issue N consecutive set_cell_range calls — typical pattern when populating multiple sections of a model (Assumptions + Sources&Uses + Debt Schedule + ...). Saves N-1 LLM round-trips. Hard cap 16 writes per call.\n\nExample:\n{\n  "writes": [\n    { "sheet": "Assumptions", "cells": { "A1": { "value": "Driver" }, "B1": { "value": "Value" } } },\n    { "sheet": "Sources & Uses", "cells": { "A1": { "value": "Sources" }, "A2": { "value": "Equity" }, "B2": { "value": 100 } } },\n    { "sheet": "Debt Schedule", "cells": { "A1": { "value": "Year" } }, "copyToRange": "A2:A6" }\n  ]\n}\n\nEach write may include copyToRange and allow_overwrite, identical to set_cell_range semantics. Failures on individual writes do NOT abort the batch; they surface under "errors" in the result.`,
+      parameters: {
+        type: 'object',
+        required: ['writes'],
+        properties: {
+          writes: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 16,
+            items: {
+              type: 'object',
+              required: ['sheet', 'cells'],
+              properties: {
+                sheet: { type: 'string', description: 'Sheet name' },
+                cells: { type: 'object', description: 'A1 address -> {value | formula, note?, cellStyles?, borderStyles?}' },
+                copyToRange: { type: 'string', description: 'Optional range to copy the pattern to (e.g. "B2:B100")' },
+                allow_overwrite: { type: 'boolean', description: 'If false, fail when target cells are non-empty (default true)' }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'set_format',
-      description: 'Apply formatting to a cell range (colors, font, number format, alignment, widths/heights, borders)',
+      description: 'Apply formatting to a cell range (colors, font, number format, alignment, widths/heights, borders). For MULTIPLE ranges in one shot, prefer bulk_set_format (1 iteration vs N).',
       parameters: {
         type: 'object',
         properties: {
@@ -512,6 +573,36 @@ const TOOL_DEFINITIONS = [
           }
         },
         required: ['sheet', 'target', 'options']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'bulk_set_format',
+      description: `Apply formatting to MANY ranges in ONE iteration. Each entry has the same shape as set_format. Use when finishing a multi-sheet model (headers, number formats, column widths, borders, etc.) instead of N consecutive set_format calls. Hard cap 32 entries per call.\n\nExample:\n{\n  "formats": [\n    { "sheet": "Assumptions", "target": "A1:B1", "options": { "bold": true, "backgroundColor": "#0D1F2D", "fontColor": "#FFFFFF" } },\n    { "sheet": "DCF",         "target": "B2:F2",  "options": { "numberFormat": "#,##0" } },\n    { "sheet": "DCF",         "target": "A:A",     "options": { "columnWidth": 230 } }\n  ]\n}\n\nFailures on individual entries do NOT abort the batch.`,
+      parameters: {
+        type: 'object',
+        required: ['formats'],
+        properties: {
+          formats: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 32,
+            items: {
+              type: 'object',
+              required: ['sheet', 'target', 'options'],
+              properties: {
+                sheet: { type: 'string' },
+                target: { type: 'string', description: 'Range in A1 notation (e.g. "A1:H10", "A:A", "5:5")' },
+                options: {
+                  type: 'object',
+                  description: 'Same options object as set_format (backgroundColor, fontColor, bold, numberFormat, columnWidth, rowHeight, borders, etc.)'
+                }
+              }
+            }
+          }
+        }
       }
     }
   },
@@ -1341,6 +1432,88 @@ function formatToolStagnationReason(stagnation) {
   return `stagnation_${stagnation.pattern}`;
 }
 
+/* ---------- Post-write critic ---------- */
+
+// Summarize emitted Excel actions into a compact string the critic LLM can scan.
+// Strips noise (style objects, repeated keys); keeps formulas + values + sheet+target.
+function summarizeActionsForCritic(actions) {
+  const lines = [];
+  for (let i = 0; i < actions.length && lines.length < 60; i++) {
+    const a = actions[i] || {};
+    if (a.type === 'setCellRange') {
+      const sheet = a.sheet || '?';
+      const cells = a.cells || {};
+      const sample = Object.entries(cells).slice(0, 24).map(([addr, spec]) => {
+        if (!spec || typeof spec !== 'object') return `${addr}=${JSON.stringify(spec).slice(0, 60)}`;
+        if (spec.formula) return `${addr}=${String(spec.formula).slice(0, 120)}`;
+        if (spec.value !== undefined) return `${addr}:${JSON.stringify(spec.value).slice(0, 60)}`;
+        return addr;
+      });
+      const extra = Object.keys(cells).length > 24 ? ` (+${Object.keys(cells).length - 24} more cells)` : '';
+      lines.push(`[${i}] setCellRange ${sheet}: ${sample.join(' | ')}${extra}${a.copyToRange ? ` copyTo=${a.copyToRange}` : ''}`);
+    } else if (a.type === 'runJavaScript') {
+      const code = String(a.code || '').replace(/\s+/g, ' ').slice(0, 220);
+      lines.push(`[${i}] runJavaScript: ${code}`);
+    } else if (a.type === 'setCellFormat') {
+      lines.push(`[${i}] setCellFormat ${a.sheet}!${a.target} opts=${JSON.stringify(a.options || {}).slice(0, 100)}`);
+    } else {
+      lines.push(`[${i}] ${a.type} ${JSON.stringify(a).slice(0, 140)}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+async function runPostWriteCritic(toolName, actions) {
+  if (!Array.isArray(actions) || actions.length < AGENT_POSTWRITE_CRITIC_MIN_ACTIONS) return null;
+  const summary = summarizeActionsForCritic(actions);
+  if (!summary) return null;
+
+  const prompt = `You are a fast deterministic critic for Excel agent writes. Scan the actions below for OBVIOUS errors only — do NOT speculate, do NOT make stylistic suggestions.
+
+Flag ONLY:
+- Unbalanced parentheses, missing leading "=" on formulas, obvious typos in function names
+- Literal error markers in values/formulas: #VALUE!, #REF!, #NAME?, #DIV/0!, #NUM!, #N/A
+- References to sheets that look wrong (e.g. "Sheet1!X1" when the action's sheet is "DCF" and the LBO context uses other names)
+- Empty cells map / no-op writes
+- Hard-coded magic numbers where a named-range / cross-sheet reference would be safer (low severity)
+
+Respond with COMPACT JSON only, no markdown:
+{ "ok": true } if nothing wrong.
+Otherwise: { "ok": false, "issues": [ { "severity": "high"|"low", "message": "...", "suggestion": "..." } ] }
+
+Tool: ${toolName}
+Actions emitted (${actions.length}):
+${summary}`;
+
+  const start = Date.now();
+  try {
+    const llmResult = await callLLM({
+      messages: [{ role: 'user', content: prompt }],
+      modelOverride: AGENT_LOOP_FAST_MODEL,
+      thinkingDisabled: true,
+      reasoningEffort: 'low',
+      timeoutMs: AGENT_POSTWRITE_CRITIC_TIMEOUT_MS,
+      fallbackTimeoutMs: AGENT_POSTWRITE_CRITIC_TIMEOUT_MS,
+      label: `PostWriteCritic ${toolName}`
+    });
+    const elapsed = Date.now() - start;
+    if (!llmResult || typeof llmResult !== 'object') {
+      logger.info(`[Critic] post-write returned no parsed result in ${elapsed}ms`);
+      return null;
+    }
+    if (llmResult.ok === true || (Array.isArray(llmResult.issues) && llmResult.issues.length === 0)) {
+      logger.info(`[Critic] post-write clean in ${elapsed}ms (${actions.length} actions)`);
+      return null;
+    }
+    const issues = Array.isArray(llmResult.issues) ? llmResult.issues : [];
+    logger.info(`[Critic] post-write found ${issues.length} issue(s) in ${elapsed}ms`);
+    return { ok: false, issues };
+  } catch (err) {
+    logger.warn(`[Critic] post-write failed in ${Date.now() - start}ms: ${err.message}`);
+    return null;
+  }
+}
+
 /* ---------- Agent Loop ---------- */
 
 async function runAgentLoop(objective, context, options = {}) {
@@ -1455,7 +1628,8 @@ async function runAgentLoop(objective, context, options = {}) {
       const useThinking = shouldUseAgentThinking(iteration, {
         forceThinkingNext,
         consecutiveErrors,
-        parseFailureStreak
+        parseFailureStreak,
+        lastToolName: recentToolTrail.length > 0 ? recentToolTrail[recentToolTrail.length - 1].toolName : null
       });
       const turnId = options.turnId || options.agentId;
       const callOpts = {
@@ -1724,6 +1898,29 @@ async function runAgentLoop(objective, context, options = {}) {
       const resultMsg = formatToolResultForMessages(toolResult, toolName);
       messages.push(makeUserMessage(resultMsg));
       onEvent('toolResult', { iteration, tool: toolName, result: toolResult });
+
+      // Optional post-write critic: cheap flash LLM pass over the just-emitted
+      // write actions, looking for obvious formula syntax errors or literal
+      // error markers (#REF/#VALUE/#NAME/#DIV0). When it flags something, the
+      // finding is injected as a user message so the next iteration can fix
+      // it without waiting for a downstream verify. Default off — opt-in via
+      // AGENT_POSTWRITE_CRITIC=true.
+      if (AGENT_POSTWRITE_CRITIC && POSTWRITE_CRITIC_TOOLS.has(toolName) && Array.isArray(toolResult?.actions) && toolResult.actions.length > 0) {
+        try {
+          const critique = await runPostWriteCritic(toolName, toolResult.actions);
+          if (critique && Array.isArray(critique.issues) && critique.issues.length > 0) {
+            const formatted = critique.issues.slice(0, 6).map((i, idx) =>
+              `${idx + 1}. [${i.severity || 'note'}] ${i.message || '(no message)'}${i.suggestion ? ` — fix: ${i.suggestion}` : ''}`
+            ).join('\n');
+            const msg = `POST-WRITE CRITIC (fast pass, ${critique.issues.length} issue${critique.issues.length === 1 ? '' : 's'}):\n${formatted}\n\nAddress the high-severity issues in your next step before continuing the build.`;
+            messages.push(makeUserMessage(msg));
+            onEvent('postWriteCritic', { iteration, tool: toolName, issues: critique.issues });
+            logger.info(`[AgentLoop] post-write critic flagged ${critique.issues.length} issue(s) after ${toolName}`);
+          }
+        } catch (err) {
+          logger.warn(`[AgentLoop] post-write critic threw: ${err.message}`);
+        }
+      }
 
       recentToolTrail.push({
         iteration,
@@ -2433,6 +2630,98 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
           target: params.target,
           options: params.options
         }]
+      };
+    }
+    case 'bulk_set_cell_ranges': {
+      const writes = Array.isArray(params && params.writes) ? params.writes : [];
+      if (writes.length === 0) {
+        return { error: 'bulk_set_cell_ranges: "writes" must be a non-empty array' };
+      }
+      if (writes.length > 16) {
+        return { error: `bulk_set_cell_ranges: max 16 writes per call, got ${writes.length}` };
+      }
+      const actions = [];
+      const accepted = [];
+      const errors = [];
+      for (let i = 0; i < writes.length; i++) {
+        const w = writes[i] || {};
+        const sheet = w.sheet || context?.activeSheet;
+        if (!sheet) {
+          errors.push({ index: i, reason: 'missing sheet' });
+          continue;
+        }
+        if (!w.cells || typeof w.cells !== 'object' || Object.keys(w.cells).length === 0) {
+          errors.push({ index: i, sheet, reason: 'missing or empty cells map' });
+          continue;
+        }
+        let copyToRange = w.copyToRange;
+        if (copyToRange && typeof copyToRange === 'object' && copyToRange.range) {
+          copyToRange = copyToRange.range;
+        }
+        accepted.push({ sheet, cellCount: Object.keys(w.cells).length });
+        actions.push({
+          type: 'setCellRange',
+          sheet,
+          cells: w.cells,
+          copyToRange,
+          allow_overwrite: w.allow_overwrite,
+          explanation: `Write ${Object.keys(w.cells).length} cells to ${sheet}`
+        });
+      }
+      if (actions.length === 0) {
+        return { error: 'bulk_set_cell_ranges: no valid writes', errors };
+      }
+      return {
+        ok: true,
+        applied: accepted.length,
+        sheets: Array.from(new Set(accepted.map(a => a.sheet))),
+        cellsTotal: accepted.reduce((s, a) => s + a.cellCount, 0),
+        errors: errors.length ? errors : undefined,
+        actions
+      };
+    }
+    case 'bulk_set_format': {
+      const formats = Array.isArray(params && params.formats) ? params.formats : [];
+      if (formats.length === 0) {
+        return { error: 'bulk_set_format: "formats" must be a non-empty array' };
+      }
+      if (formats.length > 32) {
+        return { error: `bulk_set_format: max 32 formats per call, got ${formats.length}` };
+      }
+      const actions = [];
+      const errors = [];
+      const accepted = [];
+      for (let i = 0; i < formats.length; i++) {
+        const f = formats[i] || {};
+        const sheet = f.sheet || context?.activeSheet;
+        if (!sheet) {
+          errors.push({ index: i, reason: 'missing sheet' });
+          continue;
+        }
+        if (!f.target || typeof f.target !== 'string') {
+          errors.push({ index: i, sheet, reason: 'missing or invalid target' });
+          continue;
+        }
+        if (!f.options || typeof f.options !== 'object') {
+          errors.push({ index: i, sheet, target: f.target, reason: 'missing options' });
+          continue;
+        }
+        accepted.push({ sheet, target: f.target });
+        actions.push({
+          type: 'setCellFormat',
+          sheet,
+          target: f.target,
+          options: f.options
+        });
+      }
+      if (actions.length === 0) {
+        return { error: 'bulk_set_format: no valid formats', errors };
+      }
+      return {
+        ok: true,
+        applied: accepted.length,
+        errors: errors.length ? errors : undefined,
+        actions
       };
     }
     case 'execute_excel_formula': {
