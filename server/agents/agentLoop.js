@@ -845,6 +845,44 @@ RETURN VALUE: The value you return from the script is delivered back to you as t
   {
     type: 'function',
     function: {
+      name: 'finance_company_bundle',
+      description: 'Fetch profile + metrics + balance + income + cashflow for one ticker IN PARALLEL and return them as a single merged object. Use this at the start of any company analysis instead of issuing five separate openbb_equity_* calls — saves ~4 LLM turns. Returns { symbol, period, profile, metrics, balance, income, cashflow, errors }. Datasets that fail are surfaced under errors but the rest is still returned.',
+      parameters: {
+        type: 'object',
+        required: ['symbol'],
+        properties: {
+          symbol: { type: 'string', description: 'Ticker symbol (e.g. AAPL)' },
+          period: { type: 'string', enum: ['annual', 'quarter'], description: 'Period for income/balance/cashflow (default annual)' },
+          include: {
+            type: 'array',
+            description: 'Subset of datasets to fetch (default = all five). Items: profile|metrics|balance|income|cashflow',
+            items: { type: 'string', enum: ['profile', 'metrics', 'balance', 'income', 'cashflow'] }
+          }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'macro_snapshot',
+      description: 'Fetch treasury rates + fed funds rate + CPI + GDP + unemployment IN PARALLEL for WACC / risk-free / inflation inputs. Returns { country, treasury, fed_rate, cpi, gdp, unemployment, errors }. Replaces ~4 sequential openbb_* macro calls.',
+      parameters: {
+        type: 'object',
+        properties: {
+          country: { type: 'string', description: 'Country for CPI/GDP/unemployment (default united_states)' },
+          include: {
+            type: 'array',
+            description: 'Subset of macro series to fetch (default = all). Items: treasury|fed_rate|cpi|gdp|unemployment',
+            items: { type: 'string', enum: ['treasury', 'fed_rate', 'cpi', 'gdp', 'unemployment'] }
+          }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'suspend_calculation',
       description: 'Suspend Excel automatic calculation (switch to manual) before large bulk writes to prevent UI freeze and crashes. Always pair with resume_calculation.',
       parameters: {
@@ -2193,6 +2231,66 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
         logger.info(`[AgentLoop] Context compacted: ${toCompact.length} messages -> summary (${summary.length} chars). New length: ${messages.length}`);
       }
       return { ok: true, note: `Context snip applied. Messages: ${messages.length}` };
+    }
+    /* ---------- Bundled finance calls (parallel) ---------- */
+    case 'finance_company_bundle': {
+      const symbolNorm = normalizeOpenBBSymbolParams(params || {});
+      const symbol = symbolNorm.symbol;
+      if (!symbol) {
+        return { error: 'finance_company_bundle: "symbol" is required' };
+      }
+      const period = (params && params.period) === 'quarter' ? 'quarter' : 'annual';
+      const wanted = Array.isArray(params && params.include) && params.include.length
+        ? new Set(params.include)
+        : new Set(['profile', 'metrics', 'balance', 'income', 'cashflow']);
+      const baseArgs = { ...symbolNorm };
+      const periodArgs = { ...symbolNorm, period };
+      const datasets = [
+        wanted.has('profile')   && ['profile',  () => executeTool('openbb.equity.profile',                 baseArgs,   toolMemory)],
+        wanted.has('metrics')   && ['metrics',  () => executeTool('openbb.equity.fundamentals.metrics',    baseArgs,   toolMemory)],
+        wanted.has('balance')   && ['balance',  () => executeTool('openbb.equity.fundamentals.balance',    periodArgs, toolMemory)],
+        wanted.has('income')    && ['income',   () => executeTool('openbb.equity.fundamentals.income',     periodArgs, toolMemory)],
+        wanted.has('cashflow')  && ['cashflow', () => executeTool('openbb.equity.fundamentals.cash',       periodArgs, toolMemory)]
+      ].filter(Boolean);
+      const settled = await Promise.allSettled(datasets.map(([, fn]) => fn()));
+      const out = { symbol, period, errors: {} };
+      settled.forEach((res, idx) => {
+        const key = datasets[idx][0];
+        if (res.status === 'fulfilled') {
+          out[key] = (res.value && res.value.data !== undefined) ? res.value.data : res.value;
+        } else {
+          const msg = res.reason && res.reason.message ? res.reason.message : String(res.reason);
+          out.errors[key] = msg;
+        }
+      });
+      if (Object.keys(out.errors).length === 0) delete out.errors;
+      return out;
+    }
+    case 'macro_snapshot': {
+      const country = (params && params.country) || 'united_states';
+      const wanted = Array.isArray(params && params.include) && params.include.length
+        ? new Set(params.include)
+        : new Set(['treasury', 'fed_rate', 'cpi', 'gdp', 'unemployment']);
+      const datasets = [
+        wanted.has('treasury')     && ['treasury',     () => executeTool('openbb.fixedincome.treasury', {}, toolMemory)],
+        wanted.has('fed_rate')     && ['fed_rate',     () => executeTool('openbb.fixedincome.effr',     {}, toolMemory)],
+        wanted.has('cpi')          && ['cpi',          () => executeTool('openbb.economy.cpi',          { country }, toolMemory)],
+        wanted.has('gdp')          && ['gdp',          () => executeTool('openbb.economy.gdp_real',     { country }, toolMemory)],
+        wanted.has('unemployment') && ['unemployment', () => executeTool('openbb.economy.unemployment', { country }, toolMemory)]
+      ].filter(Boolean);
+      const settled = await Promise.allSettled(datasets.map(([, fn]) => fn()));
+      const out = { country, errors: {} };
+      settled.forEach((res, idx) => {
+        const key = datasets[idx][0];
+        if (res.status === 'fulfilled') {
+          out[key] = (res.value && res.value.data !== undefined) ? res.value.data : res.value;
+        } else {
+          const msg = res.reason && res.reason.message ? res.reason.message : String(res.reason);
+          out.errors[key] = msg;
+        }
+      });
+      if (Object.keys(out.errors).length === 0) delete out.errors;
+      return out;
     }
     /* ---------- OpenBB Financial Data ---------- */
     case 'openbb_equity_profile': {

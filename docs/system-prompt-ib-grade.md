@@ -1301,6 +1301,12 @@ You have access to the following tools:
 
 ## OpenBB Financial Data Tools (PREFERRED — use these instead of web_search for financial data):
 
+**PREFER PARALLEL BUNDLES when you need multiple datasets — each saves ~4 iterations:**
+- **finance_company_bundle** — One call returns profile + metrics + balance + income + cashflow for a ticker in parallel. Use at the start of ANY company analysis instead of five sequential openbb_equity_* calls.
+- **macro_snapshot** — One call returns treasury + fed_rate + CPI + GDP + unemployment in parallel. Use at the start of WACC / risk-free / inflation work.
+
+Only fall back to the individual openbb_* tools below when you need a single datapoint that wasn't in the bundle, or when refreshing a specific series.
+
 20. **openbb_equity_profile** — Company profile: description, sector, market cap, employees, beta. FREE via yfinance.
 21. **openbb_equity_metrics** — Key metrics: PE, forward PE, PEG, EV/EBITDA, ROE, margins, growth, debt/equity. FREE via yfinance.
 22. **openbb_equity_balance** — Real balance sheet: cash, receivables, inventory, assets, debt, equity. FREE via yfinance.
