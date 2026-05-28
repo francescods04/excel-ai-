@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Installa AI Agent for Excel — francescodelsesto.com</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background: #0a0a0a;
+      color: #e5e5e5;
+      line-height: 1.6;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 20px;
+    }
+    .logo {
+      font-size: 24px;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 8px;
+      letter-spacing: -0.5px;
+    }
+    .subtitle { color: #888; font-size: 14px; margin-bottom: 40px; }
+    .container {
+      width: 100%;
+      max-width: 720px;
+    }
+    .os-tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 24px;
+    }
+    .os-tab {
+      flex: 1;
+      padding: 14px;
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      border-radius: 10px;
+      cursor: pointer;
+      text-align: center;
+      font-weight: 600;
+      color: #888;
+      transition: all .2s;
+    }
+    .os-tab.active, .os-tab:hover {
+      background: #1e3a1e;
+      border-color: #4caf50;
+      color: #4caf50;
+    }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    .card {
+      background: #141414;
+      border: 1px solid #222;
+      border-radius: 14px;
+      padding: 28px;
+      margin-bottom: 16px;
+    }
+    .card h3 {
+      font-size: 16px;
+      color: #fff;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .card h3 .badge {
+      background: #4caf50;
+      color: #000;
+      font-size: 11px;
+      padding: 2px 10px;
+      border-radius: 20px;
+      font-weight: 700;
+    }
+    .card h3 .badge-alt {
+      background: #2a4a8a;
+      color: #aaccff;
+      font-size: 11px;
+      padding: 2px 10px;
+      border-radius: 20px;
+      font-weight: 700;
+    }
+    .card p { color: #aaa; font-size: 14px; margin-bottom: 16px; }
+    .cmd {
+      background: #0d0d0d;
+      border: 1px solid #2a2a2a;
+      border-radius: 8px;
+      padding: 14px 16px;
+      font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+      font-size: 13px;
+      color: #4caf50;
+      cursor: pointer;
+      position: relative;
+      overflow: hidden;
+      word-break: break-all;
+    }
+    .cmd:hover { border-color: #4caf50; }
+    .cmd .copy-hint {
+      position: absolute;
+      right: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 11px;
+      color: #666;
+      font-family: -apple-system, sans-serif;
+      pointer-events: none;
+    }
+    .cmd.copied .copy-hint { color: #4caf50; }
+    .btn-primary {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: #4caf50;
+      color: #000;
+      font-weight: 700;
+      padding: 12px 20px;
+      border-radius: 8px;
+      text-decoration: none;
+      font-size: 14px;
+      border: none;
+      cursor: pointer;
+    }
+    .btn-primary:hover { background: #43a047; }
+    .btn-secondary {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: #1a1a1a;
+      color: #ccc;
+      font-weight: 600;
+      padding: 12px 20px;
+      border-radius: 8px;
+      text-decoration: none;
+      font-size: 14px;
+      border: 1px solid #333;
+      cursor: pointer;
+    }
+    .btn-secondary:hover { border-color: #555; color: #fff; }
+    .steps {
+      counter-reset: step;
+      list-style: none;
+    }
+    .steps li {
+      position: relative;
+      padding-left: 36px;
+      margin-bottom: 14px;
+      color: #bbb;
+      font-size: 14px;
+    }
+    .steps li::before {
+      counter-increment: step;
+      content: counter(step);
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 24px;
+      height: 24px;
+      background: #1e3a1e;
+      color: #4caf50;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .warning {
+      background: #2a1f0a;
+      border: 1px solid #5a4a1a;
+      color: #d4a017;
+      padding: 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      margin-top: 12px;
+    }
+    .tip {
+      background: #0f1f0f;
+      border: 1px solid #1e3a1e;
+      color: #8bc34a;
+      padding: 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      margin-top: 12px;
+    }
+    .tip strong { color: #4caf50; }
+    .notice {
+      background: #1a1a2e;
+      border: 1px solid #2a2a5a;
+      color: #aab4ff;
+      padding: 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      margin-top: 12px;
+    }
+    .notice strong { color: #7c8cff; }
+    .footer {
+      margin-top: 40px;
+      color: #555;
+      font-size: 12px;
+      text-align: center;
+    }
+    .footer a { color: #888; }
+    .method-label {
+      display: inline-block;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #666;
+      margin-bottom: 8px;
+      font-weight: 700;
+    }
+    .method-label.rec { color: #4caf50; }
+    .method-label.safe { color: #7c8cff; }
+    hr {
+      border: 0;
+      border-top: 1px solid #222;
+      margin: 24px 0;
+    }
+    h4 { color: #ccc; font-size: 14px; margin: 20px 0 10px; }
+    code {
+      background: #1a1a1a;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 12px;
+      color: #4caf50;
+      font-family: 'SF Mono', Monaco, monospace;
+    }
+  </style>
+</head>
+<body>
+  <div class="logo">AI Agent for Excel</div>
+  <div class="subtitle">Installazione rapida — nessun file sospetto da scaricare</div>
+
+  <div class="container">
+    <div class="os-tabs">
+      <div class="os-tab active" onclick="showOs('mac',this)">🍎 macOS</div>
+      <div class="os-tab" onclick="showOs('win',this)">🪟 Windows</div>
+    </div>
+
+    <!-- macOS -->
+    <div class="panel active" id="panel-mac">
+
+      <!-- Metodo 1: Terminale -->
+      <div class="card">
+        <div class="method-label rec">✅ Raccomandato — funziona sempre</div>
+        <h3>Terminale (30 secondi) <span class="badge">Veloce</span></h3>
+        <p>
+          Apri <strong>Terminale</strong> (premi <code>Cmd+Spazio</code>, scrivi "Terminale", premi Invio),<br>
+          incolla il comando qui sotto e premi <strong>Invio</strong>:
+        </p>
+        <div class="cmd" onclick="copyText(this)">
+          bash &lt;(curl -s https://francescodelsesto.com/install.sh)
+          <span class="copy-hint">Clicca per copiare</span>
+        </div>
+        <div class="tip">
+          <strong>Perché il Terminale?</strong> macOS <strong>non blocca</strong> i comandi incollati nel Terminale (nessun avviso Gatekeeper). Questo comando scarica solo il file <code>manifest.xml</code> e lo copia nella cartella di Excel. Non installa programmi.
+        </div>
+        <p style="margin-top:16px;font-size:13px;color:#888;">
+          ✅ Finito. Chiudi Excel (<code>Cmd+Q</code>) se era aperto, riaprilo e troverai <strong>AI Agent for Excel</strong> nella tab Home.
+        </p>
+      </div>
+
+      <!-- Metodo 2: Excel Online -->
+      <div class="card">
+        <div class="method-label safe">🌐 Zero installazione</div>
+        <h3>Excel Online (nessun download) <span class="badge-alt">Web</span></h3>
+        <p>
+          Se non vuoi installare nulla sul Mac, usa <strong>Excel nel browser</strong>.<br>
+          L'add-in funziona esattamente allo stesso modo.
+        </p>
+        <ol class="steps">
+          <li>Apri <a href="https://excel.office.com" target="_blank" rel="noopener" style="color:#7c8cff;">excel.office.com</a> e accedi con il tuo account Microsoft</li>
+          <li>Clicca <strong>Inserisci → Componenti aggiuntivi → Carica componente aggiuntivo personalizzato</strong></li>
+          <li>Incolla l'URL: <code style="color:#7c8cff;">https://francescodelsesto.com/manifest.xml</code></li>
+          <li>Clicca <strong>Aggiungi</strong></li>
+        </ol>
+        <div class="notice">
+          <strong>Vantaggio:</strong> funziona su qualsiasi computer (Mac, Windows, Chromebook) senza installare file. I dati restano nel tuo foglio Excel.
+        </div>
+      </div>
+
+      <!-- Metodo 3: Manuale -->
+      <div class="card">
+        <div class="method-label">📁 Manuale</div>
+        <h3>Copia file manualmente</h3>
+        <p>Se preferisci non usare il Terminale, scarica e copia il file a mano:</p>
+        <ol class="steps">
+          <li>Clicca per scaricare <a href="/manifest.xml" download style="color:#4caf50;">manifest.xml</a></li>
+          <li>Apri <strong>Finder</strong>, premi <code>Cmd+Shift+G</code> e incolla:<br><code>~/Library/Containers/com.microsoft.Excel/Data/Documents/wef</code></li>
+          <li>Trascina il file <code>manifest.xml</code> scaricato nella cartella che si apre</li>
+          <li>Chiudi Excel (<code>Cmd+Q</code>) e riaprilo</li>
+        </ol>
+      </div>
+
+      <!-- Problemi Gatekeeper -->
+      <div class="card">
+        <h3>⚠️ Problemi con Gatekeeper?</h3>
+        <p>
+          Se hai provato a scaricare il file <code>.command</code> e macOS mostra il messaggio
+          <em>"Apple could not verify... is free of malware"</em>, non preoccuparti: <strong>il file è sicuro</strong>,
+          ma Apple lo blocca perché non ha la firma dello sviluppatore.
+        </p>
+        <p><strong>Soluzione:</strong></p>
+        <ol class="steps">
+          <li><strong>Usa il Terminale</strong> (Metodo 1 sopra) — funziona sempre, nessun blocco</li>
+          <li>Oppure vai in <strong>Impostazioni di Sistema → Privacy e Sicurezza</strong>, scrolla in basso e clicca <strong>"Apri comunque"</strong> accanto al nome del file bloccato</li>
+        </ol>
+        <div class="warning">
+          <strong>Nota:</strong> i file <code>.command</code> e <code>.bat</code> sono bloccati da Gatekeeper/SmartScreen su Mac e Windows. Per questo <strong>consigliamo il Terminale</strong> su Mac e PowerShell su Windows.
+        </div>
+      </div>
+    </div>
+
+    <!-- Windows -->
+    <div class="panel" id="panel-win">
+      <div class="card">
+        <div class="method-label rec">✅ Raccomandato — funziona sempre</div>
+        <h3>PowerShell (30 secondi) <span class="badge">Veloce</span></h3>
+        <p>
+          Apri <strong>PowerShell</strong> (tasto Windows, scrivi "PowerShell", premi Invio),<br>
+          incolla il comando qui sotto e premi <strong>Invio</strong>:
+        </p>
+        <div class="cmd" onclick="copyText(this)">
+          irm https://francescodelsesto.com/install.ps1 | iex
+          <span class="copy-hint">Clicca per copiare</span>
+        </div>
+        <div class="tip">
+          <strong>Perché PowerShell?</strong> Windows SmartScreen a volte blocca i file <code>.bat</code> scaricati. Il comando PowerShell bypassa il problema e configura tutto automaticamente.
+        </div>
+        <p style="margin-top:16px;font-size:13px;color:#888;">
+          ✅ Finito. Apri Excel → <strong>Inserisci → Componenti aggiuntivi → Cartella condivisa</strong> e seleziona <strong>AI Agent for Excel</strong>.
+        </p>
+      </div>
+
+      <div class="card">
+        <div class="method-label safe">🌐 Zero installazione</div>
+        <h3>Excel Online (nessun download) <span class="badge-alt">Web</span></h3>
+        <p>
+          Se non vuoi installare nulla, usa <strong>Excel nel browser</strong>:
+        </p>
+        <ol class="steps">
+          <li>Apri <a href="https://excel.office.com" target="_blank" rel="noopener" style="color:#7c8cff;">excel.office.com</a> e accedi con il tuo account Microsoft</li>
+          <li>Clicca <strong>Inserisci → Componenti aggiuntivi → Carica componente aggiuntivo personalizzato</strong></li>
+          <li>Incolla l'URL: <code style="color:#7c8cff;">https://francescodelsesto.com/manifest.xml</code></li>
+          <li>Clicca <strong>Aggiungi</strong></li>
+        </ol>
+      </div>
+
+      <div class="card">
+        <div class="method-label">📁 Manuale</div>
+        <h3>Copia file manualmente</h3>
+        <ol class="steps">
+          <li>Scarica <a href="/manifest.xml" download style="color:#4caf50;">manifest.xml</a></li>
+          <li>Crea la cartella <code>C:\ExcelAI</code></li>
+          <li>Copia <code>manifest.xml</code> dentro <code>C:\ExcelAI</code></li>
+          <li>Apri Excel → <strong>File → Opzioni → Centro protezione → Impostazioni Centro protezione → Cataloghi attendibili</strong></li>
+          <li>Clicca <strong>Aggiungi nuovo catalogo</strong>, incolla <code>C:\ExcelAI</code> e spunta <strong>Mostra in menu</strong></li>
+          <li>Riavvia Excel</li>
+        </ol>
+      </div>
+    </div>
+
+    <div class="footer">
+      Problemi con l'installazione? <a href="mailto:info@francescodelsesto.com">Scrivici</a> o controlla le <a href="/faq.html">FAQ</a>.
+    </div>
+  </div>
+
+  <script>
+    function showOs(os, btn) {
+      document.querySelectorAll('.os-tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById('panel-' + os).classList.add('active');
+    }
+    function copyText(el) {
+      const text = el.childNodes[0].textContent.trim();
+      navigator.clipboard.writeText(text).then(() => {
+        const hint = el.querySelector('.copy-hint');
+        const old = hint.textContent;
+        hint.textContent = 'Copiato!';
+        el.classList.add('copied');
+        setTimeout(() => { hint.textContent = old; el.classList.remove('copied'); }, 1500);
+      });
+    }
+  </script>
+</body>
+</html>

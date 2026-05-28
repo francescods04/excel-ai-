@@ -560,6 +560,14 @@
 
       src.onerror = () => {
         if (currentSource !== src) return;
+        const maxAttempts = 10;
+        if (attempt >= maxAttempts) {
+          addLog(`Connessione SSE persa dopo ${maxAttempts} tentativi. Ricarica il taskpane per riprendere.`, 'error');
+          src.close();
+          currentSource = null;
+          eventSource = null;
+          return;
+        }
         addLog('Connessione SSE instabile, tento la riconnessione automatica...', 'error');
         src.close();
         currentSource = null;

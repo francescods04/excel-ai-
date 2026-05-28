@@ -863,6 +863,14 @@ function openTurnEventStream(turnId, planMsgId) {
 
     src.onerror = () => {
       if (currentSource !== src) return;
+      const maxAttempts = 10;
+      if (attempt >= maxAttempts) {
+        addLog(`Connessione SSE persa dopo ${maxAttempts} tentativi. Ricarica la pagina per riprendere.`, 'error');
+        src.close();
+        currentSource = null;
+        state.eventSource = null;
+        return;
+      }
       addLog('Connessione SSE instabile, tento riconnessione...', 'error');
       src.close();
       currentSource = null;

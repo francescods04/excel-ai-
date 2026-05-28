@@ -1,11 +1,11 @@
 # Excel AI — Windows Installer
 # Apri PowerShell come utente e incolla:
-#   irm https://excel-ai-sigma.vercel.app/install.ps1 | iex
+#   irm https://francescodelsesto.com/install.ps1 | iex
 #
 # Oppure scarica il file e fai doppio clic col destro → "Esegui con PowerShell"
 
 param(
-  [string]$BaseUrl = "https://excel-ai-sigma.vercel.app",
+  [string]$BaseUrl = "https://francescodelsesto.com",
   [string]$CatalogName = "ExcelAI"
 )
 

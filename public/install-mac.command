@@ -1,17 +1,17 @@
 #!/bin/bash
 # Excel AI Add-in — macOS Installer
 # Fai doppio clic su questo file per installare.
+# Uso: trascina in Terminale, o doppio clic (se permesso da Sistema)
 
-BASE_URL="https://excel-ai-sigma.vercel.app"
+BASE_URL="https://francescodelsesto.com"
 MANIFEST_DIR="$HOME/Library/Containers/com.microsoft.Excel/Data/Documents/wef"
 MANIFEST_FILE="$MANIFEST_DIR/manifest.xml"
-APP_DOMAIN=$(echo "$BASE_URL" | sed -E 's|^https?://||')
 
 # ── Finestra di benvenuto ──
 osascript -e '
 display dialog "Excel AI — Assistente per Excel
 
-Questo installer aggiungera l'\''add-in \"Excel AI\" al tuo Excel.
+Questo installer aggiungera l'\''add-in \"AI Agent for Excel\" al tuo Excel.
 
 Nessuna modifica al sistema. Solo un file di configurazione.
 
@@ -33,61 +33,40 @@ echo ""
 
 mkdir -p "$MANIFEST_DIR" 2>/dev/null
 
-MANIFEST="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<OfficeApp
-  xmlns=\"http://schemas.microsoft.com/office/appforoffice/1.1\"
-  xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"
-  xsi:type=\"TaskPaneApp\">
-  <Id>$(uuidgen 2>/dev/null || echo "a1b2c3d4-e5f6-7890-abcd-ef1234567890")</Id>
-  <Version>1.0.0.0</Version>
-  <ProviderName>Excel AI</ProviderName>
-  <DefaultLocale>it-IT</DefaultLocale>
-  <DisplayName DefaultValue=\"Excel AI\"/>
-  <Description DefaultValue=\"Assistente AI per commercialisti e CPA\"/>
-  <IconUrl DefaultValue=\"$BASE_URL/assets/icon-32.png\"/>
-  <HighResolutionIconUrl DefaultValue=\"$BASE_URL/assets/icon-80.png\"/>
-  <AppDomains>
-    <AppDomain>$APP_DOMAIN</AppDomain>
-  </AppDomains>
-  <Hosts>
-    <Host Name=\"Workbook\"/>
-  </Hosts>
-  <DefaultSettings>
-    <SourceLocation DefaultValue=\"$BASE_URL/src/taskpane.html\"/>
-  </DefaultSettings>
-  <Permissions>ReadWriteDocument</Permissions>
-</OfficeApp>"
-
-echo "$MANIFEST" > "$MANIFEST_FILE"
+# Scarica il manifest COMPLETO (con VersionOverrides) dal server
+echo "  📥 Download manifest da $BASE_URL ..."
+curl -fsSL "$BASE_URL/manifest.xml" -o "$MANIFEST_FILE" 2>/dev/null
 
 if [ -f "$MANIFEST_FILE" ]; then
   echo "  ✅ Add-in installato con successo!"
   echo ""
   echo "  📌 Cosa fare ora:"
-  echo "     1. Apri Microsoft Excel"
-  echo "     2. Cerca \"Excel AI\" nella tab Home"
-  echo "     3. Registrati con la tua email"
+  echo "     1. Chiudi completamente Excel (Cmd+Q)"
+  echo "     2. Riapri Microsoft Excel"
+  echo "     3. Cerca \"AI Agent for Excel\" nella tab Home"
   echo ""
 
-  # Avvia Excel se installato
+  # Avvia Excel se non è aperto
   if pgrep -iq microsoft.excel; then
-    echo "  ⚠️  Excel è già aperto. Riavvia per vedere l'add-in."
+    echo "  ⚠️  Excel è già aperto. Chiudilo e riaprilo per vedere l'add-in."
   else
     open -a "Microsoft Excel" 2>/dev/null && echo "  🚀 Avvio di Excel..."
   fi
 
   osascript -e '
-display dialog "Add-in Excel AI installato!
+display dialog "Add-in AI Agent for Excel installato!
 
-Apri Excel e cerca \"Excel AI\" nella tab Home.
-
-Se Excel e gia aperto, riavvialo." with title "Installazione completata" buttons {"OK"} default button "OK" with icon note
+1. Chiudi Excel (Cmd+Q) se è aperto
+2. Riapri Excel
+3. Cerca \"AI Agent for Excel\" nella tab Home" with title "Installazione completata" buttons {"OK"} default button "OK" with icon note
 ' 2>/dev/null &
 else
+  echo "  ❌ Errore: impossibile scaricare il manifest."
+  echo "     Verifica che il sito $BASE_URL sia online."
   osascript -e '
 display dialog "Errore durante l'\''installazione.
 
-Contatta assistenza@excel-ai-sigma.vercel.app" with title "Errore" buttons {"OK"} default button "OK" with icon stop
+Impossibile scaricare il manifest da ' "$BASE_URL" '." with title "Errore" buttons {"OK"} default button "OK" with icon stop
 ' 2>/dev/null &
 fi
 

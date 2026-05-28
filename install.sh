@@ -1,13 +1,13 @@
 #!/bin/bash
 # Excel AI — macOS Installer
-# bash <(curl -s https://excel-ai-sigma.vercel.app/install.sh)
+# bash <(curl -s https://francescodelsesto.com/install.sh)
 
 MANIFEST_DIR="$HOME/Library/Containers/com.microsoft.Excel/Data/Documents/wef"
 MANIFEST_FILE="$MANIFEST_DIR/manifest.xml"
 
 mkdir -p "$MANIFEST_DIR"
 
-BASE_URL="${1:-https://excel-ai-sigma.vercel.app}"
+BASE_URL="${1:-https://francescodelsesto.com}"
 APP_DOMAIN=$(echo "$BASE_URL" | sed -E 's|^https?://||')
 
 echo ""

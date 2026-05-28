@@ -4,7 +4,7 @@
 title Excel AI — Installer
 setlocal enabledelayedexpansion
 
-set "BASE_URL=https://excel-ai-sigma.vercel.app"
+set "BASE_URL=https://francescodelsesto.com"
 set "CATALOG_DIR=%LOCALAPPDATA%\ExcelAI"
 set "MANIFEST_FILE=%CATALOG_DIR%\manifest.xml"
 

@@ -7,7 +7,7 @@ install:
 	bash install.sh http://localhost:3000
 
 install-prod:
-	bash install.sh https://excel-ai-sigma.vercel.app
+	bash install.sh https://francescodelsesto.com
 
 certs:
 	mkcert -install

@@ -67,17 +67,29 @@ async function postTurnResponseBatch(turnId, responses) {
   }
 }
 
-async function postTurnActionResult(turnId, result) {
-  const res = await fetch(`${API_BASE}/api/turn/action-result`, {
-    method: 'POST',
-    headers: authHeaders({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ turnId, ...(result || {}) })
-  });
-  if (!res.ok) {
-    const payload = await res.json().catch(() => ({}));
-    throw new Error(payload.error || 'Errore nel salvataggio esito azioni Excel');
+async function postTurnActionResult(turnId, result, retries = 3) {
+  let lastError;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const res = await fetch(`${API_BASE}/api/turn/action-result`, {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ turnId, ...(result || {}) })
+      });
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error || `HTTP ${res.status}`);
+      }
+      return res.json();
+    } catch (err) {
+      lastError = err;
+      if (i < retries) {
+        const delay = 1000 * Math.pow(2, i);
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
   }
-  return res.json();
+  throw new Error(`Errore nel salvataggio esito azioni Excel dopo ${retries + 1} tentativi: ${lastError.message}`);
 }
 
 async function getTurn(turnId) {

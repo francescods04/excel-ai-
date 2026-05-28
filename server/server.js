@@ -18,6 +18,17 @@ const HTTPS_PORT = process.env.HTTPS_PORT || 3443;
 function isAllowedOrigin(origin) {
   if (!origin) return true;
   if (process.env.ALLOW_ALL_CORS === 'true') return true;
+  if (process.env.ALLOWED_ORIGINS) {
+    const allowed = process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim()).filter(Boolean);
+    if (allowed.includes(origin)) return true;
+  }
+  // Automatically allow the add-in's own public origin (required for Vercel / production)
+  if (process.env.PUBLIC_URL) {
+    try {
+      const publicOrigin = new URL(process.env.PUBLIC_URL).origin;
+      if (origin === publicOrigin) return true;
+    } catch (_) {}
+  }
   return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(origin);
 }
 
@@ -142,7 +153,22 @@ app.get('/health', (req, res) => res.redirect('/api/health'));
 /* ---------- Office Add-in Manifest (dinamico) ---------- */
 app.get('/manifest.xml', (req, res) => {
   const baseUrl = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+  const origin = new URL(baseUrl).origin;
+
+  try {
+    // Use the static manifest as a template so VersionOverrides, icons and ribbon buttons are preserved
+    const xml = fs.readFileSync(path.join(__dirname, '..', 'manifest.xml'), 'utf8');
+    let productionXml = xml.replace(/http:\/\/localhost:3000/g, baseUrl);
+    // Ensure AppDomain is a proper origin (protocol + host), not a subpath
+    productionXml = productionXml.replace(
+      /<AppDomain>[^<]+<\/AppDomain>/g,
+      `<AppDomain>${origin}</AppDomain>`
+    );
+    res.type('application/xml').send(productionXml);
+  } catch (err) {
+    logger.error('Errore generazione manifest:', err.message);
+    // Fallback minimal manifest
+    const minimalXml = `<?xml version="1.0" encoding="UTF-8"?>
 <OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
            xsi:type="TaskPaneApp">
@@ -155,14 +181,15 @@ app.get('/manifest.xml', (req, res) => {
   <IconUrl DefaultValue="${baseUrl}/assets/icon-32.png"/>
   <HighResolutionIconUrl DefaultValue="${baseUrl}/assets/icon-80.png"/>
   <SupportUrl DefaultValue="${baseUrl}/support"/>
-  <AppDomains><AppDomain>${baseUrl.replace(/^https?:\/\//, '')}</AppDomain></AppDomains>
+  <AppDomains><AppDomain>${origin}</AppDomain></AppDomains>
   <Hosts><Host Name="Workbook"/></Hosts>
   <DefaultSettings>
     <SourceLocation DefaultValue="${baseUrl}/src/taskpane.html"/>
   </DefaultSettings>
   <Permissions>ReadWriteDocument</Permissions>
 </OfficeApp>`;
-  res.type('application/xml').send(xml);
+    res.type('application/xml').send(minimalXml);
+  }
 });
 
 /* ---------- Admin Dashboard API ---------- */
@@ -435,6 +462,7 @@ app.post('/api/turn/steer', authenticate, async (req, res) => {
   try {
     const { turnId, text } = req.body;
     if (!turnId || !text) return res.status(400).json({ error: 'turnId e text sono richiesti' });
+    await turns.getTurnRefAsync(turnId);
     const item = turns.enqueueSteer(turnId, text);
     res.json({ ok: true, id: item.id, kind: item.kind });
   } catch (error) {
@@ -450,6 +478,7 @@ app.post('/api/turn/respond', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'turnId e requestId sono richiesti' });
     }
 
+    await turns.getTurnRefAsync(turnId);
     turns.respondToTurnRequest(turnId, requestId, response || {});
     res.json({ ok: true });
   } catch (error) {
@@ -465,6 +494,7 @@ app.post('/api/turn/respond-batch', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'turnId e responses[] sono richiesti' });
     }
 
+    await turns.getTurnRefAsync(turnId);
     const results = [];
     for (const entry of responses) {
       try {
@@ -488,6 +518,7 @@ app.post('/api/turn/action-result', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'turnId e taskId sono richiesti' });
     }
 
+    await turns.getTurnRefAsync(turnId);
     const result = turns.recordActionExecution(turnId, req.body || {});
     res.json({ ok: true, result });
   } catch (error) {
@@ -498,7 +529,11 @@ app.post('/api/turn/action-result', authenticate, async (req, res) => {
 
 app.get('/api/turn/stream/:turnId', authenticate, async (req, res) => {
   const { turnId } = req.params;
-  const turn = turns.loadTurn(turnId);
+  let turn = turns.loadTurn(turnId);
+  if (!turn) {
+    await turns.getTurnRefAsync(turnId);
+    turn = turns.loadTurn(turnId);
+  }
   if (!turn) return res.status(404).json({ error: 'Turn non trovato' });
 
   res.setHeader('Content-Type', 'text/event-stream');

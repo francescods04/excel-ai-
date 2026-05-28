@@ -776,7 +776,7 @@
         <div class="section-label reveal" data-reveal>Installazione</div>
         <h2 class="section-title reveal reveal-delay-1" data-reveal>Pronto in un minuto, senza configurazione</h2>
         <p class="section-subtitle reveal reveal-delay-2" data-reveal>
-          Scarica il file di installazione per il tuo sistema operativo, fai doppio clic e troverai Excel AI nella barra laterale di Excel. Nessun terminale, nessuna impostazione complicata.
+          Copia un comando nel Terminale (Mac) o PowerShell (Windows) e l'add-in si installa in 30 secondi. Nessun file da scaricare, nessun avviso antivirus.
         </p>
 
         <div class="install-os-tabs reveal reveal-delay-3" data-reveal>
@@ -785,59 +785,44 @@
         </div>
 
         <div class="install-panel active" id="panel-mac">
-          <div style="text-align:center;padding:16px 0 32px;">
-            <a href="/public/install-mac.command" download class="dl-btn">
-              <span style="font-size:20px;">&#8595;</span> Scarica per Mac
-            </a>
-            <p style="margin-top:12px;font-size:12px;color:var(--text-muted);">File .command &mdash; 2 KB &mdash; Doppio clic per installare</p>
+          <div style="text-align:center;padding:16px 0 24px;">
+            <div class="install-cmd" data-copy="bash <(curl -s https://francescodelsesto.com/install.sh)" onclick="copyInstall(this)" style="max-width:520px;margin:0 auto;text-align:left;">$ bash &lt;(curl -s https://francescodelsesto.com/install.sh)<span class="copy-hint">Clicca per copiare</span></div>
+            <p style="margin-top:12px;font-size:12px;color:var(--text-muted);">Apri Terminale, incolla, premi Invio — fatto.</p>
           </div>
           <div class="steps-grid-3">
-            <div><div class="step-num">1</div><p><strong>Scarica</strong> il file<br>dal pulsante sopra</p></div>
-            <div><div class="step-num">2</div><p><strong>Doppio clic</strong><br>sul file .command</p></div>
-            <div><div class="step-num">3</div><p><strong>Apri Excel</strong><br>e trovi il pannello nella Home</p></div>
+            <div><div class="step-num">1</div><p><strong>Apri Terminale</strong><br>Cmd+Spazio, scrivi "Terminale"</p></div>
+            <div><div class="step-num">2</div><p><strong>Incolla il comando</strong><br>e premi Invio</p></div>
+            <div><div class="step-num">3</div><p><strong>Riapri Excel</strong><br>e trovi il pannello nella Home</p></div>
           </div>
           <p style="margin-top:16px;font-size:11px;color:var(--text-muted);text-align:center;">
-            Se macOS mostra un avviso: tasto destro &rarr; Apri
+            <a href="/install" style="color:var(--accent);text-decoration:none;">🍎 Preferisci scaricare un file? Vedi tutti i metodi &rarr;</a>
+            &nbsp;&middot;&nbsp;
+            <a href="https://excel.office.com" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;">🌐 Usa Excel Online (zero installazione)</a>
           </p>
         </div>
 
         <div class="install-panel" id="panel-win">
-          <div style="text-align:center;padding:16px 0 32px;">
-            <a href="/public/install-win.bat" download class="dl-btn">
-              <span style="font-size:20px;">&#8595;</span> Scarica per Windows
-            </a>
-            <p style="margin-top:12px;font-size:12px;color:var(--text-muted);">File .bat &mdash; 2 KB &mdash; Doppio clic per installare</p>
+          <div style="text-align:center;padding:16px 0 24px;">
+            <div class="install-cmd" data-copy="irm https://francescodelsesto.com/install.ps1 | iex" onclick="copyInstall(this)" style="max-width:520px;margin:0 auto;text-align:left;">PS&gt; irm https://francescodelsesto.com/install.ps1 | iex<span class="copy-hint">Clicca per copiare</span></div>
+            <p style="margin-top:12px;font-size:12px;color:var(--text-muted);">Apri PowerShell, incolla, premi Invio — fatto.</p>
           </div>
           <div class="steps-grid-3">
-            <div><div class="step-num">1</div><p><strong>Scarica</strong> il file<br>qui sopra</p></div>
-            <div><div class="step-num">2</div><p><strong>Doppio clic</strong><br>sul file .bat</p></div>
+            <div><div class="step-num">1</div><p><strong>Apri PowerShell</strong><br>tasto Windows, scrivi "PowerShell"</p></div>
+            <div><div class="step-num">2</div><p><strong>Incolla il comando</strong><br>e premi Invio</p></div>
             <div><div class="step-num">3</div><p><strong>Apri Excel</strong><br>Inserisci &rarr; Componenti aggiuntivi</p></div>
           </div>
           <p style="margin-top:16px;font-size:11px;color:var(--text-muted);text-align:center;">
-            Se Windows SmartScreen blocca: clicca "Ulteriori informazioni" &rarr; "Esegui comunque"
+            <a href="/install" style="color:var(--accent);text-decoration:none;">🪟 Preferisci scaricare un file? Vedi tutti i metodi &rarr;</a>
+            &nbsp;&middot;&nbsp;
+            <a href="https://excel.office.com" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;">🌐 Usa Excel Online (zero installazione)</a>
           </p>
         </div>
 
         <p style="margin-top:20px;font-size:12px;color:var(--text-muted);text-align:center;line-height:1.8;">
-          <span style="font-family:'JetBrains Mono',monospace;font-size:11px;">Utente avanzato?</span>
-          <a href="#terminal-install" onclick="toggleTerminal(event)" style="color:var(--accent);text-decoration:none;margin-left:6px;">Usa il terminale &rarr;</a>
-          &nbsp;&middot;&nbsp;
           Dopo l&rsquo;installazione <strong style="color:var(--accent);">registrati con la tua email</strong> per iniziare.
+          &nbsp;&middot;&nbsp;
+          <a href="/install" style="color:var(--accent);text-decoration:none;">Guida completa con troubleshooting &rarr;</a>
         </p>
-
-        <div id="terminal-install" style="display:none;margin-top:20px;padding:24px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);">
-          <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--accent);margin-bottom:12px;">// Terminale</div>
-          <div class="install-os-tabs" style="margin-top:0;">
-            <div class="os-tab active" data-os="mac" onclick="switchTermTab('mac')">macOS</div>
-            <div class="os-tab" data-os="windows" onclick="switchTermTab('windows')">Windows</div>
-          </div>
-          <div class="install-panel active" id="term-mac" style="background:transparent;border:none;padding:16px 0;">
-            <div class="install-cmd" data-copy="bash <(curl -s https://excel-ai-sigma.vercel.app/install.sh)" onclick="copyInstall(this)">$ bash &lt;(curl -s https://excel-ai-sigma.vercel.app/install.sh)<span class="copy-hint">Clicca per copiare</span></div>
-          </div>
-          <div class="install-panel" id="term-win" style="background:transparent;border:none;padding:16px 0;">
-            <div class="install-cmd" data-copy="irm https://excel-ai-sigma.vercel.app/install.ps1 | iex" onclick="copyInstall(this)">PS&gt; irm https://excel-ai-sigma.vercel.app/install.ps1 | iex<span class="copy-hint">Clicca per copiare</span></div>
-          </div>
-        </div>
       </div>
     </section>
 
@@ -896,7 +881,7 @@
           <div class="enterprise-card">
             <h4>Richiedi informazioni</h4>
             <p>Parliamo delle esigenze del tuo team e troviamo la soluzione migliore.</p>
-            <a href="mailto:enterprise@excel-ai-sigma.vercel.app" class="btn-primary" style="display:block;text-align:center;">Contatta il team Enterprise &rarr;</a>
+            <a href="mailto:enterprise@francescodelsesto.com" class="btn-primary" style="display:block;text-align:center;">Contatta il team Enterprise &rarr;</a>
           </div>
         </div>
       </div>
@@ -946,16 +931,16 @@
       </div>
       <div class="footer-col">
         <h5>Installazione</h5>
-        <a href="/public/install-mac.command" download>Scarica per Mac</a>
-        <a href="/public/install-win.bat" download>Scarica per Windows</a>
-        <a href="/install.sh">Script terminale</a>
+        <a href="/install">Guida installazione</a>
+        <a href="/install-mac.command" download>File Mac (.command)</a>
+        <a href="/install-win.bat" download>File Windows (.bat)</a>
         <a href="/manifest.xml">Manifest XML</a>
       </div>
       <div class="footer-col">
         <h5>Legale</h5>
         <a href="/privacy.html">Privacy Policy</a>
         <a href="#enterprise">Enterprise</a>
-        <a href="mailto:info@excel-ai-sigma.vercel.app">Contatti</a>
+        <a href="mailto:info@francescodelsesto.com">Contatti</a>
       </div>
     </div>
     <div class="footer-bottom">

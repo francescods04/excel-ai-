@@ -111,6 +111,29 @@ function _getTurnRef(turnId) {
   return turn;
 }
 
+// Async fallback: try to load from Supabase when not in memory/disk.
+// Critical for serverless deployments where instances don't share filesystem.
+async function hydrateTurnFromSupabase(turnId) {
+  try {
+    const { getSupabase } = require('../supabase/client');
+    const supabase = getSupabase();
+    const { data, error } = await supabase.from('turns').select('full_json').eq('id', turnId).single();
+    if (error || !data?.full_json) return null;
+    const turn = typeof data.full_json === 'string' ? JSON.parse(data.full_json) : data.full_json;
+    activeTurns.set(turnId, turn);
+    logger.info(`[Turns] Hydrated turn ${turnId} from Supabase`);
+    return turn;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function getTurnRefAsync(turnId) {
+  const local = _getTurnRef(turnId);
+  if (local) return local;
+  return hydrateTurnFromSupabase(turnId);
+}
+
 // Public: returns immutable clone for external consumers (API responses, etc.)
 function loadTurn(turnId) {
   const turn = _getTurnRef(turnId);
@@ -175,6 +198,7 @@ function saveTurn(turn) {
       created_at: turn.createdAt,
       completed_at: (turn.status === 'completed' || turn.status === 'error') ? nowIso() : null,
       total_latency_ms: turn.totalLatencyMs || null,
+      full_json: turn
     }).then(({ error }) => {
       if (error) logger.warn(`[Turn] Supabase save error for ${turn.id}: ${error.message}`);
     });
@@ -2447,5 +2471,7 @@ module.exports = {
   undoTurn,
   enqueueSteer,
   drainSteerQueue,
-  classifySteerKind
+  classifySteerKind,
+  getTurnRefAsync,
+  hydrateTurnFromSupabase
 };

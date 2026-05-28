@@ -2526,6 +2526,9 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       };
     }
     case 'delete_sheet': {
+      if (!params.name || typeof params.name !== 'string') {
+        return { error: 'delete_sheet: parametro "name" (nome del foglio) è obbligatorio e deve essere una stringa.' };
+      }
       return {
         actions: [{ type: 'deleteSheet', name: params.name }]
       };
@@ -2799,20 +2802,16 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
           };
         } catch (err) {
           const msg = err && err.message ? err.message : String(err);
-          // Fall through to legacy fire-and-forget on transport failure
-          logger.warn(`[AgentLoop] execute_office_js RPC failed (${msg}); falling back to legacy action dispatch`);
+          logger.warn(`[AgentLoop] execute_office_js RPC failed (${msg})`);
           return {
-            actions: [{ type: 'runJavaScript', code: params.code }],
-            _message: `execute_office_js dispatched via legacy action (RPC failed: ${msg}). Result values are NOT returned in this path.`
+            error: `execute_office_js failed: ${msg}. The runJavaScript tool may be unavailable on this client. Use structured tools (set_cell_range, create_sheet, set_format) instead.`,
+            _message: `execute_office_js RPC failed: ${msg}. Use structured tools instead.`
           };
         }
       }
-      // Legacy fire-and-forget when no client channel is available (e.g. server-only test harness).
+      // No client channel available — cannot execute Office.js code.
       return {
-        actions: [{
-          type: 'runJavaScript',
-          code: params.code
-        }]
+        error: 'execute_office_js: no client channel available. Use structured tools (set_cell_range, create_sheet, set_format) instead.'
       };
     }
     case 'context_snip': {

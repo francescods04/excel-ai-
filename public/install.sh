@@ -1,55 +1,33 @@
 #!/bin/bash
-# Excel AI — macOS Installer
-# bash <(curl -s https://excel-ai-sigma.vercel.app/install.sh)
+# Excel AI — macOS Installer (via curl)
+# bash <(curl -s https://francescodelsesto.com/install.sh)
 
+BASE_URL="${1:-https://francescodelsesto.com}"
 MANIFEST_DIR="$HOME/Library/Containers/com.microsoft.Excel/Data/Documents/wef"
 MANIFEST_FILE="$MANIFEST_DIR/manifest.xml"
 
-mkdir -p "$MANIFEST_DIR"
-
-BASE_URL="${1:-https://excel-ai-sigma.vercel.app}"
-APP_DOMAIN=$(echo "$BASE_URL" | sed -E 's|^https?://||')
-
 echo ""
-echo "  Excel AI — Assistente per commercialisti e CPA"
+echo "  AI Agent for Excel"
 echo "  $BASE_URL"
 echo ""
 
-MANIFEST="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<OfficeApp
-  xmlns=\"http://schemas.microsoft.com/office/appforoffice/1.1\"
-  xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"
-  xsi:type=\"TaskPaneApp\">
-  <Id>$(uuidgen 2>/dev/null || echo "a1b2c3d4-e5f6-7890-abcd-ef1234567890")</Id>
-  <Version>1.0.0.0</Version>
-  <ProviderName>Excel AI</ProviderName>
-  <DefaultLocale>it-IT</DefaultLocale>
-  <DisplayName DefaultValue=\"Excel AI\"/>
-  <Description DefaultValue=\"Assistente AI per commercialisti e CPA\"/>
-  <IconUrl DefaultValue=\"$BASE_URL/assets/icon-32.png\"/>
-  <HighResolutionIconUrl DefaultValue=\"$BASE_URL/assets/icon-80.png\"/>
-  <AppDomains>
-    <AppDomain>$APP_DOMAIN</AppDomain>
-  </AppDomains>
-  <Hosts>
-    <Host Name=\"Workbook\"/>
-  </Hosts>
-  <DefaultSettings>
-    <SourceLocation DefaultValue=\"$BASE_URL/src/taskpane.html\"/>
-  </DefaultSettings>
-  <Permissions>ReadWriteDocument</Permissions>
-</OfficeApp>"
+mkdir -p "$MANIFEST_DIR"
 
-echo "$MANIFEST" > "$MANIFEST_FILE"
+# Scarica il manifest COMPLETO dal server (include VersionOverrides, icone, ribbon)
+curl -fsSL "$BASE_URL/manifest.xml" -o "$MANIFEST_FILE" 2>/dev/null
 
 if [ -f "$MANIFEST_FILE" ]; then
   echo "  [OK] Add-in installato!"
-  echo "  Apri Excel → tab Home → Excel AI"
+  echo ""
+  echo "  📌 Prossimi passi:"
+  echo "     1. Chiudi Excel (Cmd+Q)"
+  echo "     2. Riapri Excel"
+  echo "     3. Cerca \"AI Agent for Excel\" nella tab Home"
   echo ""
   if pgrep -iq microsoft.excel; then
-    echo "  Excel è aperto. Riavvia per vedere l'add-in."
+    echo "  ⚠️  Excel è aperto. Chiudilo e riaprilo per vedere l'add-in."
   fi
 else
-  echo "  ERRORE: impossibile scrivere il manifest."
+  echo "  ERRORE: impossibile scaricare il manifest da $BASE_URL"
   exit 1
 fi
