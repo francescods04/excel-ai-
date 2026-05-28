@@ -1909,7 +1909,16 @@ async function runAgentLoop(objective, context, options = {}) {
 
       // Append tool result — bounded by AGENT_TOOL_RESULT_MAX_CHARS to keep
       // the prompt size predictable across long iterations.
-      const resultMsg = formatToolResultForMessages(toolResult, toolName);
+      // Strip the `actions` array before serializing for the LLM: the model
+      // emitted those itself one iteration ago, the client already received
+      // them on the dedicated 'actions' SSE channel, and they can balloon
+      // the prompt by several KB per write (bulk_set_cell_ranges can carry
+      // 16 nested cell maps). The model only needs the summary fields
+      // (ok, applied, sheets, cellsTotal, errors).
+      const toolResultForMessages = (toolResult && typeof toolResult === 'object' && Array.isArray(toolResult.actions))
+        ? { ...toolResult, actions: undefined, _actionCount: toolResult.actions.length }
+        : toolResult;
+      const resultMsg = formatToolResultForMessages(toolResultForMessages, toolName);
       messages.push(makeUserMessage(resultMsg));
       onEvent('toolResult', { iteration, tool: toolName, result: toolResult });
 
