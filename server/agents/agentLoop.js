@@ -8,6 +8,26 @@ const { validateTaskOutput } = require('./critic');
 const streaming = require('./streaming');
 const { initializeTools } = require('../utils/toolSearch');
 const { detectSkills } = require('../utils/skillSuggest');
+const clientReadCache = require('../utils/clientReadCache');
+
+// Tools that mutate the workbook. After any of these runs, the per-agent
+// workbook-read cache must be invalidated so the next read sees fresh state.
+const MUTATION_TOOLS = new Set([
+  'set_cell_range',
+  'execute_office_js',
+  'execute_python',
+  'create_sheet',
+  'rename_sheet',
+  'delete_sheet',
+  'duplicate_sheet',
+  'copy_range',
+  'create_named_range',
+  'execute_excel_formula',
+  'set_format',
+  'add_chart',
+  'suspend_calculation',
+  'resume_calculation'
+]);
 
 const AGENT_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT_AGENT || 'high';
 const AGENT_THINKING_FIRST_ITER = process.env.AGENT_THINKING_FIRST_ITER !== 'false';
@@ -1628,6 +1648,15 @@ async function runAgentLoop(objective, context, options = {}) {
       if (toolName === 'execute_python') {
         codeLog.push({ type: 'python', code: params.code, result: toolResult });
         onEvent('codeLog', { code: params.code, result: toolResult });
+      }
+
+      // Invalidate workbook-read cache after any mutation so the next read
+      // crosses the wire instead of returning a pre-write snapshot.
+      if (MUTATION_TOOLS.has(toolName) && options.agentId) {
+        try {
+          const n = clientReadCache.invalidate(options.agentId);
+          if (n > 0) logger.info(`[AgentLoop] read cache invalidated (${n} entries) after ${toolName}`);
+        } catch (_) { /* defensive — cache is optional */ }
       }
 
       results.push({ type: 'tool', tool: toolName, params, result: toolResult });

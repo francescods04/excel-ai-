@@ -828,16 +828,52 @@ function getOrCreateAgentRequests(agentId) {
   return m;
 }
 
+// Per-tool timeouts (ms). Tunable via env CLIENT_TOOL_TIMEOUT_<TOOL_NAME>
+// (uppercased, dots/dashes replaced with underscores). Defaults below.
+const CLIENT_TOOL_DEFAULT_TIMEOUT_MS = Number(process.env.CLIENT_TOOL_DEFAULT_TIMEOUT_MS) || 30000;
+const CLIENT_TOOL_TIMEOUTS_MS = {
+  'workbook.readRange': 8000,
+  'workbook.readSheet': 12000,
+  'workbook.readWorkbook': 20000,
+  'workbook.listNamedRanges': 5000,
+  'runJavaScript': 60000
+};
+
+function getClientToolTimeout(toolName) {
+  const envKey = `CLIENT_TOOL_TIMEOUT_${String(toolName).toUpperCase().replace(/[.\-]/g, '_')}`;
+  if (process.env[envKey]) {
+    const v = Number(process.env[envKey]);
+    if (Number.isFinite(v) && v > 0) return v;
+  }
+  return CLIENT_TOOL_TIMEOUTS_MS[toolName] || CLIENT_TOOL_DEFAULT_TIMEOUT_MS;
+}
+
+const clientReadCache = require('./utils/clientReadCache');
+
 function makeRequestClientTool(agentId) {
   return async (toolName, params) => {
+    // DataLoader-style cache: serve idempotent workbook reads from cache
+    // if a recent identical request hit the wire. Invalidated by agentLoop
+    // whenever a mutation runs.
+    const cached = clientReadCache.get(agentId, toolName, params);
+    if (cached !== null) return cached;
+
     return new Promise((resolve, reject) => {
       const requestId = 'cr-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
       const agentRequests = getOrCreateAgentRequests(agentId);
+      const timeoutMs = getClientToolTimeout(toolName);
       const timeout = setTimeout(() => {
         agentRequests.delete(requestId);
-        reject(new Error(`Client read timeout (30s) for ${toolName}`));
-      }, 30000);
-      agentRequests.set(requestId, { resolve, reject, timeout });
+        reject(new Error(`Client read timeout (${timeoutMs}ms) for ${toolName}`));
+      }, timeoutMs);
+      agentRequests.set(requestId, {
+        resolve: (value) => {
+          clientReadCache.set(agentId, toolName, params, value);
+          resolve(value);
+        },
+        reject,
+        timeout
+      });
 
       streaming.sendEvent(agentId, 'toolRequestBatch', {
         requests: [{ id: requestId, toolName, params }]
