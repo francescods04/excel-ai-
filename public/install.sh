@@ -5,6 +5,8 @@
 BASE_URL="${1:-https://francescodelsesto.com}"
 MANIFEST_DIR="$HOME/Library/Containers/com.microsoft.Excel/Data/Documents/wef"
 MANIFEST_FILE="$MANIFEST_DIR/manifest.xml"
+ADDIN_ID="1c7b92c5-2c4d-4b1e-9f3a-8e2d5f4c3a2b"
+ADDIN_MANIFEST_FILE="$MANIFEST_DIR/$ADDIN_ID.manifest.xml"
 
 echo ""
 echo "  AI Agent for Excel"
@@ -15,8 +17,14 @@ mkdir -p "$MANIFEST_DIR"
 
 # Scarica il manifest COMPLETO dal server (include VersionOverrides, icone, ribbon)
 curl -fsSL "$BASE_URL/manifest.xml" -o "$MANIFEST_FILE" 2>/dev/null
+cp "$MANIFEST_FILE" "$ADDIN_MANIFEST_FILE" 2>/dev/null
 
-if [ -f "$MANIFEST_FILE" ]; then
+if [ -f "$MANIFEST_FILE" ] && [ -f "$ADDIN_MANIFEST_FILE" ]; then
+  WEF_CACHE="$HOME/Library/Containers/com.microsoft.Excel/Data/Library/Application Support/Microsoft/Office/16.0/Wef"
+  if [ -d "$WEF_CACHE" ]; then
+    find "$WEF_CACHE" -path "*/Manifests/${ADDIN_ID}_*" -type f -exec cp "$MANIFEST_FILE" {} \; 2>/dev/null
+  fi
+
   echo "  [OK] Add-in installato!"
   echo ""
   echo "  📌 Prossimi passi:"
