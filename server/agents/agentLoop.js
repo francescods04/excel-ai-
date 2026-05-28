@@ -948,6 +948,75 @@ function truncateMatrix(value, maxRows, maxCols) {
   );
 }
 
+// Recursively trim very long arrays while preserving shape so the LLM can
+// still reason about structure (head + tail with explicit "truncated" marker).
+function trimDeepArrays(value, opts) {
+  const maxItems = opts && opts.maxItems > 0 ? opts.maxItems : 12;
+  const maxDepth = opts && opts.maxDepth > 0 ? opts.maxDepth : 8;
+  function walk(v, depth) {
+    if (depth > maxDepth) return v;
+    if (Array.isArray(v)) {
+      if (v.length <= maxItems) return v.map(item => walk(item, depth + 1));
+      const headCount = Math.max(1, Math.floor(maxItems * 0.75));
+      const tailCount = Math.max(1, maxItems - headCount - 1);
+      const head = v.slice(0, headCount).map(item => walk(item, depth + 1));
+      const tail = v.slice(v.length - tailCount).map(item => walk(item, depth + 1));
+      const marker = { _truncated: true, _droppedItems: v.length - headCount - tailCount, _originalLength: v.length };
+      return [...head, marker, ...tail];
+    }
+    if (v && typeof v === 'object') {
+      const out = Array.isArray(v) ? [] : {};
+      for (const k of Object.keys(v)) {
+        out[k] = walk(v[k], depth + 1);
+      }
+      return out;
+    }
+    return v;
+  }
+  return walk(value, 0);
+}
+
+// Format a tool result for injection into the agent message history with a hard size cap.
+// Strategy:
+//   1) Honor _message override if the tool provides one.
+//   2) If the compact JSON fits, use indented JSON (readable).
+//   3) If too large, recursively trim long arrays and try again.
+//   4) Last resort: hard truncate the compact JSON with an explicit marker.
+function formatToolResultForMessages(toolResult, toolName, opts = {}) {
+  if (toolResult && toolResult._message) {
+    const msg = String(toolResult._message);
+    const cap = Number(opts.maxChars) || Number(process.env.AGENT_TOOL_RESULT_MAX_CHARS) || 12000;
+    return msg.length > cap ? msg.slice(0, cap) + `\n...[truncated ${msg.length - cap} chars]` : msg;
+  }
+  const cap = Number(opts.maxChars) || Number(process.env.AGENT_TOOL_RESULT_MAX_CHARS) || 12000;
+  let compact;
+  try { compact = JSON.stringify(toolResult); } catch (_) { compact = String(toolResult); }
+  if (compact == null) compact = 'null';
+  if (compact.length <= cap) {
+    try {
+      return `Tool result for ${toolName}:\n${JSON.stringify(toolResult, null, 2)}`;
+    } catch (_) {
+      return `Tool result for ${toolName}:\n${compact}`;
+    }
+  }
+  // Try array trimming
+  try {
+    const trimmed = trimDeepArrays(toolResult, { maxItems: 10 });
+    const trimmedJson = JSON.stringify(trimmed, null, 2);
+    if (trimmedJson.length <= cap) {
+      return `Tool result for ${toolName} (long arrays truncated; head + tail kept):\n${trimmedJson}`;
+    }
+    // Aggressive trim
+    const aggressive = trimDeepArrays(toolResult, { maxItems: 5, maxDepth: 6 });
+    const aggressiveJson = JSON.stringify(aggressive, null, 2);
+    if (aggressiveJson.length <= cap) {
+      return `Tool result for ${toolName} (arrays aggressively truncated):\n${aggressiveJson}`;
+    }
+  } catch (_) { /* fall through to hard cap */ }
+  // Hard cap on compact form
+  return `Tool result for ${toolName} [HARD-TRUNCATED ${compact.length} -> ${cap} chars; the original was too large to fit the agent context]:\n${compact.slice(0, cap)}\n...[truncated]`;
+}
+
 function compactAgentContext(context) {
   if (!context || typeof context !== 'object') return {};
   const out = {
@@ -1526,10 +1595,9 @@ async function runAgentLoop(objective, context, options = {}) {
       consecutiveErrors = 0;
       lastErrorMessage = '';
 
-      // Append tool result — use _message if provided, otherwise JSON
-      const resultMsg = toolResult && toolResult._message
-        ? toolResult._message
-        : `Tool result for ${toolName}:\n${JSON.stringify(toolResult, null, 2)}`;
+      // Append tool result — bounded by AGENT_TOOL_RESULT_MAX_CHARS to keep
+      // the prompt size predictable across long iterations.
+      const resultMsg = formatToolResultForMessages(toolResult, toolName);
       messages.push(makeUserMessage(resultMsg));
       onEvent('toolResult', { iteration, tool: toolName, result: toolResult });
 
@@ -2384,5 +2452,7 @@ module.exports = {
   buildToolStagnationSignature,
   detectToolStagnation,
   formatToolStagnationReason,
-  executeAgentTool
+  executeAgentTool,
+  formatToolResultForMessages,
+  trimDeepArrays
 };
