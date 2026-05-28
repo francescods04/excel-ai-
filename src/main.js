@@ -42,10 +42,19 @@ const btnCancelPlan = document.getElementById('btn-cancel-plan');
 const btnRequestPrimary = document.getElementById('btn-request-primary');
 const btnRequestSecondary = document.getElementById('btn-request-secondary');
 const modelSelect = document.getElementById('model-select');
+const speedModeSelect = document.getElementById('speed-mode-select');
 const scrollBottomBtn = document.getElementById('scroll-bottom-btn');
 const themeToggle = document.getElementById('theme-toggle');
 const restartBtn = document.getElementById('restart-btn');
 const pendingQuestionBanner = document.getElementById('pending-question-banner');
+
+function getSelectedSpeedMode() {
+  try {
+    const v = speedModeSelect && speedModeSelect.value;
+    if (v === 'fast' || v === 'pro' || v === 'balanced') return v;
+  } catch (_) {}
+  return 'balanced';
+}
 
 function showActionsPreview(actions) {
   actionsList.innerHTML = actions.map(a =>
@@ -615,7 +624,8 @@ async function runTurnMode(text) {
       forgetAll();
     }
 
-    const startData = await startTurn(text, context, modelSelect.value, parentTurnId);
+    const speedMode = getSelectedSpeedMode();
+    const startData = await startTurn(text, context, modelSelect.value, parentTurnId, speedMode);
     state.currentTurnId = startData.turnId;
     state.lastTurnId = startData.turnId;
     state.lastContextFingerprint = currentFingerprint;

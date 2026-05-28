@@ -26,7 +26,9 @@ const { generateBlueprint } = require('../agents/architect');
 const { runParallelBlueprint } = require('../agents/parallelOrchestrator');
 const { runWithExecutionContext } = require('../utils/executionContext');
 
-const TURNS_DIR = path.join(__dirname, '..', 'turns');
+const TURNS_DIR = process.env.DATA_DIR
+  ? path.join(process.env.DATA_DIR, 'turns')
+  : path.join(__dirname, '..', 'turns');
 
 try {
   if (!fs.existsSync(TURNS_DIR)) {
@@ -670,6 +672,15 @@ function buildTurn(message, context, parentTurnId = null, options = {}) {
     ? { ...options.strategy }
     : null;
 
+  // User-facing speed-mode preset (fast | balanced | pro). Translates to
+  // modelOverride + thinking + post-write critic; bench-validated 2026-05-28.
+  const speedMode = options.speedMode || 'balanced';
+  const speedModeFlags = {
+    speedMode,
+    thinkingDisabled: options.thinkingDisabled === true ? true : null,
+    postWriteCritic: options.postWriteCritic === false ? false : true
+  };
+
   return {
     id: turnId,
     userId: options.userId || null,
@@ -680,6 +691,7 @@ function buildTurn(message, context, parentTurnId = null, options = {}) {
       modelOverride: options.modelOverride || null,
       plannerModelOverride: options.plannerModelOverride || null
     },
+    speedMode: speedModeFlags,
     status: 'planning',
     error: null,
     plan: null,
@@ -1333,7 +1345,25 @@ async function planTurn(turnId) {
       appendLog(turnId, `Triage: ${triage.complexity}, mode=${triage.mode}, ~${triage.estimated_iterations} iter (${triage.reasoning})`, 'info');
       streaming.sendEvent(turnId, 'triageDecision', triage);
 
-      if (triage.mode === 'architect_then_parallel') {
+      // BENCH-VALIDATED ROUTING (2026-05-28): agent_loop with bulk tools
+      // completed a 1000-row LBO template in 254s, while architect_parallel
+      // consistently timed out (60s blueprint cap) and fell back to a 100s+
+      // deep planner producing 31 granular tasks. Until architect/deep-plan
+      // are faster, route every triage tier to agent_loop and just rescale
+      // the iteration budget. Set FORCE_AGENT_LOOP=false to restore the old
+      // architect/deep-plan paths.
+      const FORCE_AGENT_LOOP = process.env.FORCE_AGENT_LOOP !== 'false';
+      if (FORCE_AGENT_LOOP) {
+        strategy = chooseTurnStrategy(turn.objective, turn.context, turn.parentTurnId);
+        strategy.mode = 'agent_loop';
+        strategy.label = `Agent loop (triage: ${triage.complexity})`;
+        strategy.reason = `agent_loop preferred for ${triage.complexity}: ${triage.reasoning}`;
+        strategy.promptVariant = strategy.promptVariant || 'default';
+        // Generous budget; agent_loop itself has stagnation/error breakers
+        strategy.maxIterations = Math.max(strategy.maxIterations || 45, triage.estimated_iterations * 2);
+        strategy.allowEscalation = false;
+        strategy.triage = triage;
+      } else if (triage.mode === 'architect_then_parallel') {
         strategy = {
           mode: 'architect_parallel',
           label: 'Architect + parallel workers',
@@ -1931,14 +1961,20 @@ async function executeAgentLoopTurn(turnId) {
   };
 
   try {
+    const speedModeFlags = turn.speedMode || {};
     const agentResult = await runAgentLoop(turn.objective, context, {
       turnId,
+      agentId: turnId,
       modelOverride: turn.llm?.modelOverride || undefined,
       promptVariant: strategy.promptVariant || 'fast',
       // When the strategy / triage didn't ask for a cap, pass through
       // undefined so agentLoop applies its own unbounded default (relies on
       // stagnation + consecutive-error breakers). Explicit caps still win.
       maxIterations: strategy.maxIterations || undefined,
+      // Speed-mode flags from /api/turn/start route. Honored only when set;
+      // null/undefined leaves agentLoop's own defaults intact.
+      forceThinkingDisabled: speedModeFlags.thinkingDisabled === true ? true : null,
+      postWriteCriticEnabled: speedModeFlags.postWriteCritic !== false,
       onEvent,
       requestClientTool: runtime.requestClientTool,
       requestQuestion: (questions) => runtime.requestQuestion(questions, {

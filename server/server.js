@@ -430,13 +430,35 @@ app.get('/admin', optionalAuth, (req, res) => {
 
 app.post('/api/turn/start', authenticate, quotaCheck, async (req, res) => {
   try {
-    const { message, context, parentTurnId, modelOverride } = req.body;
+    const { message, context, parentTurnId, modelOverride, speedMode } = req.body;
     if (!message) return res.status(400).json({ error: 'Messaggio richiesto' });
 
-    const turn = turns.startTurn(message, context, parentTurnId || null, { modelOverride, userId: req.userId });
+    // Map user-facing speed mode to a concrete strategy preset.
+    // Validated against bench/runtime_mode_compare.js (2026-05-28):
+    //   fast     : flash, thinking off  -> ~280s, 9 sheets (lighter quality)
+    //   balanced : flash, smart thinking, post-write critic -> 254s, 10 sheets
+    //   pro      : pro,   smart thinking, post-write critic -> 523s, 10 sheets (verbose reasoning)
+    function speedModeStrategyOverlay(mode) {
+      const m = String(mode || '').toLowerCase().trim();
+      if (m === 'fast') return { speedMode: 'fast', modelOverride: process.env.AGENT_LOOP_FAST_MODEL || 'deepseek-v4-flash', thinkingDisabled: true, postWriteCritic: false };
+      if (m === 'pro') return { speedMode: 'pro', modelOverride: process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro', thinkingDisabled: false, postWriteCritic: true };
+      // default + 'balanced'
+      return { speedMode: 'balanced', modelOverride: null, thinkingDisabled: null, postWriteCritic: true };
+    }
+    const overlay = speedModeStrategyOverlay(speedMode);
+    const effectiveModelOverride = modelOverride || overlay.modelOverride || undefined;
+
+    const turn = turns.startTurn(message, context, parentTurnId || null, {
+      modelOverride: effectiveModelOverride,
+      userId: req.userId,
+      speedMode: overlay.speedMode,
+      thinkingDisabled: overlay.thinkingDisabled,
+      postWriteCritic: overlay.postWriteCritic
+    });
     res.json({
       turnId: turn.id,
-      status: turn.status
+      status: turn.status,
+      speedMode: overlay.speedMode
     });
   } catch (error) {
     logger.error('Errore turn/start:', error.message);
@@ -731,7 +753,9 @@ app.get('/api/skills/:name', (req, res) => {
 });
 
 /* ---------- Settings API ---------- */
-const SETTINGS_PATH = path.join(__dirname, '..', 'docs', 'user-settings.json');
+const SETTINGS_PATH = process.env.DATA_DIR
+  ? path.join(process.env.DATA_DIR, 'user-settings.json')
+  : path.join(__dirname, '..', 'docs', 'user-settings.json');
 
 function loadSettings() {
   try {
@@ -1115,7 +1139,9 @@ app.get('/api/agent/:agentId', (req, res) => {
 /* ---------- Avvio server ---------- */
 
 function cleanOldTurns() {
-  const turnsDir = path.join(__dirname, 'turns');
+  const turnsDir = process.env.DATA_DIR
+    ? path.join(process.env.DATA_DIR, 'turns')
+    : path.join(__dirname, 'turns');
   const maxFiles = Number(process.env.MAX_TURN_FILES) || 100;
   try {
     if (!fs.existsSync(turnsDir)) return;

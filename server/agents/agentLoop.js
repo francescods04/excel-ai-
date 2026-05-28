@@ -1625,12 +1625,16 @@ async function runAgentLoop(objective, context, options = {}) {
     }
 
     try {
-      const useThinking = shouldUseAgentThinking(iteration, {
-        forceThinkingNext,
-        consecutiveErrors,
-        parseFailureStreak,
-        lastToolName: recentToolTrail.length > 0 ? recentToolTrail[recentToolTrail.length - 1].toolName : null
-      });
+      // Caller can hard-disable thinking for "fast" mode regardless of the
+      // smart gate (used by the user-facing speedMode=fast preset).
+      const useThinking = options.forceThinkingDisabled === true
+        ? false
+        : shouldUseAgentThinking(iteration, {
+            forceThinkingNext,
+            consecutiveErrors,
+            parseFailureStreak,
+            lastToolName: recentToolTrail.length > 0 ? recentToolTrail[recentToolTrail.length - 1].toolName : null
+          });
       const turnId = options.turnId || options.agentId;
       const callOpts = {
         messages,
@@ -1903,9 +1907,10 @@ async function runAgentLoop(objective, context, options = {}) {
       // write actions, looking for obvious formula syntax errors or literal
       // error markers (#REF/#VALUE/#NAME/#DIV0). When it flags something, the
       // finding is injected as a user message so the next iteration can fix
-      // it without waiting for a downstream verify. Default off — opt-in via
-      // AGENT_POSTWRITE_CRITIC=true.
-      if (AGENT_POSTWRITE_CRITIC && POSTWRITE_CRITIC_TOOLS.has(toolName) && Array.isArray(toolResult?.actions) && toolResult.actions.length > 0) {
+      // it without waiting for a downstream verify. Per-turn flag wins over
+      // the AGENT_POSTWRITE_CRITIC env default.
+      const postWriteCriticOn = (options.postWriteCriticEnabled === true) || (options.postWriteCriticEnabled !== false && AGENT_POSTWRITE_CRITIC);
+      if (postWriteCriticOn && POSTWRITE_CRITIC_TOOLS.has(toolName) && Array.isArray(toolResult?.actions) && toolResult.actions.length > 0) {
         try {
           const critique = await runPostWriteCritic(toolName, toolResult.actions);
           if (critique && Array.isArray(critique.issues) && critique.issues.length > 0) {

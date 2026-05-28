@@ -7,11 +7,11 @@ function authHeaders(headers = {}) {
   return headers;
 }
 
-async function startTurn(message, context, modelOverride, parentTurnId = null) {
+async function startTurn(message, context, modelOverride, parentTurnId = null, speedMode = null) {
   const res = await fetch(`${API_BASE}/api/turn/start`, {
     method: 'POST',
     headers: authHeaders({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ message, context, modelOverride, parentTurnId })
+    body: JSON.stringify({ message, context, modelOverride, parentTurnId, speedMode })
   });
   if (!res.ok) {
     throw new Error(await getErrorMessageFromResponse(res, 'Errore avvio turn'));
