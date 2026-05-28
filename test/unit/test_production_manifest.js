@@ -77,6 +77,18 @@ test('inferPublicBaseUrl prefers Vercel URL when present', () => {
   );
 });
 
+test('inferPublicBaseUrl prefers public request host over Vercel deployment URL', () => {
+  assert.strictEqual(
+    inferPublicBaseUrl({
+      headers: {
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': 'francescodelsesto.com'
+      }
+    }, { VERCEL_URL: 'excel-ai.vercel.app' }),
+    'https://francescodelsesto.com'
+  );
+});
+
 test('inferPublicBaseUrl keeps local development on http', () => {
   assert.strictEqual(
     inferPublicBaseUrl({ headers: { host: 'localhost:3000' }, protocol: 'http' }, {}),

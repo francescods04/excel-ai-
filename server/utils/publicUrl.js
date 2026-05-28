@@ -43,10 +43,9 @@ function inferPublicBaseUrl(req, env = process.env) {
   const headers = req?.headers || {};
   const host = firstHeaderValue(headers['x-forwarded-host']) || firstHeaderValue(headers.host);
   const configured = explicitPublicUrlFromEnv(env);
-  const vercelUrl = vercelPublicUrlFromEnv(env);
-  const configuredIsStaleLocal = isLocalBaseUrl(configured) && (vercelUrl || (host && !isLocalHost(host)));
+  const hasPublicHost = host && !isLocalHost(host);
+  const configuredIsStaleLocal = isLocalBaseUrl(configured) && hasPublicHost;
   if (configured && !configuredIsStaleLocal) return configured;
-  if (vercelUrl) return vercelUrl;
 
   if (!host) return `http://localhost:${env.PORT || 3000}`;
 
@@ -54,7 +53,10 @@ function inferPublicBaseUrl(req, env = process.env) {
     || req?.protocol
     || (isLocalHost(host) ? 'http' : 'https');
 
-  return trimBaseUrl(`${proto}://${host}`);
+  if (hasPublicHost) return trimBaseUrl(`${proto}://${host}`);
+
+  const vercelUrl = vercelPublicUrlFromEnv(env);
+  return vercelUrl || trimBaseUrl(`${proto}://${host}`);
 }
 
 module.exports = {
