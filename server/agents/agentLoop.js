@@ -1643,7 +1643,17 @@ async function runAgentLoop(objective, context, options = {}) {
         label: `AgentLoop iter ${iteration}`,
         modelOverride: modelForRun,
         thinkingDisabled: !useThinking,
-        reasoningEffort: useThinking ? (process.env.DEEPSEEK_REASONING_EFFORT || 'high') : AGENT_REASONING_EFFORT
+        // Tiered reasoning_effort for thinking iter:
+        //   - 'high' only when recovering from an error / parse failure
+        //     (the model explicitly NEEDS more deliberation)
+        //   - 'medium' for all other thinking turns (default for normal build)
+        // Per-env overrides: DEEPSEEK_REASONING_EFFORT_HEAVY (default high),
+        // DEEPSEEK_REASONING_EFFORT (default medium).
+        reasoningEffort: useThinking
+          ? ((forceThinkingNext || consecutiveErrors > 0 || parseFailureStreak > 0)
+              ? (process.env.DEEPSEEK_REASONING_EFFORT_HEAVY || 'high')
+              : (process.env.DEEPSEEK_REASONING_EFFORT || 'medium'))
+          : AGENT_REASONING_EFFORT
       };
 
       let llmResult;
