@@ -41,8 +41,7 @@ const SCENARIOS = {
       workbookSheets: ['Sheet1'],
       sheets: [{ name: 'Sheet1', usedRange: { rowCount: 0, columnCount: 0 } }]
     },
-    loopPromptVariant: 'default',
-    maxIterations: 45
+    loopPromptVariant: 'default'
   },
   complex_model_repair: {
     objective: 'Continua e correggi il modello esistente su piu fogli: riallinea Assumptions, WACC, DCF e Sensitivity, ripara formule incoerenti e completa il bridge finale senza ricostruire tutto da zero.',
@@ -114,8 +113,7 @@ const SCENARIOS = {
         }
       }
     },
-    loopPromptVariant: 'default',
-    maxIterations: 45
+    loopPromptVariant: 'default'
   },
   lbo_tech_template: {
     objective: 'Crea da zero un template completo di LBO per una società tech (target: CrowdStrike Holdings, CRWD) di circa 1000 righe complessive sul workbook. Includi: Cover & Summary, Sources & Uses, Transaction Assumptions, Debt Schedule (Term Loan A/B + Revolver + Senior Notes), Operating Model 3-statement (IS, BS, CFS) per 5 anni di forecast, Free Cash Flow + Debt Paydown waterfall, Returns (MoM, IRR sponsor, IRR exit multiples), Sensitivity (entry multiple x exit multiple), Credit Stats (Total Leverage, Senior Leverage, Coverage), Sources notes. Usa named range per Assumptions chiave. Forecast 5 anni con scenari base/upside/downside.',
@@ -124,8 +122,7 @@ const SCENARIOS = {
       workbookSheets: ['Sheet1'],
       sheets: [{ name: 'Sheet1', usedRange: { rowCount: 0, columnCount: 0 } }]
     },
-    loopPromptVariant: 'default',
-    maxIterations: 80
+    loopPromptVariant: 'default'
   }
 };
 
@@ -161,7 +158,9 @@ function buildStrategy(mode, scenarioKey) {
     promptVariant: scenario.loopPromptVariant || 'default',
     allowEscalation: false,
     fallbackMode: null,
-    maxIterations: scenario.maxIterations || 45
+    // Omit maxIterations: agentLoop default is now effectively unbounded,
+    // gated by stagnation detection + consecutive-error breakers.
+    maxIterations: scenario.maxIterations || undefined
   };
 }
 

@@ -1344,7 +1344,16 @@ function formatToolStagnationReason(stagnation) {
 /* ---------- Agent Loop ---------- */
 
 async function runAgentLoop(objective, context, options = {}) {
-  const maxIterations = options.maxIterations || Number(process.env.AGENT_MAX_ITER) || 200;
+  // No hard iteration cap by default. We trust:
+  //   1) stagnation detection (detectToolStagnation) to break true infinite loops,
+  //   2) maxConsecutiveErrors to break crash loops,
+  //   3) per-call LLM timeouts to break frozen calls,
+  //   4) outer turn timeouts on the caller side.
+  // A user / scenario / env can still impose one via options.maxIterations
+  // or AGENT_MAX_ITER. The very large default exists only as a paranoia
+  // ceiling — under normal stagnation guards, runs end on their own.
+  const explicitCap = options.maxIterations || Number(process.env.AGENT_MAX_ITER);
+  const maxIterations = explicitCap && explicitCap > 0 ? explicitCap : 10000;
   const maxConsecutiveErrors = options.maxConsecutiveErrors || 4;
   const timeoutMs = options.timeoutMs || Number(process.env.AGENT_LLM_TIMEOUT_MS) || 300000;
   const fallbackTimeoutMs = options.fallbackTimeoutMs || Number(process.env.AGENT_LLM_FALLBACK_TIMEOUT_MS) || 180000;

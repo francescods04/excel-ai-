@@ -1325,13 +1325,18 @@ Only fall back to the individual openbb_* tools below when you need a single dat
 - Right after, use **bulk_create_named_ranges** with the full list of model inputs (Revenue, WACC, TaxRate, EntryMultiple, etc.) instead of N create_named_range calls.
 - These two bulk calls combined replace the entire setup phase of an LBO/DCF (typically 15–25 iterations) with 2.
 
-30. **create_sheet** — Create a new worksheet in the current workbook.
-31. **rename_sheet** — Rename an existing sheet (old_name → new_name). Essential for organizing multi-sheet models.
-32. **delete_sheet** — Delete a sheet by name. Use when sheets are no longer needed. WARNING: irreversible.
-33. **duplicate_sheet** — Duplicate an existing sheet (exact copy). Useful for scenario analysis or templating.
-34. **copy_range** — Copy a range from one sheet to another (formulas, values, formatting). Essential for building summary/consolidation sheets.
-35. **create_named_range** — Create an Excel named range/reference. Named ranges work across ALL sheets. Use for: key inputs (Revenue, WACC, TaxRate, Beta), model constants, cross-sheet shared values.
-36. **list_named_ranges** — List all named ranges in the workbook with their references. Use to audit cross-sheet references before modification.
+30. **create_sheet** — Create a new worksheet in the current workbook. **For multiple sheets prefer bulk_create_sheets.**
+31. **bulk_create_sheets** — Create up to 32 sheets in a single iteration. Pass `{ names: [...] }`. Use this at the start of any multi-sheet build instead of N create_sheet calls.
+32. **rename_sheet** — Rename an existing sheet (old_name → new_name). Essential for organizing multi-sheet models.
+33. **delete_sheet** — Delete a sheet by name. Use when sheets are no longer needed. WARNING: irreversible.
+34. **duplicate_sheet** — Duplicate an existing sheet (exact copy). Useful for scenario analysis or templating.
+35. **copy_range** — Copy a range from one sheet to another (formulas, values, formatting). Essential for building summary/consolidation sheets.
+36. **create_named_range** — Create an Excel named range/reference. Named ranges work across ALL sheets. Use for: key inputs (Revenue, WACC, TaxRate, Beta), model constants, cross-sheet shared values. **For multiple named ranges prefer bulk_create_named_ranges.**
+37. **bulk_create_named_ranges** — Create up to 32 named ranges in a single iteration. Pass `{ ranges: [{name, refers_to}, ...] }`. Use this right after bulk_create_sheets to declare all model inputs at once.
+38. **list_named_ranges** — List all named ranges in the workbook with their references. Use to audit cross-sheet references before modification.
+39. **finance_company_bundle** — Fetch profile + metrics + balance + income + cashflow for a ticker IN PARALLEL in one call. Replaces five sequential openbb_equity_* calls.
+40. **macro_snapshot** — Fetch treasury rates + fed funds + CPI + GDP + unemployment IN PARALLEL in one call. Replaces five sequential openbb_* macro calls.
+41. **parallel_calls** — Execute up to 8 INDEPENDENT read-only tools in parallel within a single iteration. Pass `{ calls: [{tool, params}, ...] }`. Use whenever you'd otherwise queue up multiple consecutive reads. Mutations are not allowed inside.
 
 ## Cross-Sheet Reference Rules:
 - Named ranges (via create_named_range) are the PREFERRED method for cross-sheet references.
