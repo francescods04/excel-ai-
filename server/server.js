@@ -7,6 +7,7 @@ const https = require('https');
 require('dotenv').config();
 
 const logger = require('./utils/logger');
+const { inferPublicBaseUrl } = require('./utils/publicUrl');
 const streaming = require('./agents/streaming');
 const turns = require('./runtime/turns');
 const { LIMITS } = require('./runtime/safetyLimits');
@@ -72,6 +73,7 @@ app.use((req, res, next) => {
 });
 app.use(bodyParser.json({ limit: `${LIMITS.maxRequestBodyMb}mb` }));
 app.use(rateLimit);
+app.get('/manifest.xml', sendOfficeManifest);
 app.use(express.static(path.join(__dirname, '..')));
 
 // Request logging
@@ -151,8 +153,8 @@ app.get('/api/health', (req, res) => {
 app.get('/health', (req, res) => res.redirect('/api/health'));
 
 /* ---------- Office Add-in Manifest (dinamico) ---------- */
-app.get('/manifest.xml', (req, res) => {
-  const baseUrl = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
+function sendOfficeManifest(req, res) {
+  const baseUrl = inferPublicBaseUrl(req);
   const origin = new URL(baseUrl).origin;
 
   try {
@@ -190,7 +192,7 @@ app.get('/manifest.xml', (req, res) => {
 </OfficeApp>`;
     res.type('application/xml').send(minimalXml);
   }
-});
+}
 
 /* ---------- Admin Dashboard API ---------- */
 function parseAdminSince(value) {
