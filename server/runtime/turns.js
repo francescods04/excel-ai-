@@ -1911,7 +1911,10 @@ async function executeAgentLoopTurn(turnId) {
       turnId,
       modelOverride: turn.llm?.modelOverride || undefined,
       promptVariant: strategy.promptVariant || 'fast',
-      maxIterations: strategy.maxIterations || 60,
+      // When the strategy / triage didn't ask for a cap, pass through
+      // undefined so agentLoop applies its own unbounded default (relies on
+      // stagnation + consecutive-error breakers). Explicit caps still win.
+      maxIterations: strategy.maxIterations || undefined,
       onEvent,
       requestClientTool: runtime.requestClientTool,
       requestQuestion: (questions) => runtime.requestQuestion(questions, {
