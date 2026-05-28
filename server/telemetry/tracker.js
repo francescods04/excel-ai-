@@ -27,7 +27,8 @@ async function flush() {
   } catch (_) {}
 }
 
-setInterval(flush, FLUSH_INTERVAL_MS);
+const flushTimer = setInterval(flush, FLUSH_INTERVAL_MS);
+flushTimer.unref?.();
 
 process.on('exit', () => flush());
 process.on('SIGINT', () => { flush(); process.exit(); });

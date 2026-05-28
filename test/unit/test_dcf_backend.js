@@ -266,6 +266,37 @@ async function main() {
     assert.ok(!plan.tasks.some(task => task.tool === 'llm.writeFormulas' && task.params.section === 'full_model_review'));
   });
 
+  await test('weak finance plans can fall back to the deterministic playbook even in ai-only runtime', () => {
+    const domainPlan = {
+      tasks: [
+        { tool: 'workbook.readWorkbook' },
+        { tool: 'finance.dcf.buildSection', params: { section: 'assumptions' } },
+        { tool: 'finance.dcf.buildSection', params: { section: 'wacc' } },
+        { tool: 'finance.dcf.buildSection', params: { section: 'dcf' } },
+        { tool: 'finance.dcf.buildSection', params: { section: 'sensitivity' } }
+      ]
+    };
+    const weakPlan = {
+      tasks: [
+        { tool: 'workbook.readWorkbook' },
+        { tool: 'llm.planLayout', params: { model: 'DCF' } },
+        { tool: 'llm.writeFormulas', params: { mode: 'build_finance_model', section: 'full_model_review' } }
+      ]
+    };
+    const strongPlan = {
+      tasks: [
+        { tool: 'workbook.readWorkbook' },
+        { tool: 'finance.dcf.buildSection', params: { section: 'assumptions' } },
+        { tool: 'finance.dcf.buildSection', params: { section: 'wacc' } },
+        { tool: 'finance.dcf.buildSection', params: { section: 'dcf' } },
+        { tool: 'finance.dcf.buildSection', params: { section: 'sensitivity' } }
+      ]
+    };
+
+    assert.strictEqual(planner.shouldFallbackWeakFinancePlan(weakPlan, domainPlan, true), true);
+    assert.strictEqual(planner.shouldFallbackWeakFinancePlan(strongPlan, domainPlan, true), false);
+  });
+
   await test('DCF template derives assumptions from market data', () => {
     const inputs = inferDcfInputs({ ticker: 'AAPL', companyName: 'Apple Inc.' }, mockMemory);
     assert.strictEqual(inputs.ticker, 'AAPL');
@@ -1276,6 +1307,38 @@ async function main() {
       if (previous === undefined) delete process.env.DCF_AI_BUILDER_ENABLED;
       else process.env.DCF_AI_BUILDER_ENABLED = previous;
     }
+  });
+
+  await test('DCF shell uses deterministic fast path even in ai-only runtime', async () => {
+    const output = await executeTool('finance.dcf.buildSection', {
+      section: 'shell',
+      ticker: 'AAPL',
+      objective: 'Crea un DCF completo per Apple'
+    }, {
+      runtime: {
+        requestClientTool: async () => ({})
+      },
+      results: {}
+    });
+
+    assert.strictEqual(output.data.builder, 'template-fastpath');
+    assert.ok(output.actions.some(action => action.type === 'createSheet'));
+  });
+
+  await test('DCF sources uses deterministic fast path even in ai-only runtime', async () => {
+    const output = await executeTool('finance.dcf.buildSection', {
+      section: 'sources',
+      ticker: 'AAPL',
+      objective: 'Crea un DCF completo per Apple'
+    }, {
+      runtime: {
+        requestClientTool: async () => ({})
+      },
+      results: {}
+    });
+
+    assert.strictEqual(output.data.builder, 'template-fastpath');
+    assert.ok(output.actions.some(action => action.sheet === 'Sources'));
   });
 
   await test('turn runtime records client-side Excel action acknowledgements', () => {

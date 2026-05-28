@@ -157,6 +157,8 @@ LLM_TIMEOUT_MS=90000
 LLM_FALLBACK_TIMEOUT_MS=45000
 PLANNER_TIMEOUT_MS=150000
 PLANNER_FALLBACK_TIMEOUT_MS=60000
+PLANNER_THINKING_ENABLED=false
+TRIAGE_THINKING_ENABLED=false
 ```
 
 **Pro**: molto più veloce (~10-15s), nessun server locale da gestire
@@ -217,6 +219,71 @@ DeepSeek costruisce automaticamente una cache su disco quando rileva prefissi di
 ### Modalità demo
 
 Se non configuri nessuna API key e lasci `AI_PROVIDER=openai` senza key, l'add-in funziona in **modalità demo** con risposte predefinite per testare l'interfaccia.
+
+## Trace LLM
+
+Il backend ora salva trace strutturati delle chiamate LLM in `data/llm-traces/YYYY-MM-DD.jsonl`, con:
+
+- prompt/messages completi per call
+- risposta raw + payload JSON parsato
+- `turnId`, fase (`planning` / `execution`), label logica e modello
+- token usage, latenza, errori e fallback
+
+Env utili:
+
+```env
+LLM_TRACE_ENABLED=true
+LLM_TRACE_CAPTURE_CONTENT=true
+LLM_TRACE_DIR=data/llm-traces
+LLM_TRACE_MAX_STRING_CHARS=50000
+```
+
+## Tuning velocita loop AI
+
+Per rendere il path agentico molto piu rapido senza perdere la capacita' di recupero:
+
+```env
+AGENT_LOOP_FAST_MODEL=deepseek-v4-flash
+AGENT_LOOP_MODEL=deepseek-v4-flash
+AGENT_THINKING_EVERY_ITER=false
+AGENT_THINKING_INTERVAL=6
+AGENT_FORCE_THINKING_AFTER_ERROR=true
+PLANNER_WEAK_FINANCE_FALLBACK=true
+```
+
+Idea pratica:
+
+- `flash` come default per il loop riduce molto la latenza per iterazione
+- il `thinking` resta attivo alla prima iterazione, poi solo ogni `N` step
+- dopo parse error o tool error il loop riabilita una singola iterazione con `thinking`
+- se il planner LLM produce un piano finance troppo debole, il runtime puo' saltare subito sul playbook deterministico invece di sprecare retry costosi
+
+## Benchmark mode-vs-mode
+
+Per confrontare lo stesso task forzato su `planned_dag` e `agent_loop`:
+
+```bash
+npm run bench:modes -- 1 dcf_institutional,complex_model_repair planned_dag,agent_loop
+```
+
+Il benchmark salva un file `bench/runtime-mode-compare-<timestamp>.jsonl` e riporta:
+
+- tempo totale
+- costo di planning vs execution
+- task completati
+- azioni generate
+- iterazioni loop usate
+
+Per una vista rapida locale:
+
+```bash
+npm run logs:llm -- --since=2026-05-27 --limit=30
+```
+
+Esempi:
+
+- solo summary: `npm run logs:llm -- --summary-only`
+- filtrare un turn: `npm run logs:llm -- --turn=turn-123`
 
 ## Azioni supportate
 

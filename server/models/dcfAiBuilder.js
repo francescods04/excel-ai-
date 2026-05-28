@@ -22,6 +22,7 @@ const AI_SECTIONS = new Set([
   'sources', 'source', 'research'
 ]);
 const AI_RUNTIME_ONLY_SECTIONS = new Set(['shell', 'format']);
+const DCF_DETERMINISTIC_FAST_PATH_SECTIONS = new Set(['shell', 'sources', 'source', 'research', 'format']);
 const SECTION_REQUIREMENTS = {
   assumptions: {
     sheet: 'Assumptions',
@@ -480,19 +481,20 @@ async function buildDcfSectionAi(params = {}, memory = {}) {
   const hasTemplate = hasDeterministicTemplate(modelType);
   const runtimeAiOnly = isRuntimeAiOnly(memory);
   const useAiSectionBuilder = isDcf ? shouldUseAi(params, { runtimeAiOnly }) : true; // non-DCF models always use pure AI
+  const useDeterministicFastPath = isDcf && DCF_DETERMINISTIC_FAST_PATH_SECTIONS.has(section);
   const aiSchema = useAiSectionBuilder ? await inferWorkbookSchemaWithAi(params, memory) : null;
   const enrichedParams = aiSchema ? { ...params, aiSchema } : params;
   const enrichedMemory = aiSchema ? { ...memory, aiWorkbookSchema: aiSchema } : memory;
-  const allowTemplateAssist = hasTemplate && !runtimeAiOnly;
+  const allowTemplateAssist = hasTemplate && (!runtimeAiOnly || useDeterministicFastPath);
   // Build a deterministic fallback only when the runtime is allowed to use templates.
   const fallback = allowTemplateAssist
     ? buildDcfSection(enrichedParams, enrichedMemory)
     : { data: { model: modelType, section, builder: runtimeAiOnly ? 'ai_only_runtime' : 'no_deterministic_template' }, actions: [] };
 
-  if (!useAiSectionBuilder) {
+  if (!useAiSectionBuilder || useDeterministicFastPath) {
     const fallbackBuilder = section === 'format'
       ? 'adaptive-format'
-      : (params.mode === 'template' ? 'template-requested' : 'template');
+      : (useDeterministicFastPath ? 'template-fastpath' : (params.mode === 'template' ? 'template-requested' : 'template'));
     return fallbackWithBuilder(fallback, fallbackBuilder);
   }
 

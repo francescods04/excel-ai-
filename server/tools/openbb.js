@@ -587,7 +587,7 @@ const economy = {
 
   async riskPremium(overrides = {}) {
     return call('economy/risk_premium', {
-      provider: providerFor('economy', overrides), ...overrides,
+      provider: overrides.provider || 'fmp', ...overrides,
     }, 'reference');
   },
 

@@ -166,6 +166,51 @@ app.get('/manifest.xml', (req, res) => {
 });
 
 /* ---------- Admin Dashboard API ---------- */
+function parseAdminSince(value) {
+  if (!value) return null;
+  const ms = Date.parse(String(value));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function parseAdminLimit(value, fallback = 50, max = 500) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return fallback;
+  return Math.min(Math.floor(numeric), max);
+}
+
+function parseAdminBoolean(value) {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (value === true || value === 'true' || value === '1') return true;
+  if (value === false || value === 'false' || value === '0') return false;
+  return undefined;
+}
+
+function mapTracePreview(record) {
+  const responseText = typeof record.responseText === 'string' ? record.responseText : '';
+  const previewSource = responseText || record.error?.message || '';
+  return {
+    ts: record.ts,
+    traceId: record.traceId,
+    turnId: record.turnId || null,
+    phase: record.phase || null,
+    workflow: record.workflow || null,
+    label: record.label || null,
+    role: record.role || null,
+    eventType: record.eventType,
+    provider: record.provider || null,
+    model: record.model || null,
+    attempt: record.attempt || null,
+    latencyMs: record.latencyMs || null,
+    promptTokens: record.usage?.prompt_tokens || 0,
+    completionTokens: record.usage?.completion_tokens || 0,
+    messageCount: record.messageSummary?.count || 0,
+    messageChars: record.messageSummary?.chars || 0,
+    responseChars: responseText.length || 0,
+    preview: previewSource.length > 220 ? `${previewSource.slice(0, 220)}…` : previewSource,
+    errorMessage: record.error?.message || null,
+  };
+}
+
 app.get('/api/admin/stats', authenticate, async (req, res) => {
   if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
   try {
@@ -242,6 +287,107 @@ app.get('/api/admin/recent-turns', authenticate, async (req, res) => {
       totalLatencyMs: t.total_latency_ms,
       createdAt: t.created_at,
     })));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/admin/llm-traces/summary', authenticate, async (req, res) => {
+  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const { summarizeLlmTraces } = require('./utils/llmTrace');
+    const summary = summarizeLlmTraces({
+      sinceMs: parseAdminSince(req.query.since),
+      turnId: req.query.turnId || undefined,
+      eventType: req.query.eventType || undefined,
+      label: req.query.label || undefined,
+      role: req.query.role || undefined,
+      attempt: req.query.attempt || undefined,
+      provider: req.query.provider || undefined,
+      model: req.query.model || undefined,
+      summaryLimit: parseAdminLimit(req.query.summaryLimit, 5000, 50000),
+    });
+    res.json(summary);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/admin/llm-traces', authenticate, async (req, res) => {
+  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const { readLlmTraces } = require('./utils/llmTrace');
+    const records = readLlmTraces({
+      sinceMs: parseAdminSince(req.query.since),
+      turnId: req.query.turnId || undefined,
+      traceId: req.query.traceId || undefined,
+      eventType: req.query.eventType || undefined,
+      label: req.query.label || undefined,
+      role: req.query.role || undefined,
+      attempt: req.query.attempt || undefined,
+      provider: req.query.provider || undefined,
+      model: req.query.model || undefined,
+      limit: parseAdminLimit(req.query.limit, 40, 200),
+      descending: req.query.order !== 'asc',
+    }).map(mapTracePreview);
+    res.json(records);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/admin/llm-traces/:traceId', authenticate, async (req, res) => {
+  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const { readLlmTraces } = require('./utils/llmTrace');
+    const records = readLlmTraces({
+      traceId: req.params.traceId,
+      limit: parseAdminLimit(req.query.limit, 20, 100),
+      descending: false,
+    });
+    if (!records.length) return res.status(404).json({ error: 'Trace not found' });
+    res.json({
+      traceId: req.params.traceId,
+      count: records.length,
+      records,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/admin/runtime-outcomes/summary', authenticate, async (req, res) => {
+  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const { summarizeRuntimeOutcomes } = require('./utils/runtimeOutcomeSummary');
+    const summary = summarizeRuntimeOutcomes({
+      sinceMs: parseAdminSince(req.query.since),
+      turnId: req.query.turnId || undefined,
+      status: req.query.status || undefined,
+      reasonCategory: req.query.reasonCategory || undefined,
+      escalated: parseAdminBoolean(req.query.escalated),
+      summaryLimit: parseAdminLimit(req.query.summaryLimit, 500, 5000),
+    });
+    res.json(summary);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/admin/runtime-outcomes', authenticate, async (req, res) => {
+  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const { readRuntimeOutcomes } = require('./utils/runtimeOutcomeSummary');
+    const records = readRuntimeOutcomes({
+      sinceMs: parseAdminSince(req.query.since),
+      turnId: req.query.turnId || undefined,
+      status: req.query.status || undefined,
+      reasonCategory: req.query.reasonCategory || undefined,
+      escalated: parseAdminBoolean(req.query.escalated),
+      limit: parseAdminLimit(req.query.limit, 30, 200),
+      descending: req.query.order !== 'asc',
+    });
+    res.json(records);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

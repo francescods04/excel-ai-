@@ -2,6 +2,9 @@ const axios = require('axios');
 require('dotenv').config();
 const logger = require('../utils/logger');
 const { track } = require('../telemetry/tracker');
+const { logMetric } = require('../utils/metrics');
+const { writeLlmTrace, makeTraceId } = require('../utils/llmTrace');
+const { getExecutionContext } = require('../utils/executionContext');
 
 /* ---------- Configurazione LLM (DeepSeek primario, OpenRouter fallback) ---------- */
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
@@ -94,9 +97,46 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
 }
 
+function toErrorDetails(error) {
+  if (!error) return null;
+  return {
+    message: error.message || String(error),
+    code: error.code || null,
+    status: error.response?.status || null,
+  };
+}
+
+function buildTraceContext(trace = {}) {
+  const traceInput = trace && typeof trace === 'object' ? trace : {};
+  const executionContext = getExecutionContext();
+  return {
+    traceId: traceInput.traceId || makeTraceId(),
+    turnId: traceInput.turnId || executionContext.turnId || null,
+    userId: traceInput.userId || executionContext.userId || null,
+    phase: traceInput.phase || executionContext.phase || null,
+    workflow: traceInput.workflow || executionContext.workflow || null,
+    parentTurnId: traceInput.parentTurnId || executionContext.parentTurnId || null,
+    source: traceInput.source || executionContext.source || null,
+  };
+}
+
+function readBooleanEnv(name, defaultValue) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === null || raw === '') return defaultValue;
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  return defaultValue;
+}
+
+const PLANNER_THINKING_DEFAULT = readBooleanEnv('PLANNER_THINKING_ENABLED', false);
+const TRIAGE_THINKING_DEFAULT = readBooleanEnv('TRIAGE_THINKING_ENABLED', false);
+const ARCHITECT_THINKING_DEFAULT = readBooleanEnv('ARCHITECT_THINKING_ENABLED', true);
+
 /* ---------- Role-based routing ---------- */
 const ROLE_CONFIG = {
-  planner:            { modelTier: 'flash', thinking: true,  effort: 'medium' },
+  planner:            { modelTier: 'flash', thinking: PLANNER_THINKING_DEFAULT, effort: process.env.PLANNER_REASONING_EFFORT || 'medium' },
+  triage:             { modelTier: 'flash', thinking: TRIAGE_THINKING_DEFAULT, effort: process.env.TRIAGE_REASONING_EFFORT || 'low' },
+  architect:          { modelTier: 'flash', thinking: ARCHITECT_THINKING_DEFAULT, effort: process.env.ARCHITECT_REASONING_EFFORT || 'medium' },
   builder_hard:       { modelTier: 'pro',   thinking: true,  effort: 'high' },
   builder_analytical: { modelTier: 'flash', thinking: true,  effort: 'medium' },
   builder_structural: { modelTier: 'flash', thinking: false, effort: null },
@@ -213,12 +253,24 @@ async function callDeepSeek(messages, options = {}) {
     logger.info(`[LLM] DeepSeek ← ${model} in ${elapsed}ms (${content.length} chars)${cacheInfo}`);
 
     const parsed = tryParseJSON(content);
+    let result;
     if (parsed.ok) {
-      const result = parsed.value;
+      result = parsed.value;
       if (usage) result._usage = usage;
-      return result;
+    } else {
+      result = { raw: content, jsonError: parsed.error.message, _usage: usage };
     }
-    return { raw: content, jsonError: parsed.error.message, _usage: usage };
+    return {
+      result,
+      meta: {
+        provider: 'deepseek',
+        model,
+        elapsedMs: elapsed,
+        rawContent: content,
+        usage,
+        jsonError: parsed.ok ? null : parsed.error.message,
+      }
+    };
   } catch (error) {
     const elapsed = Date.now() - start;
     logger.error(`[LLM] DeepSeek error ← ${model} after ${elapsed}ms: ${error.message}`);
@@ -263,12 +315,24 @@ async function callOpenRouter(messages, options = {}) {
 
     logger.info(`[LLM] OpenRouter ← ${model} in ${elapsed}ms`);
     const parsed = tryParseJSON(content);
+    let result;
     if (parsed.ok) {
-      const result = parsed.value;
+      result = parsed.value;
       if (usage) result._usage = usage;
-      return result;
+    } else {
+      result = { raw: content, jsonError: parsed.error.message, _usage: usage };
     }
-    return { raw: content, jsonError: parsed.error.message, _usage: usage };
+    return {
+      result,
+      meta: {
+        provider: 'openrouter',
+        model,
+        elapsedMs: elapsed,
+        rawContent: content,
+        usage,
+        jsonError: parsed.ok ? null : parsed.error.message,
+      }
+    };
   } catch (error) {
     const elapsed = Date.now() - start;
     logger.error(`[LLM] OpenRouter error ← ${model} after ${elapsed}ms: ${error.message}`);
@@ -285,15 +349,19 @@ async function callLLM({
   label = 'LLM call',
   systemReminder = null,
   role = null,
+  thinkingDisabled = false,
+  reasoningEffort = null,
+  trace = null,
+  jsonMode = true,
 }) {
-  let thinkingDisabled = false;
-  let reasoningEffort = null;
+  let effectiveThinkingDisabled = thinkingDisabled;
+  let effectiveReasoningEffort = reasoningEffort;
   if (role) {
     const roleCfg = resolveRoleConfig(role);
     if (roleCfg) {
       if (!modelOverride) modelOverride = roleCfg.model;
-      thinkingDisabled = roleCfg.thinkingDisabled;
-      reasoningEffort = roleCfg.reasoningEffort;
+      effectiveThinkingDisabled = roleCfg.thinkingDisabled;
+      effectiveReasoningEffort = roleCfg.reasoningEffort;
       label = `${label} [role=${role}]`;
     }
   }
@@ -324,50 +392,200 @@ async function callLLM({
 
   const start = Date.now();
   const provider = DEEPSEEK_API_KEY ? 'deepseek' : 'openrouter';
+  const traceContext = buildTraceContext(trace);
+
+  writeLlmTrace({
+    eventType: 'llm.request',
+    ...traceContext,
+    label,
+    role,
+    provider,
+    model: DEEPSEEK_API_KEY ? primaryModel : OPENROUTER_MODEL,
+    attempt: 'primary',
+    jsonMode,
+    messages: msgs,
+  });
 
   try {
     logger.info(`[LLM] ${label} → [${provider}] ${primaryModel}`);
-    const result = await withTimeout(
+    const response = await withTimeout(
       DEEPSEEK_API_KEY
-        ? callDeepSeek(msgs, { model: primaryModel, requestTimeoutMs: timeoutMs, thinkingDisabled, reasoningEffort })
-        : callOpenRouter(msgs, { model: OPENROUTER_MODEL, requestTimeoutMs: timeoutMs }),
+        ? callDeepSeek(msgs, { model: primaryModel, requestTimeoutMs: timeoutMs, thinkingDisabled: effectiveThinkingDisabled, reasoningEffort: effectiveReasoningEffort, jsonMode })
+        : callOpenRouter(msgs, { model: OPENROUTER_MODEL, requestTimeoutMs: timeoutMs, jsonMode }),
       timeoutMs, label
     );
     const elapsed = Date.now() - start;
+    const result = response.result;
+    const usage = response.meta?.usage || result?._usage || null;
     if (result?._usage) {
       track({ eventType: 'llm.response', latencyMs: elapsed, tokensIn: result._usage.prompt_tokens, tokensOut: result._usage.completion_tokens, model: primaryModel, success: 1 });
     }
+    logMetric({
+      type: 'llm',
+      event: 'response',
+      label,
+      role,
+      provider: response.meta?.provider || provider,
+      model: response.meta?.model || primaryModel,
+      latency_ms: elapsed,
+      prompt_tokens: usage?.prompt_tokens || 0,
+      completion_tokens: usage?.completion_tokens || 0,
+      turnId: traceContext.turnId,
+      traceId: traceContext.traceId,
+    });
+    writeLlmTrace({
+      eventType: 'llm.response',
+      ...traceContext,
+      label,
+      role,
+      provider: response.meta?.provider || provider,
+      model: response.meta?.model || primaryModel,
+      attempt: 'primary',
+      latencyMs: elapsed,
+      usage,
+      responseText: response.meta?.rawContent,
+      response: result,
+      extra: {
+        jsonError: response.meta?.jsonError || null,
+      }
+    });
     logger.info(`[LLM] ${label} done ← ${primaryModel} in ${elapsed}ms`);
     return result;
   } catch (error) {
     const elapsed = Date.now() - start;
     track({ eventType: 'llm.error', latencyMs: elapsed, model: primaryModel, success: 0, properties: { error: error.message } });
+    logMetric({
+      type: 'llm',
+      event: 'error',
+      label,
+      role,
+      provider,
+      model: primaryModel,
+      latency_ms: elapsed,
+      error: error.message,
+      turnId: traceContext.turnId,
+      traceId: traceContext.traceId,
+    });
+    writeLlmTrace({
+      eventType: 'llm.error',
+      ...traceContext,
+      label,
+      role,
+      provider,
+      model: primaryModel,
+      attempt: 'primary',
+      latencyMs: elapsed,
+      error: toErrorDetails(error),
+    });
 
     const rescueModel = resolveFallbackModel(primaryModel, fallbackModel);
     logger.warn(`[LLM] ${label} failed on ${primaryModel}: ${error.message}. Fallback: ${rescueModel || 'none'}`);
 
     if (!shouldRetryWithFallback(error, rescueModel)) throw error;
 
+    const fallbackProvider = OPENROUTER_API_KEY ? 'openrouter' : 'deepseek';
+    const fallbackTargetModel = OPENROUTER_API_KEY ? (OPENROUTER_FALLBACK_MODEL || rescueModel) : rescueModel;
+    writeLlmTrace({
+      eventType: 'llm.fallback',
+      ...traceContext,
+      label,
+      role,
+      provider: fallbackProvider,
+      model: fallbackTargetModel,
+      attempt: 'fallback',
+      extra: {
+        fromProvider: provider,
+        fromModel: primaryModel,
+        reason: error.message,
+      }
+    });
+
     // Fallback: usa OpenRouter se disponibile
     if (OPENROUTER_API_KEY) {
       logger.info(`[LLM] ${label} retry via OpenRouter → ${OPENROUTER_FALLBACK_MODEL}`);
       const rescueStart = Date.now();
-      const rescueResult = await withTimeout(
-        callOpenRouter(msgs, { model: OPENROUTER_FALLBACK_MODEL || rescueModel, requestTimeoutMs: fallbackTimeoutMs }),
+      const rescueResponse = await withTimeout(
+        callOpenRouter(msgs, { model: OPENROUTER_FALLBACK_MODEL || rescueModel, requestTimeoutMs: fallbackTimeoutMs, jsonMode }),
         fallbackTimeoutMs, `${label} fallback`
       );
-      track({ eventType: 'llm.response', latencyMs: Date.now() - rescueStart, model: OPENROUTER_FALLBACK_MODEL, success: 1 });
+      const rescueElapsed = Date.now() - rescueStart;
+      const rescueResult = rescueResponse.result;
+      const usage = rescueResponse.meta?.usage || rescueResult?._usage || null;
+      track({ eventType: 'llm.response', latencyMs: rescueElapsed, model: OPENROUTER_FALLBACK_MODEL, success: 1 });
+      logMetric({
+        type: 'llm',
+        event: 'response',
+        label,
+        role,
+        provider: rescueResponse.meta?.provider || 'openrouter',
+        model: rescueResponse.meta?.model || OPENROUTER_FALLBACK_MODEL || rescueModel,
+        latency_ms: rescueElapsed,
+        prompt_tokens: usage?.prompt_tokens || 0,
+        completion_tokens: usage?.completion_tokens || 0,
+        turnId: traceContext.turnId,
+        traceId: traceContext.traceId,
+      });
+      writeLlmTrace({
+        eventType: 'llm.response',
+        ...traceContext,
+        label,
+        role,
+        provider: rescueResponse.meta?.provider || 'openrouter',
+        model: rescueResponse.meta?.model || OPENROUTER_FALLBACK_MODEL || rescueModel,
+        attempt: 'fallback',
+        latencyMs: rescueElapsed,
+        usage,
+        responseText: rescueResponse.meta?.rawContent,
+        response: rescueResult,
+        extra: {
+          fallbackFromModel: primaryModel,
+          jsonError: rescueResponse.meta?.jsonError || null,
+        }
+      });
       return rescueResult;
     }
 
     // Fallback: stesso DeepSeek, modello diverso
     logger.info(`[LLM] ${label} retry → ${rescueModel}`);
     const rescueStart = Date.now();
-    const rescueResult = await withTimeout(
-      callDeepSeek(msgs, { model: rescueModel, requestTimeoutMs: fallbackTimeoutMs, thinkingDisabled: true }),
+    const rescueResponse = await withTimeout(
+      callDeepSeek(msgs, { model: rescueModel, requestTimeoutMs: fallbackTimeoutMs, thinkingDisabled: true, jsonMode }),
       fallbackTimeoutMs, `${label} fallback`
     );
-    track({ eventType: 'llm.response', latencyMs: Date.now() - rescueStart, model: rescueModel, success: 1 });
+    const rescueElapsed = Date.now() - rescueStart;
+    const rescueResult = rescueResponse.result;
+    const usage = rescueResponse.meta?.usage || rescueResult?._usage || null;
+    track({ eventType: 'llm.response', latencyMs: rescueElapsed, model: rescueModel, success: 1 });
+    logMetric({
+      type: 'llm',
+      event: 'response',
+      label,
+      role,
+      provider: rescueResponse.meta?.provider || 'deepseek',
+      model: rescueResponse.meta?.model || rescueModel,
+      latency_ms: rescueElapsed,
+      prompt_tokens: usage?.prompt_tokens || 0,
+      completion_tokens: usage?.completion_tokens || 0,
+      turnId: traceContext.turnId,
+      traceId: traceContext.traceId,
+    });
+    writeLlmTrace({
+      eventType: 'llm.response',
+      ...traceContext,
+      label,
+      role,
+      provider: rescueResponse.meta?.provider || 'deepseek',
+      model: rescueResponse.meta?.model || rescueModel,
+      attempt: 'fallback',
+      latencyMs: rescueElapsed,
+      usage,
+      responseText: rescueResponse.meta?.rawContent,
+      response: rescueResult,
+      extra: {
+        fallbackFromModel: primaryModel,
+        jsonError: rescueResponse.meta?.jsonError || null,
+      }
+    });
     return rescueResult;
   }
 }
@@ -413,15 +631,22 @@ async function callDeepSeekStream(messages, options = {}, onChunk) {
   return new Promise((resolve, reject) => {
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
 
-    function finish(err, value) {
+    let timeoutId;
+    function finish(err, value, cleanupStream = false) {
       if (settled) return;
       settled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+      if (cleanupStream) {
+        try { rl.close(); } catch (_) {}
+        try {
+          if (!stream.destroyed) stream.destroy();
+        } catch (_) {}
+      }
       if (err) reject(err); else resolve(value);
     }
 
-    let timeoutId;
     if (options.maxTotalMs && options.maxTotalMs > 0) {
-      timeoutId = setTimeout(() => finish(new Error(`Stream timeout after ${options.maxTotalMs}ms`)), options.maxTotalMs);
+      timeoutId = setTimeout(() => finish(new Error(`Stream timeout after ${options.maxTotalMs}ms`), null, true), options.maxTotalMs);
     }
 
     rl.on('line', (line) => {
@@ -431,8 +656,8 @@ async function callDeepSeekStream(messages, options = {}, onChunk) {
       const data = trimmed.slice(5).trim();
       if (data === '[DONE]') {
         done = true;
-        if (timeoutId) clearTimeout(timeoutId);
         onChunk('', accumulated, true);
+        finish(null, accumulated, true);
         return;
       }
       try {
@@ -448,14 +673,21 @@ async function callDeepSeekStream(messages, options = {}, onChunk) {
     });
 
     rl.on('close', () => {
-      if (timeoutId) clearTimeout(timeoutId);
+      if (settled) return;
       if (!done) onChunk('', accumulated, true);
       finish(null, accumulated);
     });
 
+    rl.on('error', (err) => {
+      finish(err, null, true);
+    });
+
+    stream.on('aborted', () => {
+      finish(new Error('Stream aborted'), null, true);
+    });
+
     stream.on('error', (err) => {
-      if (timeoutId) clearTimeout(timeoutId);
-      finish(err);
+      finish(err, null, true);
     });
   });
 }
@@ -468,15 +700,19 @@ async function callLLMStreaming({
   onChunk,
   systemReminder = null,
   role = null,
+  thinkingDisabled = false,
+  reasoningEffort = null,
+  trace = null,
+  jsonMode = true,
 }) {
-  let thinkingDisabled = false;
-  let reasoningEffort = null;
+  let effectiveThinkingDisabled = thinkingDisabled;
+  let effectiveReasoningEffort = reasoningEffort;
   if (role) {
     const roleCfg = resolveRoleConfig(role);
     if (roleCfg) {
       if (!modelOverride) modelOverride = roleCfg.model;
-      thinkingDisabled = roleCfg.thinkingDisabled;
-      reasoningEffort = roleCfg.reasoningEffort;
+      effectiveThinkingDisabled = roleCfg.thinkingDisabled;
+      effectiveReasoningEffort = roleCfg.reasoningEffort;
       label = `${label} [role=${role}]`;
     }
   }
@@ -506,22 +742,92 @@ async function callLLMStreaming({
   if (systemText) checkSystemPrefixStability('deepseek', systemText);
 
   const maxStreamMs = timeoutMs || 300000;
+  const traceContext = buildTraceContext(trace);
+
+  writeLlmTrace({
+    eventType: 'llm.request',
+    ...traceContext,
+    label,
+    role,
+    provider: 'deepseek',
+    model: primaryModel,
+    attempt: 'primary',
+    jsonMode,
+    extra: { streaming: true },
+    messages: finalMessages,
+  });
 
   try {
     logger.info(`[LLM] ${label} stream → ${primaryModel}`);
+    const startedAt = Date.now();
     const accumulated = await callDeepSeekStream(finalMessages, {
       model: primaryModel,
       maxTotalMs: maxStreamMs,
       requestTimeoutMs: maxStreamMs,
-      thinkingDisabled,
-      reasoningEffort,
+      thinkingDisabled: effectiveThinkingDisabled,
+      reasoningEffort: effectiveReasoningEffort,
+      jsonMode,
     }, onChunk);
+    const elapsed = Date.now() - startedAt;
+    logMetric({
+      type: 'llm',
+      event: 'response',
+      label,
+      role,
+      provider: 'deepseek',
+      model: primaryModel,
+      latency_ms: elapsed,
+      turnId: traceContext.turnId,
+      traceId: traceContext.traceId,
+    });
+    writeLlmTrace({
+      eventType: 'llm.response',
+      ...traceContext,
+      label,
+      role,
+      provider: 'deepseek',
+      model: primaryModel,
+      attempt: 'primary',
+      latencyMs: elapsed,
+      responseText: accumulated,
+      response: { raw: accumulated },
+      extra: { streaming: true }
+    });
     logger.info(`[LLM] ${label} stream done ← ${primaryModel} (${accumulated.length} chars)`);
     return accumulated;
   } catch (error) {
+    logMetric({
+      type: 'llm',
+      event: 'error',
+      label,
+      role,
+      provider: 'deepseek',
+      model: primaryModel,
+      error: error.message,
+      turnId: traceContext.turnId,
+      traceId: traceContext.traceId,
+    });
+    writeLlmTrace({
+      eventType: 'llm.error',
+      ...traceContext,
+      label,
+      role,
+      provider: 'deepseek',
+      model: primaryModel,
+      attempt: 'primary',
+      error: toErrorDetails(error),
+      extra: { streaming: true }
+    });
     logger.error(`[LLM] ${label} stream error: ${error.message}`);
     throw error;
   }
 }
 
-module.exports = { callLLM, callLLMStreaming, setLLMConfig, getLLMConfig };
+module.exports = {
+  callLLM,
+  callLLMStreaming,
+  setLLMConfig,
+  getLLMConfig,
+  _buildTraceContext: buildTraceContext,
+  _resolveRoleConfig: resolveRoleConfig
+};

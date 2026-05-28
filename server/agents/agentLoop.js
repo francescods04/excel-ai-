@@ -11,8 +11,48 @@ const { detectSkills } = require('../utils/skillSuggest');
 
 const AGENT_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT_AGENT || 'high';
 const AGENT_THINKING_FIRST_ITER = process.env.AGENT_THINKING_FIRST_ITER !== 'false';
-const AGENT_THINKING_EVERY_ITER = process.env.AGENT_THINKING_EVERY_ITER !== 'false';
+const AGENT_THINKING_EVERY_ITER = process.env.AGENT_THINKING_EVERY_ITER === 'true';
+const AGENT_THINKING_INTERVAL = Math.max(2, Number(process.env.AGENT_THINKING_INTERVAL) || 6);
+const AGENT_FORCE_THINKING_AFTER_ERROR = process.env.AGENT_FORCE_THINKING_AFTER_ERROR !== 'false';
 const AGENT_USE_STREAMING = process.env.AGENT_USE_STREAMING !== 'false';
+const AGENT_LOOP_FAST_MODEL = process.env.AGENT_LOOP_FAST_MODEL || process.env.DEEPSEEK_FALLBACK_MODEL || 'deepseek-v4-flash';
+const AGENT_LOOP_DEFAULT_MODEL = process.env.AGENT_LOOP_MODEL || process.env.DEEPSEEK_FALLBACK_MODEL || 'deepseek-v4-flash';
+const STAGNATION_WATCH_TOOLS = new Set([
+  'read_workbook',
+  'read_sheet',
+  'get_range_as_csv',
+  'get_cell_ranges',
+  'build_workbook_graph',
+  'execute_office_js'
+]);
+const STAGNATION_MAX_REPEAT = Math.max(3, Number(process.env.AGENT_STAGNATION_MAX_REPEAT) || 4);
+const STAGNATION_ALT_CYCLES = Math.max(2, Number(process.env.AGENT_STAGNATION_ALT_CYCLES) || 3);
+const STAGNATION_MAX_TRAIL = Math.max(8, (STAGNATION_ALT_CYCLES * 2) + 2);
+
+function resolveAgentLoopModel(modelOverride, promptVariant) {
+  if (modelOverride) return modelOverride;
+  if (promptVariant === 'fast') return AGENT_LOOP_FAST_MODEL;
+  return AGENT_LOOP_DEFAULT_MODEL;
+}
+
+function shouldUseAgentThinking(iteration, state = {}) {
+  if (AGENT_THINKING_EVERY_ITER) return true;
+  if (state.forceThinkingNext) return true;
+  if (AGENT_THINKING_FIRST_ITER && iteration === 1) return true;
+  if (AGENT_THINKING_INTERVAL > 0 && iteration % AGENT_THINKING_INTERVAL === 0) return true;
+  if (AGENT_FORCE_THINKING_AFTER_ERROR && ((state.consecutiveErrors || 0) > 0 || (state.parseFailureStreak || 0) > 0)) {
+    return true;
+  }
+  return false;
+}
+
+function normalizeOpenBBSymbolParams(params = {}) {
+  if (!params || typeof params !== 'object') return params;
+  if (params.symbol || !params.ticker) return params;
+  const next = { ...params, symbol: params.ticker };
+  delete next.ticker;
+  return next;
+}
 
 /* ---------- Message ID helpers for context_snip targeting ---------- */
 function generateMsgId() {
@@ -595,11 +635,13 @@ await context.sync();
 const errors = check.values.flat().filter(v => typeof v === "string" && v.startsWith("#"));
 \`\`\`
 
-IMPORTANT: DO NOT wrap in Excel.run yourself — it's already wrapped. Use 'context' parameter. Always load() before read, sync() before use. Return JSON-serializable results.`,
+IMPORTANT: DO NOT wrap in Excel.run yourself — it's already wrapped. Use 'context' parameter. Always load() before read, sync() before use. Return JSON-serializable results.
+
+RETURN VALUE: The value you return from the script is delivered back to you as the tool result (under "value"), together with any console.log lines (under "logs"). Use return statements to bring data back into the loop instead of issuing a separate read_range right after. This avoids redundant round-trips.`,
       parameters: {
         type: 'object',
         properties: {
-          code: { type: 'string', description: 'Office.js JavaScript code. Receives "context" param (Excel.RequestContext). DO NOT wrap in Excel.run().' }
+          code: { type: 'string', description: 'Office.js JavaScript code. Receives "context" param (Excel.RequestContext). DO NOT wrap in Excel.run(). Return JSON-serializable data to get it back in the tool result.' }
         },
         required: ['code']
       }
@@ -1006,6 +1048,86 @@ function normalizeQuestionResponsePayload(response) {
   return response;
 }
 
+function normalizeStagnationValue(value, depth = 0) {
+  if (value == null) return value;
+  if (depth >= 4) return '[depth-limit]';
+  if (typeof value === 'string') {
+    return value.length > 160 ? `${value.slice(0, 160)}…` : value;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (Array.isArray(value)) {
+    return value.slice(0, 8).map(item => normalizeStagnationValue(item, depth + 1));
+  }
+  if (typeof value === 'object') {
+    return Object.keys(value).sort().reduce((acc, key) => {
+      acc[key] = normalizeStagnationValue(value[key], depth + 1);
+      return acc;
+    }, {});
+  }
+  return String(value);
+}
+
+function buildToolStagnationSignature(toolName, params = {}) {
+  return `${toolName}:${JSON.stringify(normalizeStagnationValue(params))}`;
+}
+
+function detectToolStagnation(trail, maxRepeat = STAGNATION_MAX_REPEAT, altCycles = STAGNATION_ALT_CYCLES) {
+  if (!Array.isArray(trail) || trail.length === 0) return null;
+  const last = trail[trail.length - 1];
+  if (!last || !STAGNATION_WATCH_TOOLS.has(last.toolName)) return null;
+
+  if (trail.length >= maxRepeat) {
+    const repeated = trail.slice(-maxRepeat);
+    if (repeated.every(entry => entry.signature === last.signature)) {
+      return {
+        pattern: 'repeat',
+        entries: repeated
+      };
+    }
+  }
+
+  const alternatingWindow = altCycles * 2;
+  if (trail.length >= alternatingWindow) {
+    const alternating = trail.slice(-alternatingWindow);
+    const first = alternating[0];
+    const second = alternating[1];
+    if (
+      first &&
+      second &&
+      first.signature !== second.signature &&
+      STAGNATION_WATCH_TOOLS.has(first.toolName) &&
+      STAGNATION_WATCH_TOOLS.has(second.toolName) &&
+      alternating.every((entry, index) => (
+        index % 2 === 0
+          ? entry.signature === first.signature
+          : entry.signature === second.signature
+      ))
+    ) {
+      return {
+        pattern: 'alternating',
+        entries: alternating
+      };
+    }
+  }
+
+  return null;
+}
+
+function formatToolStagnationReason(stagnation) {
+  if (!stagnation || !Array.isArray(stagnation.entries) || stagnation.entries.length === 0) {
+    return 'stagnation_detected';
+  }
+  if (stagnation.pattern === 'repeat') {
+    return `stagnation_repeat:${stagnation.entries[0].toolName}:x${stagnation.entries.length}`;
+  }
+  if (stagnation.pattern === 'alternating' && stagnation.entries.length >= 2) {
+    const first = stagnation.entries[0].toolName;
+    const second = stagnation.entries[1].toolName;
+    return `stagnation_cycle:${first}->${second}:x${Math.floor(stagnation.entries.length / 2)}`;
+  }
+  return `stagnation_${stagnation.pattern}`;
+}
+
 /* ---------- Agent Loop ---------- */
 
 async function runAgentLoop(objective, context, options = {}) {
@@ -1038,6 +1160,7 @@ async function runAgentLoop(objective, context, options = {}) {
 
   const promptVariant = options.promptVariant || DEFAULT_PROMPT_VARIANT;
   const systemPromptForRun = getSystemPrompt(promptVariant);
+  const modelForRun = resolveAgentLoopModel(options.modelOverride, promptVariant);
   logger.info(`[AgentLoop] Using prompt variant "${promptVariant}" (${systemPromptForRun.length} chars)`);
 
   // Auto-skill suggest: preload skill if user message matches known keywords
@@ -1075,6 +1198,10 @@ async function runAgentLoop(objective, context, options = {}) {
   let lastErrorMessage = '';
   let aborted = false;
   let abortReason = '';
+  let forceThinkingNext = false;
+  let parseFailureStreak = 0;
+  const loadedSkillNames = new Set();
+  const recentToolTrail = [];
 
   while (!done && iteration < maxIterations) {
     iteration++;
@@ -1093,6 +1220,7 @@ async function runAgentLoop(objective, context, options = {}) {
             ? `<user-interrupt iteration="${iteration}">\nThe user issued a mid-execution DIRECTIVE. Reassess immediately: drop in-progress steps that conflict with it. Acknowledge briefly in your next "thought" and act on the new directive.\n\nDirective: ${item.text}\n</user-interrupt>`
             : `<user-addendum iteration="${iteration}">\nAdditional info from the user (continue current work, integrate this into the ongoing task):\n${item.text}\n</user-addendum>`;
           messages.push(makeUserMessage(wrapped));
+          recentToolTrail.length = 0;
           onEvent('agentSteered', { iteration, kind: item.kind, text: item.text });
           logger.info(`[AgentLoop] Steer injected (${item.kind}): ${item.text.slice(0, 120)}`);
         }
@@ -1102,15 +1230,18 @@ async function runAgentLoop(objective, context, options = {}) {
     }
 
     try {
-      // DeepSeek calls are cheap enough that quality wins: keep thinking enabled by default.
-      const useThinking = AGENT_THINKING_EVERY_ITER || (AGENT_THINKING_FIRST_ITER && iteration === 1);
+      const useThinking = shouldUseAgentThinking(iteration, {
+        forceThinkingNext,
+        consecutiveErrors,
+        parseFailureStreak
+      });
       const turnId = options.turnId || options.agentId;
       const callOpts = {
         messages,
         timeoutMs,
         fallbackTimeoutMs,
         label: `AgentLoop iter ${iteration}`,
-        modelOverride: options.modelOverride,
+        modelOverride: modelForRun,
         thinkingDisabled: !useThinking,
         reasoningEffort: useThinking ? (process.env.DEEPSEEK_REASONING_EFFORT || 'high') : AGENT_REASONING_EFFORT
       };
@@ -1140,6 +1271,8 @@ async function runAgentLoop(objective, context, options = {}) {
       // Detect JSON parse failure from LLM layer (raw payload returned, no parsed fields)
       const parseFailed = !!(llmResult && llmResult.raw && llmResult.jsonError);
       if (parseFailed) {
+        parseFailureStreak++;
+        if (AGENT_FORCE_THINKING_AFTER_ERROR) forceThinkingNext = true;
         logger.warn(`[AgentLoop] iter ${iteration} LLM JSON parse failed: ${llmResult.jsonError}`);
         onEvent('iterationError', { iteration, error: `LLM JSON parse failed: ${llmResult.jsonError}` });
         messages.push(makeUserMessage(
@@ -1147,6 +1280,8 @@ async function runAgentLoop(objective, context, options = {}) {
         ));
         continue;
       }
+      parseFailureStreak = 0;
+      if (useThinking) forceThinkingNext = false;
 
       // Extract thought and tool call from LLM response
       const thought = llmResult.thought || llmResult.reasoning || '';
@@ -1276,16 +1411,38 @@ async function runAgentLoop(objective, context, options = {}) {
         continue;
       }
 
+      if (toolName === 'read_skill') {
+        const skillName = String(params?.name || '').trim();
+        if (skillName && loadedSkillNames.has(skillName)) {
+          const duplicateSkillMsg = `Skill "${skillName}" is already loaded in context. Do not call read_skill again. Proceed with workbook/data/build tools.`;
+          logger.info(`[AgentLoop] ${duplicateSkillMsg}`);
+          results.push({ type: 'read_skill_duplicate', name: skillName });
+          onEvent('iterationError', { iteration, error: duplicateSkillMsg });
+          messages.push(makeUserMessage(duplicateSkillMsg));
+          continue;
+        }
+      }
+
       // Execute tool
       const toolResult = await executeAgentTool(toolName, params, context, options.requestClientTool);
 
+      if (toolName === 'read_skill') {
+        const skillName = String(params?.name || '').trim();
+        if (skillName) loadedSkillNames.add(skillName);
+      }
+
       // Handle todo_write — pass to client as UI update, don't pause
       if (toolName === 'todo_write') {
-        results.push({ type: 'todo_write', todos: params.todos });
-        onEvent('todoWrite', { todos: params.todos });
-        messages.push(makeUserMessage(
-          `Task list updated: ${params.todos.map(t => `[${t.status}] ${t.content}`).join(', ')}`
-        ));
+        const todos = Array.isArray(params.todos) ? params.todos : [];
+        results.push({ type: 'todo_write', todos });
+        onEvent('todoWrite', { todos });
+        if (todos.length > 0) {
+          messages.push(makeUserMessage(
+            `Task list updated: ${todos.map(t => `[${t.status}] ${t.content}`).join(', ')}`
+          ));
+        } else {
+          messages.push(makeUserMessage('Task list updated.'));
+        }
         continue;
       }
 
@@ -1328,6 +1485,8 @@ async function runAgentLoop(objective, context, options = {}) {
       }
 
       results.push({ type: 'tool', tool: toolName, params, result: toolResult });
+      consecutiveErrors = 0;
+      lastErrorMessage = '';
 
       // Append tool result — use _message if provided, otherwise JSON
       const resultMsg = toolResult && toolResult._message
@@ -1335,6 +1494,35 @@ async function runAgentLoop(objective, context, options = {}) {
         : `Tool result for ${toolName}:\n${JSON.stringify(toolResult, null, 2)}`;
       messages.push(makeUserMessage(resultMsg));
       onEvent('toolResult', { iteration, tool: toolName, result: toolResult });
+
+      recentToolTrail.push({
+        iteration,
+        toolName,
+        signature: buildToolStagnationSignature(toolName, params)
+      });
+      if (recentToolTrail.length > STAGNATION_MAX_TRAIL) {
+        recentToolTrail.splice(0, recentToolTrail.length - STAGNATION_MAX_TRAIL);
+      }
+      const stagnation = detectToolStagnation(recentToolTrail);
+      if (stagnation) {
+        aborted = true;
+        abortReason = formatToolStagnationReason(stagnation);
+        results.push({
+          type: 'error',
+          error: abortReason,
+          stagnation: true,
+          pattern: stagnation.pattern,
+          tools: stagnation.entries.map(entry => entry.toolName)
+        });
+        logger.warn(`[AgentLoop] Stagnation detected (${abortReason})`);
+        onEvent('iterationError', {
+          iteration,
+          error: abortReason,
+          stagnation: true,
+          pattern: stagnation.pattern
+        });
+        break;
+      }
 
       // Auto-compact context if too large (LLM should also call context_snip explicitly)
       const AUTO_COMPACT_LIMIT = Number(process.env.AGENT_AUTO_COMPACT_LIMIT) || 80;
@@ -1402,6 +1590,7 @@ async function runAgentLoop(objective, context, options = {}) {
       }
       results.push({ type: 'error', error: error.message });
       onEvent('iterationError', { iteration, error: error.message });
+      if (AGENT_FORCE_THINKING_AFTER_ERROR) forceThinkingNext = true;
       if (consecutiveErrors >= maxConsecutiveErrors) {
         aborted = true;
         abortReason = `repeated_error_x${consecutiveErrors}: ${error.message}`;
@@ -1926,6 +2115,38 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       };
     }
     case 'execute_office_js': {
+      // RPC path: wait for the client to execute and return real values/logs/errors.
+      // This avoids the legacy fire-and-forget echo, which forced the LLM to spend
+      // extra iterations on read-after-write verification.
+      if (requestClientTool) {
+        try {
+          const rpc = await requestClientTool('runJavaScript', {
+            code: params.code
+          });
+          // rpc shape from client: { ok, value, logs, error }
+          if (rpc && rpc.error) {
+            return {
+              error: rpc.error,
+              logs: Array.isArray(rpc.logs) ? rpc.logs : [],
+              _message: `execute_office_js error: ${rpc.error}${Array.isArray(rpc.logs) && rpc.logs.length ? `\nLogs:\n${rpc.logs.join('\n').slice(0, 1500)}` : ''}`
+            };
+          }
+          return {
+            ok: true,
+            value: rpc && Object.prototype.hasOwnProperty.call(rpc, 'value') ? rpc.value : null,
+            logs: rpc && Array.isArray(rpc.logs) ? rpc.logs : []
+          };
+        } catch (err) {
+          const msg = err && err.message ? err.message : String(err);
+          // Fall through to legacy fire-and-forget on transport failure
+          logger.warn(`[AgentLoop] execute_office_js RPC failed (${msg}); falling back to legacy action dispatch`);
+          return {
+            actions: [{ type: 'runJavaScript', code: params.code }],
+            _message: `execute_office_js dispatched via legacy action (RPC failed: ${msg}). Result values are NOT returned in this path.`
+          };
+        }
+      }
+      // Legacy fire-and-forget when no client channel is available (e.g. server-only test harness).
       return {
         actions: [{
           type: 'runJavaScript',
@@ -1975,23 +2196,23 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
     }
     /* ---------- OpenBB Financial Data ---------- */
     case 'openbb_equity_profile': {
-      const r = await executeTool('openbb.equity.profile', params || {}, toolMemory);
+      const r = await executeTool('openbb.equity.profile', normalizeOpenBBSymbolParams(params || {}), toolMemory);
       return r.data || r;
     }
     case 'openbb_equity_metrics': {
-      const r = await executeTool('openbb.equity.fundamentals.metrics', params || {}, toolMemory);
+      const r = await executeTool('openbb.equity.fundamentals.metrics', normalizeOpenBBSymbolParams(params || {}), toolMemory);
       return r.data || r;
     }
     case 'openbb_equity_balance': {
-      const r = await executeTool('openbb.equity.fundamentals.balance', params || {}, toolMemory);
+      const r = await executeTool('openbb.equity.fundamentals.balance', normalizeOpenBBSymbolParams(params || {}), toolMemory);
       return r.data || r;
     }
     case 'openbb_equity_income': {
-      const r = await executeTool('openbb.equity.fundamentals.income', params || {}, toolMemory);
+      const r = await executeTool('openbb.equity.fundamentals.income', normalizeOpenBBSymbolParams(params || {}), toolMemory);
       return r.data || r;
     }
     case 'openbb_equity_cashflow': {
-      const r = await executeTool('openbb.equity.fundamentals.cash', params || {}, toolMemory);
+      const r = await executeTool('openbb.equity.fundamentals.cash', normalizeOpenBBSymbolParams(params || {}), toolMemory);
       return r.data || r;
     }
     case 'openbb_treasury_rates': {
@@ -2051,4 +2272,19 @@ async function executePythonCode(code) {
   }
 }
 
-module.exports = { runAgentLoop, TOOL_DEFINITIONS, AGENT_SYSTEM_PROMPT, getSystemPrompt, PROMPT_VARIANTS, getCellRangeBounds, colToIndex, indexToCol };
+module.exports = {
+  runAgentLoop,
+  TOOL_DEFINITIONS,
+  AGENT_SYSTEM_PROMPT,
+  getSystemPrompt,
+  PROMPT_VARIANTS,
+  getCellRangeBounds,
+  colToIndex,
+  indexToCol,
+  resolveAgentLoopModel,
+  shouldUseAgentThinking,
+  buildToolStagnationSignature,
+  detectToolStagnation,
+  formatToolStagnationReason,
+  executeAgentTool
+};

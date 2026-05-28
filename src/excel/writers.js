@@ -732,4 +732,11 @@ async function execAddConditionalFormat(context, sheetCache, defaultSheet, actio
   }
 }
 
-export { enqueueActions, executeActions, waitForActionQueueIdle };
+export {
+  enqueueActions,
+  executeActions,
+  waitForActionQueueIdle,
+  execRunJavaScript,
+  sanitizeOfficeJsCode,
+  isRunJavaScriptEnabled
+};

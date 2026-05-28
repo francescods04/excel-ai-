@@ -15,7 +15,7 @@ import { initUndoBadge, showUndoBadge } from './ui/undoBar.js';
 import { hideRequestPanel, showPermissionRequest, showUserInputRequest, showQuestionRequest, collectRequestFormValues, normalizeRequestFields } from './ui/requestPanel.js';
 import { getExcelContext } from './excel/context.js';
 import { worksheetExists, readWorkbookSnapshot, readSheetSnapshot, readRangeSnapshot, readRangeAsCsv, readNamedRanges, readMultiRangeBatch } from './excel/readers.js';
-import { enqueueActions, executeActions as execActions, undoLastSnapshot, waitForActionQueueIdle } from './excel/writers.js';
+import { enqueueActions, executeActions as execActions, undoLastSnapshot, waitForActionQueueIdle, execRunJavaScript, isRunJavaScriptEnabled } from './excel/writers.js';
 import { startTurn, approveTurnExecution, postTurnResponse, postTurnResponseBatch, postTurnActionResult, getTurn, steerTurn, getErrorMessageFromResponse } from './api/turn.js';
 import { startAgent, resumeAgentWithResponse, postAgentClientResponse } from './api/agent.js';
 import { loadModelConfig, changeModel, warmupLLM } from './api/config.js';
@@ -1036,6 +1036,78 @@ async function handleClientToolBatch(requests) {
   }
 }
 
+function safeSerializeRpcValue(value, maxChars = 24000) {
+  if (value === undefined || value === null) return value === undefined ? null : null;
+  try {
+    const seen = new WeakSet();
+    const json = JSON.stringify(value, (_k, v) => {
+      if (v && typeof v === 'object') {
+        if (seen.has(v)) return '[Circular]';
+        seen.add(v);
+      }
+      if (typeof v === 'function') return undefined;
+      if (typeof v === 'bigint') return v.toString();
+      return v;
+    });
+    if (json === undefined) return String(value).slice(0, maxChars);
+    if (json.length > maxChars) {
+      return { _truncated: true, _originalLength: json.length, preview: json.slice(0, maxChars) };
+    }
+    return JSON.parse(json);
+  } catch (err) {
+    return { _serializationError: err.message, preview: String(value).slice(0, 2000) };
+  }
+}
+
+async function runJavaScriptRpc(params) {
+  const code = String(params && params.code || '');
+  if (!code) throw new Error('runJavaScript requires "code"');
+  if (!isRunJavaScriptEnabled()) {
+    return { ok: false, error: 'runJavaScript disabled in client (excelAi.allowRunJavaScript=false)', logs: [] };
+  }
+
+  await waitForPendingExcelActions('runJavaScript RPC');
+
+  const logs = [];
+  const origLog = console.log;
+  const origWarn = console.warn;
+  const origError = console.error;
+  const capture = (level) => (...args) => {
+    try {
+      const line = args.map(a => {
+        if (typeof a === 'string') return a;
+        try { return JSON.stringify(a); } catch (_) { return String(a); }
+      }).join(' ');
+      logs.push(`[${level}] ${line.slice(0, 800)}`);
+      if (logs.length > 200) logs.shift();
+    } catch (_) {}
+    return level === 'log' ? origLog.apply(console, args)
+      : level === 'warn' ? origWarn.apply(console, args)
+      : origError.apply(console, args);
+  };
+
+  try {
+    const value = await Excel.run(async (context) => {
+      console.log = capture('log');
+      console.warn = capture('warn');
+      console.error = capture('error');
+      try {
+        return await execRunJavaScript(context, { code });
+      } finally {
+        console.log = origLog;
+        console.warn = origWarn;
+        console.error = origError;
+      }
+    });
+    return { ok: true, value: safeSerializeRpcValue(value), logs };
+  } catch (err) {
+    console.log = origLog;
+    console.warn = origWarn;
+    console.error = origError;
+    return { ok: false, error: err && err.message ? err.message : String(err), logs };
+  }
+}
+
 async function handleAgentClientToolBatch(agentId, requests) {
   if (!requests || requests.length === 0) return;
   addLog(`Agent clientTool: ${requests.length} richieste`);
@@ -1083,6 +1155,9 @@ async function handleAgentClientToolBatch(agentId, requests) {
             break;
           case 'workbook.listNamedRanges':
             data = await readNamedRanges(request.params || {});
+            break;
+          case 'runJavaScript':
+            data = await runJavaScriptRpc(request.params || {});
             break;
           default:
             throw new Error(`Client tool non supportato: ${request.toolName}`);

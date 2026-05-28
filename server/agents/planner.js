@@ -16,8 +16,10 @@ const { assertPlanWithinLimits } = require('../runtime/safetyLimits');
 
 const PLANNER_TIMEOUT_MS = Number(process.env.PLANNER_TIMEOUT_MS) || 300000;
 const PLANNER_FALLBACK_TIMEOUT_MS = Number(process.env.PLANNER_FALLBACK_TIMEOUT_MS) || 180000;
+const PLANNER_STREAM_TIMEOUT_MS = Number(process.env.PLANNER_STREAM_TIMEOUT_MS) || Math.min(45000, PLANNER_TIMEOUT_MS);
 const PLANNER_MODEL = process.env.PLANNER_MODEL || process.env.OPENROUTER_PLANNER_MODEL || '';
 const PLANNER_FALLBACK_MODEL = process.env.PLANNER_FALLBACK_MODEL || '';
+const PLANNER_WEAK_FINANCE_FALLBACK = process.env.PLANNER_WEAK_FINANCE_FALLBACK !== 'false';
 
 const PLANNER_SYSTEM_PROMPT = `You are an institutional-grade Excel analyst agent (think: an analyst at a top-tier hedge fund / PE shop / consulting firm). You replace a human analyst end-to-end inside Microsoft Excel.
 
@@ -1868,6 +1870,13 @@ function isWeakFinancePlan(normalized, domainPlan) {
   return false;
 }
 
+function shouldFallbackWeakFinancePlan(normalized, domainPlan, runtimeAiOnly = false) {
+  if (!isWeakFinancePlan(normalized, domainPlan)) return false;
+  if (!domainPlan || !Array.isArray(domainPlan.tasks) || domainPlan.tasks.length === 0) return false;
+  if (!runtimeAiOnly) return true;
+  return PLANNER_WEAK_FINANCE_FALLBACK;
+}
+
 function prepareNormalizedPlan(rawPlan, planningContext = {}, objective = '') {
   let normalized = normalizeAndValidatePlan(rawPlan);
   normalized = enforceWorkbookFirstPlan(normalized, planningContext, objective);
@@ -1935,7 +1944,7 @@ async function plan(objective, context, turnId, options = {}) {
       const accumulated = await callLLMStreaming({
         system: PLANNER_SYSTEM_PROMPT,
         userText: userPromptBase,
-        timeoutMs: PLANNER_TIMEOUT_MS,
+        timeoutMs: PLANNER_STREAM_TIMEOUT_MS,
         modelOverride: plannerModel,
         label: 'Planner LLM stream',
         onChunk: (delta, text, isDone) => {
@@ -1950,18 +1959,18 @@ async function plan(objective, context, turnId, options = {}) {
 
       let result = tryParsePlan(accumulated);
       let normalized = prepareNormalizedPlan(result, planningContext, objective);
-      if (isWeakFinancePlan(normalized, domainPlan)) {
-        if (runtimeAiOnly) {
-          throw new Error('Piano finance AI troppo debole in modalita AI-only');
-        }
-        logger.warn('[Planner] Piano LLM finance troppo debole; uso il domain playbook agentico');
+      if (shouldFallbackWeakFinancePlan(normalized, domainPlan, runtimeAiOnly)) {
+        logger.warn(`[Planner] Piano LLM finance troppo debole; uso il domain playbook agentico${runtimeAiOnly ? ' (ai-only bypass)' : ''}`);
         return normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens, planningContext, objective);
+      }
+      if (isWeakFinancePlan(normalized, domainPlan) && runtimeAiOnly) {
+        throw new Error('Piano finance AI troppo debole in modalita AI-only');
       }
       logger.info(`[Planner] Piano generato:`, normalized.tasks.length, 'task');
       setCachedPlan(cacheKey, normalized, objectiveTokens);
       return normalized;
     } catch (streamError) {
-      logger.warn(`[Planner] Streaming failed, falling back to regular call: ${streamError.message}`);
+      logger.warn(`[Planner] Streaming failed after ${PLANNER_STREAM_TIMEOUT_MS}ms, falling back to regular call: ${streamError.message}`);
     }
   }
 
@@ -1989,12 +1998,12 @@ async function plan(objective, context, turnId, options = {}) {
       }
 
       let normalized = prepareNormalizedPlan(result, planningContext, objective);
-      if (isWeakFinancePlan(normalized, domainPlan)) {
-        if (runtimeAiOnly) {
-          throw new Error('Piano finance AI troppo debole in modalita AI-only');
-        }
-        logger.warn('[Planner] Piano LLM finance troppo debole; uso il domain playbook agentico');
+      if (shouldFallbackWeakFinancePlan(normalized, domainPlan, runtimeAiOnly)) {
+        logger.warn(`[Planner] Piano LLM finance troppo debole; uso il domain playbook agentico${runtimeAiOnly ? ' (ai-only bypass)' : ''}`);
         return normalizeDomainPlan(domainPlan, cacheKey, objectiveTokens, planningContext, objective);
+      }
+      if (isWeakFinancePlan(normalized, domainPlan) && runtimeAiOnly) {
+        throw new Error('Piano finance AI troppo debole in modalita AI-only');
       }
       logger.info(`[Planner] Piano generato in ${elapsed}ms:`, normalized.tasks.length, 'task');
       setCachedPlan(cacheKey, normalized, objectiveTokens);
@@ -2021,6 +2030,7 @@ module.exports = {
   ensureWorkbookUnderstandingPlan,
   workbookHasLocalFinancials,
   shouldUseDomainPlaybookFirst,
+  shouldFallbackWeakFinancePlan,
   compactDomainPlanForPrompt,
   PLANNER_SYSTEM_PROMPT
 };

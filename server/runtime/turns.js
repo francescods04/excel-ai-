@@ -24,6 +24,7 @@ const { track } = require('../telemetry/tracker');
 const { triageObjective } = require('../agents/triage');
 const { generateBlueprint } = require('../agents/architect');
 const { runParallelBlueprint } = require('../agents/parallelOrchestrator');
+const { runWithExecutionContext } = require('../utils/executionContext');
 
 const TURNS_DIR = path.join(__dirname, '..', 'turns');
 
@@ -652,7 +653,8 @@ function buildTurn(message, context, parentTurnId = null, options = {}) {
     context: context || {},
     strategy,
     llm: {
-      modelOverride: options.modelOverride || null
+      modelOverride: options.modelOverride || null,
+      plannerModelOverride: options.plannerModelOverride || null
     },
     status: 'planning',
     error: null,
@@ -665,6 +667,13 @@ function buildTurn(message, context, parentTurnId = null, options = {}) {
     createdAt,
     updatedAt: createdAt
   };
+}
+
+function resolvePlannerModelOverride(turn) {
+  const plannerModelOverride = turn?.llm?.plannerModelOverride;
+  if (typeof plannerModelOverride !== 'string') return undefined;
+  const normalized = plannerModelOverride.trim();
+  return normalized || undefined;
 }
 
 function normalizeObjectiveText(objective) {
@@ -1266,6 +1275,7 @@ async function planTurn(turnId) {
   const turn = _getTurnRef(turnId);
   if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
   let stopPlanningHeartbeat = () => {};
+  const plannerModelOverride = resolvePlannerModelOverride(turn);
 
   try {
     appendLog(turnId, 'Creo il piano di esecuzione agentico...');
@@ -1293,7 +1303,8 @@ async function planTurn(turnId) {
       const triage = await triageObjective({
         objective: turn.objective,
         context: turn.context || {},
-        parentSummary: parentResults ? `Parent has ${Object.keys(parentResults).length} task results.` : ''
+        parentSummary: parentResults ? `Parent has ${Object.keys(parentResults).length} task results.` : '',
+        modelOverride: plannerModelOverride
       });
       appendLog(turnId, `Triage: ${triage.complexity}, mode=${triage.mode}, ~${triage.estimated_iterations} iter (${triage.reasoning})`, 'info');
       streaming.sendEvent(turnId, 'triageDecision', triage);
@@ -1337,7 +1348,8 @@ async function planTurn(turnId) {
         blueprint = await generateBlueprint({
           objective: turn.objective,
           context: enrichedContext,
-          triage: strategy.triage || null
+          triage: strategy.triage || null,
+          modelOverride: plannerModelOverride
         });
       } catch (err) {
         appendLog(turnId, `Architect fallita (${err.message}). Fallback su deep planner sequenziale.`, 'warn');
@@ -1444,7 +1456,7 @@ async function planTurn(turnId) {
 
     emitPlanningTodos(turnId, 'llm');
     const plan = await planner.plan(turn.objective, enrichedContext, turnId, {
-      modelOverride: turn.llm?.modelOverride || undefined
+      modelOverride: plannerModelOverride
     });
     emitPlanningTodos(turnId, 'review');
 
@@ -1747,6 +1759,7 @@ function skipTaskDueToFailedDeps(turnId, task, failedDeps) {
 async function escalateAgentLoopTurn(turnId, strategy, attemptResult, collectedActions = []) {
   const turn = _getTurnRef(turnId);
   if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
+  const plannerModelOverride = resolvePlannerModelOverride(turn);
 
   storeTaskResult(turnId, `${AGENT_LOOP_TASK_ID}:attempt`, {
     data: {
@@ -1766,7 +1779,7 @@ async function escalateAgentLoopTurn(turnId, strategy, attemptResult, collectedA
 
   const enrichedContext = buildTurnExecutionContext(turn);
   const deepPlan = await planner.plan(turn.objective, enrichedContext, turnId, {
-    modelOverride: turn.llm?.modelOverride || undefined
+    modelOverride: plannerModelOverride
   });
 
   turn.plan = deepPlan;
@@ -2280,7 +2293,14 @@ function startTurn(message, context, parentTurnId = null, options = {}) {
   });
   emitItemStarted(turn.id, planItem);
 
-  void planTurn(turn.id);
+  void runWithExecutionContext({
+    turnId: turn.id,
+    userId: turn.userId || null,
+    parentTurnId: turn.parentTurnId || null,
+    phase: 'planning',
+    workflow: 'turn',
+    source: 'turn.start',
+  }, () => planTurn(turn.id));
   return loadTurn(turn.id);
 }
 
@@ -2297,7 +2317,14 @@ function approveTurn(turnId) {
   const runningTurn = setTurnStatus(turnId, 'running');
   appendLog(turnId, 'Avvio esecuzione del piano approvato.');
   emitExecutionTodos(turnId, 'queued');
-  void executeTurn(turnId);
+  void runWithExecutionContext({
+    turnId: turn.id,
+    userId: turn.userId || null,
+    parentTurnId: turn.parentTurnId || null,
+    phase: 'execution',
+    workflow: 'turn',
+    source: 'turn.approve',
+  }, () => executeTurn(turnId));
   return runningTurn;
 }
 
@@ -2409,6 +2436,7 @@ module.exports = {
   loadTurn,
   buildExecutionMemory,
   chooseTurnStrategy,
+  resolvePlannerModelOverride,
   respondToTurnRequest,
   applyActionExecutionResult,
   recordActionExecution,

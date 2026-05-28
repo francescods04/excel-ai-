@@ -47,6 +47,12 @@
       color: #e8ecf0;
     }
     .kpi .value.amber { color: #f0a040; }
+    .kpi .value.red { color: #f87171; }
+    .kpi .value.green { color: #26c97d; }
+    .kpi .subvalue {
+      margin-top: 6px; font-size: 10px; color: rgba(255,255,255,0.25);
+      font-family: 'JetBrains Mono', monospace;
+    }
 
     .charts { position: relative; z-index: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 24px; }
     .chart-box {
@@ -80,13 +86,61 @@
       border-bottom: 1px solid rgba(255,255,255,0.03);
     }
     tr:hover td { color: rgba(255,255,255,0.75); }
+    tbody tr { cursor: pointer; }
     .status-completed { color: #26c97d; }
     .status-failed { color: #f87171; }
     .muted { color: rgba(255,255,255,0.2); }
+    .stack { display: grid; gap: 12px; margin-top: 24px; position: relative; z-index: 1; }
+    .panel-grid {
+      display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.9fr); gap: 12px;
+      align-items: start;
+    }
+    .panel-header {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px;
+    }
+    .filters {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    }
+    .filters input, .filters select {
+      padding: 7px 10px; background: rgba(255,255,255,0.025); border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 6px; color: rgba(255,255,255,0.72); font-size: 11px; min-height: 34px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .filters input::placeholder { color: rgba(255,255,255,0.25); }
+    .table-scroll { overflow: auto; max-height: 420px; }
+    .trace-row.selected td {
+      background: rgba(240,160,64,0.08); color: rgba(255,255,255,0.9);
+    }
+    .trace-detail {
+      min-height: 420px; display: flex; flex-direction: column;
+    }
+    .trace-meta {
+      font-family: 'JetBrains Mono', monospace; font-size: 10px; color: rgba(255,255,255,0.3);
+      margin-bottom: 12px; line-height: 1.6;
+      white-space: pre-wrap;
+    }
+    .trace-json {
+      flex: 1; overflow: auto; background: rgba(5,8,12,0.72); border: 1px solid rgba(255,255,255,0.05);
+      border-radius: 8px; padding: 14px; color: #cdd8e3; font-size: 11px; line-height: 1.5;
+      font-family: 'JetBrains Mono', monospace;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .trace-empty {
+      color: rgba(255,255,255,0.25); font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    }
+    .chip {
+      display: inline-flex; align-items: center; border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 999px; padding: 2px 8px; font-size: 10px; color: rgba(255,255,255,0.45);
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .preview-cell {
+      max-width: 320px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
 
     @media (max-width: 900px) {
       .kpis { grid-template-columns: repeat(2, 1fr); }
       .charts { grid-template-columns: 1fr; }
+      .panel-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -101,6 +155,13 @@
     <div class="kpi"><div class="label">Turns Today</div><div class="value" id="turnsToday">—</div></div>
     <div class="kpi"><div class="label">Errors 24h</div><div class="value amber" id="errors24h">—</div></div>
     <div class="kpi"><div class="label">Tokens Out 24h</div><div class="value" id="tokensOut">—</div></div>
+  </div>
+
+  <div class="kpis">
+    <div class="kpi"><div class="label">LLM Requests</div><div class="value" id="llmRequests">—</div><div class="subvalue" id="llmResponsesSub">responses —</div></div>
+    <div class="kpi"><div class="label">LLM Errors</div><div class="value red" id="llmErrors">—</div><div class="subvalue" id="llmFallbacksSub">fallbacks —</div></div>
+    <div class="kpi"><div class="label">Avg LLM Latency</div><div class="value green" id="llmLatency">—</div><div class="subvalue" id="llmTokensSub">tokens out —</div></div>
+    <div class="kpi"><div class="label">Trace Window</div><div class="value" id="llmWindow">—</div><div class="subvalue">local JSONL trace log</div></div>
   </div>
 
   <div class="charts">
@@ -120,6 +181,97 @@
       <thead><tr><th>User</th><th>Status</th><th>Tasks</th><th>Actions</th><th>Latency</th><th>Created</th></tr></thead>
       <tbody id="recentTurns"></tbody>
     </table>
+  </div>
+
+  <div class="stack">
+    <div class="panel-grid">
+      <div class="table-box">
+        <div class="panel-header">
+          <h3>Recent LLM traces</h3>
+          <div class="filters">
+            <input type="date" id="traceSince">
+            <select id="traceEvent">
+              <option value="">all events</option>
+              <option value="llm.request">llm.request</option>
+              <option value="llm.response">llm.response</option>
+              <option value="llm.error">llm.error</option>
+              <option value="llm.fallback">llm.fallback</option>
+            </select>
+            <select id="traceRole">
+              <option value="">all roles</option>
+              <option value="planner">planner</option>
+              <option value="triage">triage</option>
+              <option value="architect">architect</option>
+              <option value="builder_hard">builder_hard</option>
+              <option value="builder_analytical">builder_analytical</option>
+              <option value="builder_structural">builder_structural</option>
+              <option value="critic">critic</option>
+              <option value="refiner">refiner</option>
+              <option value="narrator">narrator</option>
+              <option value="schema_infer">schema_infer</option>
+              <option value="verifier">verifier</option>
+            </select>
+            <select id="traceAttempt">
+              <option value="">all attempts</option>
+              <option value="primary">primary</option>
+              <option value="fallback">fallback</option>
+            </select>
+            <input type="text" id="traceTurn" placeholder="turn id">
+            <button class="refresh-btn" onclick="loadTraceViews()">Apply</button>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Time</th><th>Event</th><th>Role</th><th>Attempt</th><th>Label</th><th>Turn</th><th>Latency</th><th>Preview</th></tr></thead>
+            <tbody id="recentTraces"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="table-box trace-detail">
+        <div class="panel-header">
+          <h3>Trace detail</h3>
+          <span class="chip" id="traceDetailChip">select a trace</span>
+        </div>
+        <div class="trace-meta" id="traceMeta">No trace selected.</div>
+        <pre class="trace-json" id="traceDetail">Click a row to inspect sanitized prompt / response payloads.</pre>
+      </div>
+    </div>
+
+    <div class="panel-grid">
+      <div class="table-box">
+        <h3>LLM routing by role</h3>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Role</th><th>Requests</th><th>Responses</th><th>Errors</th><th>Avg latency</th></tr></thead>
+            <tbody id="llmRoleSummary"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="table-box">
+        <h3>Agent loop outcome reasons</h3>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Reason</th><th>Count</th><th>Escalated</th><th>Avg iter</th></tr></thead>
+            <tbody id="runtimeReasonSummary"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="table-box">
+      <div class="panel-header">
+        <h3>Recent agent loop outcomes</h3>
+        <span class="chip" id="runtimeOutcomesChip">scanning saved turns</span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Time</th><th>Status</th><th>Reason</th><th>Iter</th><th>Escalated</th><th>Turn</th></tr></thead>
+          <tbody id="recentRuntimeOutcomes"></tbody>
+        </table>
+      </div>
+    </div>
   </div>
 
 <script>
@@ -142,6 +294,9 @@ function getToken() {
 const tok = getToken();
 if (!tok) { document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:monospace;color:#f87171">Access denied — login first in the Excel add-in</div>'; throw new Error('no token'); }
 const h = { Authorization: `Bearer ${tok}` };
+let selectedTraceId = null;
+
+document.getElementById('traceSince').value = new Date().toISOString().slice(0, 10);
 
 async function loadStats() {
   const r = await fetch(`${BASE}/stats`, { headers: h });
@@ -200,17 +355,227 @@ async function loadRecentTurns() {
   const r = await fetch(`${BASE}/recent-turns`, { headers: h });
   const turns = await r.json();
   document.getElementById('recentTurns').innerHTML = turns.map(t => `
-    <tr>
-      <td>${t.userEmail?.split('@')[0] || t.userId?.slice(0,6) || '—'}</td>
-      <td class="status-${t.status}">${t.status}</td>
+    <tr data-turn-id="${esc(t.id || '')}">
+      <td>${esc(t.userEmail?.split('@')[0] || t.userId?.slice(0,6) || '—')}</td>
+      <td class="status-${esc(t.status)}">${esc(t.status)}</td>
       <td>${t.taskCount || 0}</td>
       <td>${t.actionCount || 0}</td>
       <td class="${!t.totalLatencyMs ? 'muted' : ''}">${t.totalLatencyMs ? (t.totalLatencyMs/1000).toFixed(1)+'s' : '—'}</td>
-      <td class="muted">${t.createdAt?.slice(0,16) || '—'}</td>
+      <td class="muted">${esc(t.createdAt?.slice(0,16) || '—')}</td>
     </tr>`).join('');
+  Array.from(document.querySelectorAll('#recentTurns tr[data-turn-id]')).forEach(row => {
+    row.addEventListener('click', () => {
+      document.getElementById('traceTurn').value = row.dataset.turnId || '';
+      loadTraceViews();
+    });
+  });
 }
 
-function loadAll() { loadStats(); loadCharts(); loadRecentTurns(); }
+function getTraceQuery(limit = 40) {
+  const params = new URLSearchParams();
+  const since = document.getElementById('traceSince').value;
+  const eventType = document.getElementById('traceEvent').value;
+  const role = document.getElementById('traceRole').value;
+  const attempt = document.getElementById('traceAttempt').value;
+  const turnId = document.getElementById('traceTurn').value.trim();
+  if (since) params.set('since', since);
+  if (eventType) params.set('eventType', eventType);
+  if (role) params.set('role', role);
+  if (attempt) params.set('attempt', attempt);
+  if (turnId) params.set('turnId', turnId);
+  params.set('limit', String(limit));
+  return params.toString();
+}
+
+function getRuntimeQuery(limit = 30) {
+  const params = new URLSearchParams();
+  const since = document.getElementById('traceSince').value;
+  const turnId = document.getElementById('traceTurn').value.trim();
+  if (since) params.set('since', since);
+  if (turnId) params.set('turnId', turnId);
+  params.set('limit', String(limit));
+  return params.toString();
+}
+
+function fmtLatency(ms) {
+  if (!ms) return '—';
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function fmtTokens(promptTokens, completionTokens) {
+  const total = (promptTokens || 0) + (completionTokens || 0);
+  return total ? total.toLocaleString() : '—';
+}
+
+function esc(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function setTraceDetailEmpty(message = 'Click a row to inspect sanitized prompt / response payloads.') {
+  document.getElementById('traceDetailChip').textContent = 'select a trace';
+  document.getElementById('traceMeta').textContent = 'No trace selected.';
+  document.getElementById('traceDetail').textContent = message;
+}
+
+async function loadTraceSummary() {
+  const q = getTraceQuery(40);
+  const r = await fetch(`${BASE}/llm-traces/summary?${q}`, { headers: h });
+  const d = await r.json();
+  document.getElementById('llmRequests').textContent = d.requests ?? 0;
+  document.getElementById('llmResponsesSub').textContent = `responses ${(d.responses ?? 0).toLocaleString()}`;
+  document.getElementById('llmErrors').textContent = d.errors ?? 0;
+  document.getElementById('llmFallbacksSub').textContent = `fallbacks ${(d.fallbacks ?? 0).toLocaleString()}`;
+  document.getElementById('llmLatency').textContent = fmtLatency(d.avgLatencyMs || 0);
+  document.getElementById('llmTokensSub').textContent = `tokens out ${(d.completionTokens || 0).toLocaleString()}`;
+  document.getElementById('llmWindow').textContent = d.count ?? 0;
+  renderRoleSummary(d.byRole || {});
+}
+
+function renderRoleSummary(byRole) {
+  const tbody = document.getElementById('llmRoleSummary');
+  const rows = Object.entries(byRole || {})
+    .sort((left, right) => (right[1].responses || 0) - (left[1].responses || 0));
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="muted">No LLM traces for the active filters.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(([role, bucket]) => `
+    <tr>
+      <td>${esc(role)}</td>
+      <td>${(bucket.requests || 0).toLocaleString()}</td>
+      <td>${(bucket.responses || 0).toLocaleString()}</td>
+      <td>${(bucket.errors || 0).toLocaleString()}</td>
+      <td>${fmtLatency(bucket.avgLatencyMs || 0)}</td>
+    </tr>
+  `).join('');
+}
+
+async function loadTraceDetail(traceId) {
+  selectedTraceId = traceId;
+  const r = await fetch(`${BASE}/llm-traces/${encodeURIComponent(traceId)}`, { headers: h });
+  if (!r.ok) {
+    setTraceDetailEmpty('Trace detail unavailable.');
+    return;
+  }
+  const d = await r.json();
+  document.getElementById('traceDetailChip').textContent = traceId;
+  const first = d.records?.[0] || {};
+  document.getElementById('traceMeta').textContent = [
+    `records: ${d.count || 0}`,
+    `turn: ${first.turnId || '—'}`,
+    `phase: ${first.phase || '—'}`,
+    `workflow: ${first.workflow || '—'}`,
+    `label: ${first.label || '—'}`,
+    `role: ${first.role || '—'}`,
+    `attempt: ${first.attempt || '—'}`
+  ].join('\n');
+  document.getElementById('traceDetail').textContent = JSON.stringify(d.records || [], null, 2);
+  document.querySelectorAll('.trace-row').forEach(row => {
+    row.classList.toggle('selected', row.dataset.traceId === traceId);
+  });
+}
+
+async function loadRecentTraces() {
+  const q = getTraceQuery(40);
+  const r = await fetch(`${BASE}/llm-traces?${q}`, { headers: h });
+  const traces = await r.json();
+  const tbody = document.getElementById('recentTraces');
+  tbody.innerHTML = traces.map(t => `
+    <tr class="trace-row" data-trace-id="${esc(t.traceId)}">
+      <td class="muted">${esc(t.ts?.slice(11,19) || '—')}</td>
+      <td>${esc(t.eventType)}</td>
+      <td>${esc(t.role || '—')}</td>
+      <td>${esc(t.attempt || '—')}</td>
+      <td>${esc(t.label || '—')}</td>
+      <td class="muted">${esc(t.turnId ? t.turnId.slice(0,18) : '—')}</td>
+      <td>${fmtLatency(t.latencyMs)}</td>
+      <td class="preview-cell">${esc(t.preview || `${t.messageCount} msgs / ${t.messageChars}c / tokens ${fmtTokens(t.promptTokens, t.completionTokens)}`)}</td>
+    </tr>`).join('');
+
+  if (!traces.length) {
+    setTraceDetailEmpty('No matching traces for the active filters.');
+    return;
+  }
+
+  Array.from(tbody.querySelectorAll('.trace-row')).forEach(row => {
+    row.addEventListener('click', () => loadTraceDetail(row.dataset.traceId));
+  });
+
+  const stillVisible = traces.some(t => t.traceId === selectedTraceId);
+  await loadTraceDetail(stillVisible ? selectedTraceId : traces[0].traceId);
+}
+
+async function loadTraceViews() {
+  await Promise.all([loadTraceSummary(), loadRecentTraces(), loadRuntimeSummary(), loadRecentRuntimeOutcomes()]);
+}
+
+async function loadRuntimeSummary() {
+  const q = getRuntimeQuery(60);
+  const r = await fetch(`${BASE}/runtime-outcomes/summary?${q}`, { headers: h });
+  const d = await r.json();
+  renderRuntimeReasonSummary(d);
+  document.getElementById('runtimeOutcomesChip').textContent =
+    `${(d.count || 0).toLocaleString()} loops · escalated ${(d.escalated || 0).toLocaleString()} · avg iter ${d.avgIterations || 0}`;
+}
+
+function renderRuntimeReasonSummary(summary) {
+  const tbody = document.getElementById('runtimeReasonSummary');
+  const rows = Object.entries(summary.byReasonCategory || {})
+    .sort((left, right) => (right[1].count || 0) - (left[1].count || 0));
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="muted">No agent loop outcomes in the active window.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(([reason, bucket]) => `
+    <tr>
+      <td>${esc(reason)}</td>
+      <td>${(bucket.count || 0).toLocaleString()}</td>
+      <td>${(bucket.escalated || 0).toLocaleString()}</td>
+      <td>${bucket.avgIterations || 0}</td>
+    </tr>
+  `).join('');
+}
+
+async function loadRecentRuntimeOutcomes() {
+  const q = getRuntimeQuery(30);
+  const r = await fetch(`${BASE}/runtime-outcomes?${q}`, { headers: h });
+  const records = await r.json();
+  const tbody = document.getElementById('recentRuntimeOutcomes');
+  if (!records.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="muted">No agent loop outcomes for the active filters.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = records.map(record => `
+    <tr data-runtime-turn-id="${esc(record.turnId || '')}">
+      <td class="muted">${esc(record.ts?.slice(11,19) || record.updatedAt?.slice(11,19) || '—')}</td>
+      <td>${esc(record.status || '—')}</td>
+      <td>${esc(record.reasonDetail || record.reasonCategory || '—')}</td>
+      <td>${record.iteration ?? '—'}</td>
+      <td>${record.escalated ? 'yes' : 'no'}</td>
+      <td class="muted">${esc(record.turnId ? record.turnId.slice(0,18) : '—')}</td>
+    </tr>
+  `).join('');
+  Array.from(tbody.querySelectorAll('tr[data-runtime-turn-id]')).forEach(row => {
+    row.addEventListener('click', () => {
+      document.getElementById('traceTurn').value = row.dataset.runtimeTurnId || '';
+      loadTraceViews();
+    });
+  });
+}
+
+function loadAll() {
+  loadStats();
+  loadCharts();
+  loadRecentTurns();
+  loadTraceViews();
+}
+
 loadAll();
 </script>
 </body>

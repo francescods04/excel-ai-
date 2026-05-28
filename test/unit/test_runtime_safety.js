@@ -5,7 +5,14 @@ const {
   assertActionBatchWithinLimits,
   allSettledLimit
 } = require('../../server/runtime/safetyLimits');
-const { chooseTurnStrategy } = require('../../server/runtime/turns');
+const { chooseTurnStrategy, resolvePlannerModelOverride } = require('../../server/runtime/turns');
+const {
+  buildToolStagnationSignature,
+  detectToolStagnation,
+  formatToolStagnationReason,
+  resolveAgentLoopModel,
+  shouldUseAgentThinking
+} = require('../../server/agents/agentLoop');
 
 async function test(name, fn) {
   try {
@@ -95,6 +102,82 @@ async function main() {
     assert.strictEqual(strategy.mode, 'agent_loop');
     assert.strictEqual(strategy.promptVariant, 'default');
     assert.strictEqual(strategy.reason, 'continuity_incremental_edit');
+  });
+
+  await test('planner override ignores generic execution model override unless explicitly set', () => {
+    assert.strictEqual(resolvePlannerModelOverride({
+      llm: { modelOverride: 'deepseek-v4-pro' }
+    }), undefined);
+
+    assert.strictEqual(resolvePlannerModelOverride({
+      llm: {
+        modelOverride: 'deepseek-v4-pro',
+        plannerModelOverride: 'deepseek-v4-flash'
+      }
+    }), 'deepseek-v4-flash');
+  });
+
+  await test('agent loop stagnation guard catches identical repeated read tool calls', () => {
+    const signature = buildToolStagnationSignature('get_cell_ranges', {
+      ranges: [{ sheet: 'DCF', target: 'B5:E12' }]
+    });
+    const trail = Array.from({ length: 4 }, (_, index) => ({
+      iteration: index + 1,
+      toolName: 'get_cell_ranges',
+      signature
+    }));
+
+    const stagnation = detectToolStagnation(trail, 4, 3);
+    assert.ok(stagnation);
+    assert.strictEqual(stagnation.pattern, 'repeat');
+    assert.match(formatToolStagnationReason(stagnation), /stagnation_repeat:get_cell_ranges:x4/);
+  });
+
+  await test('agent loop stagnation guard catches alternating read-write loops', () => {
+    const readEntry = {
+      toolName: 'get_cell_ranges',
+      signature: buildToolStagnationSignature('get_cell_ranges', {
+        ranges: [{ sheet: 'DCF', target: 'F10:H18' }]
+      })
+    };
+    const writeEntry = {
+      toolName: 'execute_office_js',
+      signature: buildToolStagnationSignature('execute_office_js', {
+        code: 'await Excel.run(async (context) => { /* repeated fix */ });'
+      })
+    };
+    const trail = [
+      readEntry,
+      writeEntry,
+      readEntry,
+      writeEntry,
+      readEntry,
+      writeEntry
+    ].map((entry, index) => ({
+      iteration: index + 1,
+      toolName: entry.toolName,
+      signature: entry.signature
+    }));
+
+    const stagnation = detectToolStagnation(trail, 4, 3);
+    assert.ok(stagnation);
+    assert.strictEqual(stagnation.pattern, 'alternating');
+    assert.match(formatToolStagnationReason(stagnation), /stagnation_cycle:get_cell_ranges->execute_office_js:x3/);
+  });
+
+  await test('agent loop defaults to flash routing unless explicitly overridden', () => {
+    assert.strictEqual(resolveAgentLoopModel(undefined, 'fast'), 'deepseek-v4-flash');
+    assert.strictEqual(resolveAgentLoopModel(undefined, 'default'), 'deepseek-v4-flash');
+    assert.strictEqual(resolveAgentLoopModel('deepseek-v4-pro', 'fast'), 'deepseek-v4-pro');
+  });
+
+  await test('agent loop thinking cadence uses first step, interval, and recovery triggers', () => {
+    assert.strictEqual(shouldUseAgentThinking(1, {}), true);
+    assert.strictEqual(shouldUseAgentThinking(2, {}), false);
+    assert.strictEqual(shouldUseAgentThinking(6, {}), true);
+    assert.strictEqual(shouldUseAgentThinking(3, { forceThinkingNext: true }), true);
+    assert.strictEqual(shouldUseAgentThinking(3, { consecutiveErrors: 1 }), true);
+    assert.strictEqual(shouldUseAgentThinking(4, { parseFailureStreak: 1 }), true);
   });
 }
 
