@@ -158,7 +158,7 @@ const DEFAULT_PROMPT_VARIANT = process.env.AGENT_PROMPT_VARIANT || 'default';
 let AGENT_SYSTEM_PROMPT = loadPromptVariant(DEFAULT_PROMPT_VARIANT);
 
 /* Common output format suffix appended to ANY variant */
-const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nOUTPUT FORMAT: Respond with a JSON object containing:\n{\n  "thought": "Your reasoning about what to do next",\n  "tool": "tool_name",\n  "params": { ...tool parameters... }\n}\n\nIMPORTANT: NEVER call more than one tool at a time. Wait for the result before the next step.\n\nEXCEL AGENT WORKFLOW:\n- For complex workbook work, inspect the workbook first, build_workbook_graph for multi-sheet dependency context, create a brief task list, then execute in small visible chunks.\n- Prefer set_cell_range for each logical section instead of many single-cell writes.\n- After important writes, verify touched ranges or formulas before calling done.\n- Report only changes you actually made and checked, with sheet names and ranges.\n- Use allow_overwrite:false when exploring a new range. Use allow_overwrite:true only when the user asked to replace or the target sheet was just created by you.\n\nWHEN THE TASK IS COMPLETE: You MUST call the tool "done" with a summary. Do NOT keep calling other tools after the work is finished. Calling "done" ends the session.\n\nPYTHON RULES:\n- execute_python is ONLY for mathematical calculations on data provided as variables in the code string.\n- execute_python does NOT have access to the Excel workbook file system. Do NOT use openpyxl, xlrd, or any file paths like /tmp/current.xlsx, /files/input/workbook.xlsx, etc.\n- To read or write Excel, always use the dedicated Excel tools (set_cell_range, create_sheet, execute_excel_formula, etc.).\n\nDATA RULES:\n- For public-company valuation work, use available finance tools first (OpenBB/Yahoo, treasury/macro tools when relevant), then visible workbook data.\n- Do not invent live market data. If a value is from training memory or a heuristic, label it as an assumption in the workbook.\n- Add short notes/comments for externally sourced input cells when the write tool supports notes.\n- Search/fetch the web only when the user asks for current source material or when a required data point is unavailable from the provided finance tools.\n\nASK_USER_QUESTION RULES (CRITICAL):\n- The tool ask_user_question is an EMERGENCY BREAK. Use it ONLY when a truly critical piece of information is missing AND cannot be inferred from the workbook context or the user's original request.\n- NEVER ask the user for confirmation before proceeding (e.g. "Should I proceed?", "Continue?", "Go ahead?"). Just DO the work.\n- NEVER ask which sheet to use — the active sheet is provided in the context. If unspecified, default to the active sheet.\n- NEVER ask for a ticker/company name if the user already mentioned it in the original request.\n- NEVER ask for data that is already visible in the workbook context preview. Reference those cells directly.\n- If you are unsure about a minor assumption, make a reasonable default choice and proceed. Do NOT pause the flow.
+const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nOUTPUT FORMAT: Respond with a JSON object containing:\n{\n  "thought": "Your reasoning about what to do next",\n  "tool": "tool_name",\n  "params": { ...tool parameters... }\n}\n\nIMPORTANT: Call exactly one tool per response. The only way to do multiple things in one iteration is the parallel_calls tool, which fans out up to 8 INDEPENDENT read-only calls (reads, OpenBB fetches, bundles) in parallel. Use parallel_calls whenever you would otherwise emit multiple consecutive read-only tool calls — it cuts those N iterations down to 1. Mutations and writes still run sequentially, one per iteration.\n\nEXCEL AGENT WORKFLOW:\n- For complex workbook work, inspect the workbook first, build_workbook_graph for multi-sheet dependency context, create a brief task list, then execute in small visible chunks.\n- Prefer set_cell_range for each logical section instead of many single-cell writes.\n- After important writes, verify touched ranges or formulas before calling done.\n- Report only changes you actually made and checked, with sheet names and ranges.\n- Use allow_overwrite:false when exploring a new range. Use allow_overwrite:true only when the user asked to replace or the target sheet was just created by you.\n\nWHEN THE TASK IS COMPLETE: You MUST call the tool "done" with a summary. Do NOT keep calling other tools after the work is finished. Calling "done" ends the session.\n\nPYTHON RULES:\n- execute_python is ONLY for mathematical calculations on data provided as variables in the code string.\n- execute_python does NOT have access to the Excel workbook file system. Do NOT use openpyxl, xlrd, or any file paths like /tmp/current.xlsx, /files/input/workbook.xlsx, etc.\n- To read or write Excel, always use the dedicated Excel tools (set_cell_range, create_sheet, execute_excel_formula, etc.).\n\nDATA RULES:\n- For public-company valuation work, use available finance tools first (OpenBB/Yahoo, treasury/macro tools when relevant), then visible workbook data.\n- Do not invent live market data. If a value is from training memory or a heuristic, label it as an assumption in the workbook.\n- Add short notes/comments for externally sourced input cells when the write tool supports notes.\n- Search/fetch the web only when the user asks for current source material or when a required data point is unavailable from the provided finance tools.\n\nASK_USER_QUESTION RULES (CRITICAL):\n- The tool ask_user_question is an EMERGENCY BREAK. Use it ONLY when a truly critical piece of information is missing AND cannot be inferred from the workbook context or the user's original request.\n- NEVER ask the user for confirmation before proceeding (e.g. "Should I proceed?", "Continue?", "Go ahead?"). Just DO the work.\n- NEVER ask which sheet to use — the active sheet is provided in the context. If unspecified, default to the active sheet.\n- NEVER ask for a ticker/company name if the user already mentioned it in the original request.\n- NEVER ask for data that is already visible in the workbook context preview. Reference those cells directly.\n- If you are unsure about a minor assumption, make a reasonable default choice and proceed. Do NOT pause the flow.
 
 CITATION RULES:
 - Every action explanation MUST include a citation in the format: [A1:D1](<citation:SheetName!A1:D1>)
@@ -914,6 +914,45 @@ RETURN VALUE: The value you return from the script is delivered back to you as t
           top_k: { type: 'number', description: 'Max results to return (default 5)' }
         },
         required: ['query']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'parallel_calls',
+      description: `Execute MULTIPLE independent read-only tools in PARALLEL in a single iteration. Use this when you need several pieces of data that do NOT depend on each other (e.g. read three unrelated ranges, fetch profile + macro + named ranges at once). Cuts N independent LLM round-trips down to 1.
+
+ONLY read / idempotent tools are allowed inside the batch. Mutations (set_cell_range, execute_office_js, execute_python, create_sheet, etc.), control flow (done, ask_user_question, todo_write), and context tools (context_snip) MUST run sequentially and are rejected here. Max 8 calls per batch.
+
+Returns { results: [{ tool, ok, value | error }, ...] } where index matches the input order.
+
+Example:
+{
+  "calls": [
+    { "tool": "get_cell_ranges", "params": { "ranges": [{ "sheet": "DCF", "target": "A1:H10" }] } },
+    { "tool": "openbb_treasury_rates", "params": {} },
+    { "tool": "openbb_equity_profile", "params": { "symbol": "AAPL" } }
+  ]
+}`,
+      parameters: {
+        type: 'object',
+        required: ['calls'],
+        properties: {
+          calls: {
+            type: 'array',
+            minItems: 2,
+            maxItems: 8,
+            items: {
+              type: 'object',
+              required: ['tool', 'params'],
+              properties: {
+                tool: { type: 'string', description: 'Name of an allowed read-only tool' },
+                params: { type: 'object', description: 'Parameters for that tool' }
+              }
+            }
+          }
+        }
       }
     }
   },
@@ -1799,6 +1838,33 @@ function getCellRangeBounds(cellMap) {
   return `${indexToCol(minCol)}${minRow}:${indexToCol(maxCol)}${maxRow}`;
 }
 
+// Allowlist of tool names that are safe to run inside parallel_calls.
+// Strictly read-only / idempotent. Mutations, control flow, and context
+// manipulation tools are excluded — they MUST run sequentially.
+const PARALLEL_SAFE_TOOLS = new Set([
+  'read_workbook',
+  'read_sheet',
+  'get_cell_ranges',
+  'get_range_as_csv',
+  'list_named_ranges',
+  'build_workbook_graph',
+  'read_instructions',
+  'read_skill',
+  'search_tools',
+  'openbb_equity_profile',
+  'openbb_equity_metrics',
+  'openbb_equity_balance',
+  'openbb_equity_income',
+  'openbb_equity_cashflow',
+  'openbb_treasury_rates',
+  'openbb_fed_rate',
+  'openbb_cpi',
+  'openbb_gdp',
+  'openbb_unemployment',
+  'finance_company_bundle',
+  'macro_snapshot'
+]);
+
 async function executeAgentTool(toolName, params, context, requestClientTool) {
   params = normalizeAgentParams(toolName, params);
   // Build a memory object compatible with registry.executeTool so that
@@ -1806,6 +1872,60 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
   const toolMemory = { context };
   if (requestClientTool) toolMemory.runtime = { requestClientTool };
   switch (toolName) {
+    case 'parallel_calls': {
+      const callsInput = Array.isArray(params && params.calls) ? params.calls : [];
+      if (callsInput.length === 0) {
+        return { error: 'parallel_calls: "calls" must be a non-empty array' };
+      }
+      if (callsInput.length > 8) {
+        return { error: `parallel_calls: max 8 calls per batch, got ${callsInput.length}` };
+      }
+      const planned = callsInput.map((c, idx) => {
+        const tool = c && typeof c.tool === 'string' ? c.tool : '';
+        const innerParams = c && typeof c.params === 'object' && c.params !== null ? c.params : {};
+        if (!tool) {
+          return { idx, tool, ok: false, error: 'missing "tool" field', skipped: true };
+        }
+        if (tool === 'parallel_calls') {
+          return { idx, tool, ok: false, error: 'parallel_calls cannot be nested', skipped: true };
+        }
+        if (!PARALLEL_SAFE_TOOLS.has(tool)) {
+          return { idx, tool, ok: false, error: `tool "${tool}" not allowed inside parallel_calls (read-only allowlist only)`, skipped: true };
+        }
+        return { idx, tool, params: innerParams };
+      });
+      const runnable = planned.filter(p => !p.skipped);
+      const settled = await Promise.allSettled(runnable.map(p =>
+        executeAgentTool(p.tool, p.params, context, requestClientTool)
+      ));
+      // Stitch results back in original input order.
+      const results = new Array(callsInput.length);
+      let runIdx = 0;
+      for (const p of planned) {
+        if (p.skipped) {
+          results[p.idx] = { tool: p.tool, ok: false, error: p.error };
+          continue;
+        }
+        const r = settled[runIdx++];
+        if (r.status === 'fulfilled') {
+          const val = r.value;
+          if (val && val.error) {
+            results[p.idx] = { tool: p.tool, ok: false, error: val.error };
+          } else {
+            results[p.idx] = { tool: p.tool, ok: true, value: val };
+          }
+        } else {
+          const msg = r.reason && r.reason.message ? r.reason.message : String(r.reason);
+          results[p.idx] = { tool: p.tool, ok: false, error: msg };
+        }
+      }
+      const okCount = results.filter(r => r.ok).length;
+      const errCount = results.length - okCount;
+      return {
+        results,
+        summary: { total: results.length, ok: okCount, errors: errCount }
+      };
+    }
     case 'read_workbook': {
       // Try client round-trip for fresh data if available
       if (requestClientTool) {
