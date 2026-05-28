@@ -40,7 +40,7 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     console.log('OK execute_office_js surfaces client error with logs');
   }
 
-  // 3. requestClientTool throws -> fallback to legacy action dispatch (no silent loss)
+  // 3. requestClientTool throws -> structured error, no silent legacy fire-and-forget
   {
     const requestClientTool = async () => { throw new Error('Client read timeout (30s) for runJavaScript'); };
     const result = await executeAgentTool(
@@ -49,14 +49,13 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
       { messages: [], iteration: 0 },
       requestClientTool
     );
-    assert.ok(Array.isArray(result.actions) && result.actions.length === 1, 'fallback emits one action');
-    assert.strictEqual(result.actions[0].type, 'runJavaScript');
-    assert.strictEqual(result.actions[0].code, 'whatever');
-    assert.match(result._message, /RPC failed/, 'fallback signals to LLM');
-    console.log('OK execute_office_js falls back to legacy action when RPC transport fails');
+    assert.strictEqual(result.actions, undefined, 'no legacy action emitted after RPC failure');
+    assert.match(result.error, /runJavaScript tool may be unavailable/, 'error guides the LLM to structured tools');
+    assert.match(result._message, /RPC failed/, 'RPC failure is readable by LLM');
+    console.log('OK execute_office_js surfaces RPC transport failure without legacy action dispatch');
   }
 
-  // 4. No requestClientTool (server-only harness) -> legacy action dispatch
+  // 4. No requestClientTool (server-only harness) -> clear structured error
   {
     const result = await executeAgentTool(
       'execute_office_js',
@@ -64,10 +63,9 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
       { messages: [], iteration: 0 },
       null
     );
-    assert.ok(Array.isArray(result.actions), 'legacy path emits actions');
-    assert.strictEqual(result.actions[0].type, 'runJavaScript');
-    assert.strictEqual(result.actions[0].code, 'console.log(1)');
-    console.log('OK execute_office_js legacy path preserved when no RPC channel');
+    assert.strictEqual(result.actions, undefined, 'no legacy action emitted without RPC channel');
+    assert.match(result.error, /no client channel available/, 'error explains missing client channel');
+    console.log('OK execute_office_js requires a live client channel');
   }
 
   console.log('\nexecute_office_js RPC tests completed.');

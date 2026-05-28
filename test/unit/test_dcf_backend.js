@@ -1309,36 +1309,50 @@ async function main() {
     }
   });
 
-  await test('DCF shell uses deterministic fast path even in ai-only runtime', async () => {
-    const output = await executeTool('finance.dcf.buildSection', {
-      section: 'shell',
-      ticker: 'AAPL',
-      objective: 'Crea un DCF completo per Apple'
-    }, {
-      runtime: {
-        requestClientTool: async () => ({})
-      },
-      results: {}
-    });
+  await test('DCF shell deterministic fast path is runtime opt-in only', async () => {
+    const previous = process.env.DCF_ALLOW_TEMPLATE_IN_RUNTIME;
+    process.env.DCF_ALLOW_TEMPLATE_IN_RUNTIME = 'true';
+    try {
+      const output = await executeTool('finance.dcf.buildSection', {
+        section: 'shell',
+        ticker: 'AAPL',
+        objective: 'Crea un DCF completo per Apple'
+      }, {
+        runtime: {
+          requestClientTool: async () => ({})
+        },
+        results: {}
+      });
 
-    assert.strictEqual(output.data.builder, 'template-fastpath');
-    assert.ok(output.actions.some(action => action.type === 'createSheet'));
+      assert.strictEqual(output.data.builder, 'template-fastpath');
+      assert.ok(output.actions.some(action => action.type === 'createSheet'));
+    } finally {
+      if (previous === undefined) delete process.env.DCF_ALLOW_TEMPLATE_IN_RUNTIME;
+      else process.env.DCF_ALLOW_TEMPLATE_IN_RUNTIME = previous;
+    }
   });
 
-  await test('DCF sources uses deterministic fast path even in ai-only runtime', async () => {
-    const output = await executeTool('finance.dcf.buildSection', {
-      section: 'sources',
-      ticker: 'AAPL',
-      objective: 'Crea un DCF completo per Apple'
-    }, {
-      runtime: {
-        requestClientTool: async () => ({})
-      },
-      results: {}
-    });
+  await test('DCF sources deterministic fast path is runtime opt-in only', async () => {
+    const previous = process.env.DCF_ALLOW_TEMPLATE_IN_RUNTIME;
+    process.env.DCF_ALLOW_TEMPLATE_IN_RUNTIME = 'true';
+    try {
+      const output = await executeTool('finance.dcf.buildSection', {
+        section: 'sources',
+        ticker: 'AAPL',
+        objective: 'Crea un DCF completo per Apple'
+      }, {
+        runtime: {
+          requestClientTool: async () => ({})
+        },
+        results: {}
+      });
 
-    assert.strictEqual(output.data.builder, 'template-fastpath');
-    assert.ok(output.actions.some(action => action.sheet === 'Sources'));
+      assert.strictEqual(output.data.builder, 'template-fastpath');
+      assert.ok(output.actions.some(action => action.sheet === 'Sources'));
+    } finally {
+      if (previous === undefined) delete process.env.DCF_ALLOW_TEMPLATE_IN_RUNTIME;
+      else process.env.DCF_ALLOW_TEMPLATE_IN_RUNTIME = previous;
+    }
   });
 
   await test('turn runtime records client-side Excel action acknowledgements', () => {

@@ -338,13 +338,17 @@ function fallbackWithBuilder(fallback, builder, extra = {}) {
 
 function shouldUseAi(params = {}, options = {}) {
   if (process.env.DCF_AI_BUILDER_ENABLED === 'false') return false;
-  if (params.mode === 'template') return false;
+  if (params.mode === 'template' && !options.runtimeAiOnly) return false;
   const section = String(params.section || '').toLowerCase();
   return AI_SECTIONS.has(section) || (options.runtimeAiOnly && AI_RUNTIME_ONLY_SECTIONS.has(section));
 }
 
 function isRuntimeAiOnly(memory = {}) {
   return process.env.HARNESS_AI_ONLY !== 'false' && !!memory?.runtime;
+}
+
+function allowDeterministicTemplatesInRuntime() {
+  return process.env.DCF_ALLOW_TEMPLATE_IN_RUNTIME === 'true';
 }
 
 // Section-level role classifier. Bench evidence:
@@ -481,17 +485,21 @@ async function buildDcfSectionAi(params = {}, memory = {}) {
   const hasTemplate = hasDeterministicTemplate(modelType);
   const runtimeAiOnly = isRuntimeAiOnly(memory);
   const useAiSectionBuilder = isDcf ? shouldUseAi(params, { runtimeAiOnly }) : true; // non-DCF models always use pure AI
-  const useDeterministicFastPath = isDcf && DCF_DETERMINISTIC_FAST_PATH_SECTIONS.has(section);
+  const runtimeTemplateAllowed = !runtimeAiOnly || allowDeterministicTemplatesInRuntime();
+  const useDeterministicFastPath = isDcf && DCF_DETERMINISTIC_FAST_PATH_SECTIONS.has(section) && runtimeTemplateAllowed;
   const aiSchema = useAiSectionBuilder ? await inferWorkbookSchemaWithAi(params, memory) : null;
   const enrichedParams = aiSchema ? { ...params, aiSchema } : params;
   const enrichedMemory = aiSchema ? { ...memory, aiWorkbookSchema: aiSchema } : memory;
-  const allowTemplateAssist = hasTemplate && (!runtimeAiOnly || useDeterministicFastPath);
+  const allowTemplateAssist = hasTemplate && runtimeTemplateAllowed;
   // Build a deterministic fallback only when the runtime is allowed to use templates.
   const fallback = allowTemplateAssist
     ? buildDcfSection(enrichedParams, enrichedMemory)
     : { data: { model: modelType, section, builder: runtimeAiOnly ? 'ai_only_runtime' : 'no_deterministic_template' }, actions: [] };
 
   if (!useAiSectionBuilder || useDeterministicFastPath) {
+    if (!allowTemplateAssist && fallback.actions.length === 0) {
+      throw new Error('Deterministic template path requested, but templates are disabled in live runtime. Use AI-assisted generation instead.');
+    }
     const fallbackBuilder = section === 'format'
       ? 'adaptive-format'
       : (useDeterministicFastPath ? 'template-fastpath' : (params.mode === 'template' ? 'template-requested' : 'template'));

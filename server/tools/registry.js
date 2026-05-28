@@ -288,7 +288,7 @@ registerTool('yahoo.fundamentals', async (params) => {
 registerTool('finance.dcf.buildSection', async (params, memory) => {
   return buildDcfSectionAi(params, memory);
 }, {
-  description: 'Costruisce una sezione AI-assisted di un DCF completo (shell, sources, assumptions, WACC, DCF, sensitivity, scenarios, summary, audit, format) con formule Excel istituzionali e fallback deterministico.',
+  description: 'Costruisce una sezione AI-assisted di un DCF completo (shell, sources, assumptions, WACC, DCF, sensitivity, scenarios, summary, audit, format) con formule Excel istituzionali. Nel runtime Excel live usa AI-first; i template deterministici sono solo fallback/opt-in fuori dal runtime o con DCF_ALLOW_TEMPLATE_IN_RUNTIME=true.',
   inputs: ['section', 'ticker', 'companyName'],
   schema: {
     type: 'object',

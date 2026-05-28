@@ -988,6 +988,9 @@ async function handleClientToolRequest(request) {
       case 'workbook.listNamedRanges':
         data = await readNamedRanges(request.params || {});
         break;
+      case 'runJavaScript':
+        data = await runJavaScriptRpc(request.params || {});
+        break;
       default:
         throw new Error(`Client tool non supportato: ${request.toolName}`);
     }
@@ -1024,6 +1027,9 @@ async function handleClientToolBatch(requests) {
           }
           case 'workbook.listNamedRanges':
             data = await readNamedRanges(request.params || {});
+            break;
+          case 'runJavaScript':
+            data = await runJavaScriptRpc(request.params || {});
             break;
           default:
             throw new Error(`Client tool non supportato: ${request.toolName}`);

@@ -2180,12 +2180,13 @@ async function executeArchitectParallelTurn(turnId) {
   const context = buildTurnExecutionContext(turn);
   const startedAt = Date.now();
 
-  // Pre-register a UI item per slice so the user sees each slice progress live.
+  // Pre-register slice items without emitting "started"; the actual sliceStarted
+  // event below is what should move a slice from pending to running in the UI.
   const sliceItemIds = new Map();
   for (const slice of blueprint.slices) {
     const itemId = `slice-${slice.id}`;
     sliceItemIds.set(slice.id, itemId);
-    const item = upsertItem(turnId, {
+    upsertItem(turnId, {
       id: itemId,
       type: 'taskExecution',
       taskId: slice.id,
@@ -2195,7 +2196,6 @@ async function executeArchitectParallelTurn(turnId) {
       deps: slice.deps || [],
       status: 'pending'
     });
-    emitItemStarted(turnId, item);
   }
 
   appendLog(turnId, `Avvio orchestratore: ${blueprint.slices.length} slice in ${blueprint.waves.length} wave (max ${process.env.PARALLEL_ORCHESTRATOR_MAX || 4} parallele).`);
