@@ -386,13 +386,59 @@ async function main() {
   if (modes.length === 0) throw new Error('Nessun mode valido specificato.');
 
   const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 16);
-  const outFile = path.join(__dirname, `runtime-mode-compare-${ts}.jsonl`);
+  // Allow concurrent bench processes by tagging the filename. Set BENCH_LABEL=name
+  // (e.g. "pro-thinking", "flash-no-thinking") and run multiple `node bench/...`
+  // in parallel — each writes to its own file. Without a label we still add the
+  // pid so two unlabeled runs in the same minute won't trample each other.
+  const benchLabel = process.env.BENCH_LABEL ? `-${String(process.env.BENCH_LABEL).replace(/[^a-zA-Z0-9_-]/g, '_')}` : `-pid${process.pid}`;
+  const outFile = path.join(__dirname, `runtime-mode-compare-${ts}${benchLabel}.jsonl`);
   const out = fs.createWriteStream(outFile, { flags: 'a' });
   const results = [];
 
-  console.log(`Runtime bench: scenarios=[${scenarios.join(',')}] modes=[${modes.join(',')}] runs=${RUNS}`);
+  // Optional concurrency: when BENCH_PARALLEL=true, scenarios × modes × runs are
+  // dispatched via Promise.all (still bounded by BENCH_CONCURRENCY, default 4).
+  // Keeps one node process but parallelizes the LLM-bound work.
+  const parallelEnabled = process.env.BENCH_PARALLEL === 'true';
+  const concurrency = Math.max(1, Number(process.env.BENCH_CONCURRENCY) || 4);
+
+  console.log(`Runtime bench: scenarios=[${scenarios.join(',')}] modes=[${modes.join(',')}] runs=${RUNS}${parallelEnabled ? ` parallel=${concurrency}` : ''}`);
   console.log(`Timeout per turn: ${TURN_TIMEOUT_MS}ms`);
   console.log(`Output: ${outFile}\n`);
+
+  // Build the full task list once
+  const tasks = [];
+  for (const scenarioKey of scenarios) {
+    for (const mode of modes) {
+      for (let run = 1; run <= RUNS; run += 1) {
+        tasks.push({ scenarioKey, mode, run });
+      }
+    }
+  }
+
+  if (parallelEnabled) {
+    // Bounded Promise.all: process tasks in concurrent waves of size `concurrency`.
+    let cursor = 0;
+    async function worker() {
+      while (cursor < tasks.length) {
+        const idx = cursor++;
+        const { scenarioKey, mode, run } = tasks[idx];
+        const tag = `${scenarioKey} ${mode} run ${run}/${RUNS}`;
+        process.stdout.write(`  [start] ${tag}\n`);
+        try {
+          const res = await runOne(scenarioKey, mode);
+          out.write(JSON.stringify(res) + '\n');
+          results.push(res);
+          process.stdout.write(`  [done ] ${tag}  status=${res.status}  ${res.totalMs}ms  iter=${res.loopIteration}\n`);
+        } catch (err) {
+          process.stdout.write(`  [error] ${tag}: ${err.message}\n`);
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker()));
+    out.end();
+    printSummary(results);
+    return;
+  }
 
   for (const scenarioKey of scenarios) {
     for (const mode of modes) {
@@ -412,10 +458,20 @@ async function main() {
 
   out.end();
 
+  printSummary(results);
+}
+
+function printSummary(results) {
+  if (!results || results.length === 0) {
+    console.log('(no results to summarize)');
+    return;
+  }
+  const seenScenarios = Array.from(new Set(results.map(r => r.scenario)));
+  const seenModes = Array.from(new Set(results.map(r => r.mode)));
   console.log('--- SUMMARY ---');
   console.log('scenario                mode          ok/total   meanMs   p50Ms   p95Ms   meanPlan   meanExec   meanTasks   meanActions   meanLoopIter');
-  for (const scenarioKey of scenarios) {
-    for (const mode of modes) {
+  for (const scenarioKey of seenScenarios) {
+    for (const mode of seenModes) {
       const bucket = results.filter(result => result.scenario === scenarioKey && result.mode === mode);
       if (bucket.length === 0) continue;
       const ok = bucket.filter(result => !result.error && result.status === 'completed');
