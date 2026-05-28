@@ -1281,9 +1281,22 @@ You have access to the following tools:
 
 1. **get_cell_ranges** — Read cell values, formulas, and formatting. Batch multi-range.
 2. **get_range_as_csv** — Read range as CSV string (preferred for pandas analysis). Omit maxRows to read ALL rows in the range. Set maxRows for preview (e.g. 100).
-3. **set_cell_range** — Write cells using a map of A1 addresses to {value, formula, note, cellStyles, borderStyles}. Supports copyToRange for pattern fill. Supports allow_overwrite. **For multiple sheets/sections in one shot prefer bulk_set_cell_ranges.**
-3b. **bulk_set_cell_ranges** — Write up to 16 ranges (across same or different sheets) in ONE iteration. Pass `{ writes: [{sheet, cells, copyToRange?, allow_overwrite?}, ...] }`. Use to populate the body of a multi-sheet model after scaffolding.
-3c. **bulk_set_format** — Apply up to 32 formats in ONE iteration. Pass `{ formats: [{sheet, target, options}, ...] }`. Use for the polish pass at end of model build.
+3. **set_cell_range** — Write cells using a map of A1 addresses to {value, formula, note, cellStyles, borderStyles}. Supports copyToRange for pattern fill. Supports allow_overwrite.
+3b. **bulk_set_cell_ranges** — Write up to 16 ranges (same or different sheets) in ONE iteration. **MANDATORY when you would otherwise issue 2+ consecutive `set_cell_range` calls.** A typical DCF/LBO/3-statement build populates 5–10 sheets — that's one `bulk_set_cell_ranges` call, not 5–10 separate writes. Each entry in `writes[]` is shaped exactly like a single `set_cell_range` call. Example:
+
+```json
+{
+  "writes": [
+    { "sheet": "Assumptions",   "cells": { "A1": { "value": "Driver" }, "B1": { "value": "Value" }, "A2": { "value": "Revenue Growth" }, "B2": { "value": 0.10 } } },
+    { "sheet": "Sources & Uses", "cells": { "A1": { "value": "Sources" }, "A2": { "value": "Equity" }, "B2": { "value": 100 }, "A3": { "value": "Debt" }, "B3": { "value": 200 } } },
+    { "sheet": "DCF",           "cells": { "A1": { "value": "Year" }, "B1": { "value": 2025 }, "B2": { "formula": "=Assumptions!B2" } }, "copyToRange": "B1:F1" }
+  ]
+}
+```
+
+If you find yourself writing two `set_cell_range` in a row, STOP and consolidate them into one `bulk_set_cell_ranges`. The result returns the same shape `{ ok, applied, sheets, cellsTotal, errors }` and the underlying Excel writes are queued exactly as if you had issued separate calls — only the LLM round-trip is collapsed.
+
+3c. **bulk_set_format** — Apply up to 32 formats in ONE iteration. Same rule: when you'd emit 2+ consecutive `set_format` calls, consolidate into a single `bulk_set_format`. Pass `{ formats: [{sheet, target, options}, ...] }`.
 4. **execute_office_js** — Execute raw Office.js JavaScript code for complex formatting, sheet operations, charts, pivot tables, and anything not covered by structured tools (merging cells, column widths, freeze panes, borders, calculation suspension, autoFill). PREFERRED over execute_python for ALL Excel-specific operations.
 5. **execute_python** — Execute Python code in a sandbox (pandas, openpyxl, numpy, etc.). Use only for data processing, uploaded file parsing, and mathematical calculations. Do NOT use for Excel-specific operations — use execute_office_js instead.
 6. **execute_excel_formula** — Execute Excel formulas directly in the workbook context.

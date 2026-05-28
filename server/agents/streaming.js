@@ -60,9 +60,13 @@ function writeEvent(res, eventType, data) {
 }
 
 function getEventKey(eventType, data) {
-  // Ritorna una chiave per raggruppare eventi sostituibili
+  // Ritorna una chiave per raggruppare eventi sostituibili durante il replay.
+  // itemStarted + itemCompleted condividono la stessa chiave: in replay
+  // serve solo lo stato finale, non l'intera storia. Senza questa unificazione
+  // la riconnessione SSE rispediva sia "avviato" sia "completato" per ogni
+  // task già finito, producendo una cascata di righe duplicate nel log UI.
   if (eventType === 'itemStarted' || eventType === 'itemCompleted') {
-    return `${eventType}:${data?.item?.id || data?.item?.taskId || ''}`;
+    return `item:${data?.item?.id || data?.item?.taskId || ''}`;
   }
   if (eventType === 'taskActions') {
     return `${eventType}:${data?.taskId || ''}`;
@@ -110,8 +114,15 @@ function registerClient(jobId, res) {
   });
 
   const events = history.get(jobId) || [];
-  for (const event of events) {
-    writeEvent(res, event.eventType, event.data);
+  if (events.length > 0) {
+    // Bracket the history flush with replay markers so the client can
+    // suppress duplicate log lines / toasts for events it already saw
+    // in a prior connection. Each marker is itself non-replayable.
+    writeEvent(res, 'historyReplayStart', { count: events.length });
+    for (const event of events) {
+      writeEvent(res, event.eventType, event.data);
+    }
+    writeEvent(res, 'historyReplayEnd', { count: events.length });
   }
 
   startHeartbeat(jobId);

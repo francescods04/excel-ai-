@@ -682,8 +682,25 @@ function openTurnEventStream(turnId, planMsgId) {
 
   function setupListeners(src) {
     let planReceived = false;
+    let inReplay = false;
+
+    // Server brackets the SSE history flush after a reconnect with
+    // historyReplayStart/historyReplayEnd. During that window we suppress
+    // log/toast emissions from re-delivered events so the UI doesn't flood
+    // with duplicate "avviato/completato" lines for tasks already on screen.
+    src.addEventListener('historyReplayStart', (e) => {
+      inReplay = true;
+      try {
+        const data = JSON.parse(e.data);
+        addLog(`Riconnesso: replay di ${data.count} eventi (UI già allineata)`);
+      } catch (_) { addLog('Riconnesso: replay eventi SSE'); }
+    });
+    src.addEventListener('historyReplayEnd', () => {
+      inReplay = false;
+    });
 
     src.addEventListener('turnStarted', () => {
+      if (inReplay) return; // already shown before
       addLog(`Turn ${turnId} avviato`);
     });
 
@@ -737,7 +754,12 @@ function openTurnEventStream(turnId, planMsgId) {
         const item = data.item || {};
         if (item.type === 'taskExecution') {
           updateTaskStatus(item.taskId, 'running');
-          addLog(`[${item.taskId}] ${item.description || item.tool} — avviato`);
+          // During the SSE history replay we still update the task tree
+          // so its visual status stays in sync — but we suppress the
+          // text log line; that line was already shown when the event
+          // first happened, so re-printing it produces the duplicate
+          // flood the user saw after a reconnect.
+          if (!inReplay) addLog(`[${item.taskId}] ${item.description || item.tool} — avviato`);
         }
       } catch (err) {}
     });
@@ -794,6 +816,7 @@ function openTurnEventStream(turnId, planMsgId) {
         if (item.type === 'taskExecution') {
           const status = item.status === 'error' ? 'error' : 'completed';
           updateTaskStatus(item.taskId, status);
+          if (inReplay) return; // status updated, text log already shown earlier
           if (item.status === 'error') {
             addLog(`[${item.taskId}] ERRORE: ${item.error || 'errore sconosciuto'}`, 'error');
           } else {
