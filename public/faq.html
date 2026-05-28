@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="it" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Domande frequenti — Excel AI</title>
+  <link rel="icon" type="image/svg+xml" href="/public/favicon.svg">
+  <meta name="description" content="Tutto quello che ti serve sapere prima di iniziare a usare Excel AI.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg-deep: #f4f6f9; --bg-surface: #ffffff; --bg-card: #ffffff; --bg-raised: #eef1f5;
+      --border: #dde2e8; --border-light: #c9d0d8; --text-primary: #1a1d23; --text-secondary: #4b5563;
+      --text-muted: #889099; --accent: #008f7a; --accent-glow: rgba(0, 143, 122, 0.10); --accent-hover: #00a88f;
+      --radius: 10px; --radius-lg: 14px;
+    }
+    html[data-theme="dark"] {
+      --bg-deep: #070a0f; --bg-surface: #0d1118; --bg-card: #121820; --bg-raised: #181f2a;
+      --border: #1e2835; --border-light: #2a3544; --text-primary: #d8dde4; --text-secondary: #8a95a5;
+      --text-muted: #5a6578; --accent: #00c9a7; --accent-glow: rgba(0, 201, 167, 0.12); --accent-hover: #00e0b8;
+    }
+    html { scroll-behavior: smooth; }
+    body { font-family: 'DM Sans', -apple-system, sans-serif; background: var(--bg-deep); color: var(--text-primary); line-height: 1.65; -webkit-font-smoothing: antialiased; }
+    .container { max-width: 1140px; margin: 0 auto; padding: 0 24px; }
+    header { position: fixed; top: 0; left: 0; right: 0; z-index: 100; padding: 14px 24px; background: rgba(244,246,249,0.92); backdrop-filter: blur(20px); border-bottom: 1px solid var(--border); }
+    html[data-theme="dark"] header { background: rgba(7,10,15,0.88); }
+    .header-inner { max-width: 1140px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; }
+    .logo { display: flex; align-items: center; gap: 10px; text-decoration: none; color: var(--text-primary); }
+    .logo-mark { width: 30px; height: 30px; background: var(--accent); border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; color: #fff; }
+    .logo-text { font-size: 15px; font-weight: 700; color: var(--text-primary); letter-spacing: -0.3px; }
+    .nav-links { display: flex; gap: 28px; align-items: center; }
+    .nav-links a { color: var(--text-secondary); text-decoration: none; font-size: 13px; font-weight: 500; transition: color 0.2s; }
+    .nav-links a:hover { color: var(--text-primary); }
+    .btn-nav { padding: 8px 20px; border: 1px solid var(--border-light); color: var(--text-primary); border-radius: var(--radius); font-size: 13px; font-weight: 500; text-decoration: none; transition: all 0.2s; }
+    .btn-nav:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .header-actions { display: flex; align-items: center; gap: 12px; }
+    .theme-toggle { width: 36px; height: 36px; border-radius: 6px; border: 1px solid var(--border-light); background: transparent; color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 16px; transition: all 0.2s; }
+    .theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
+    .mobile-menu-btn { display: none; width: 36px; height: 36px; border: 1px solid var(--border-light); background: transparent; color: var(--text-primary); border-radius: 6px; cursor: pointer; align-items: center; justify-content: center; font-size: 18px; }
+    .mobile-nav { display: none; position: fixed; inset: 0; z-index: 99; background: var(--bg-surface); padding: 100px 32px 32px; flex-direction: column; gap: 8px; }
+    .mobile-nav.open { display: flex; }
+    .mobile-nav a { color: var(--text-primary); text-decoration: none; font-size: 18px; font-weight: 500; padding: 12px 0; border-bottom: 1px solid var(--border); }
+    .mobile-nav a.btn-nav { text-align: center; margin-top: 12px; border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: var(--radius); padding: 14px; }
+
+    main { padding-top: 100px; }
+    section { padding: 64px 0; }
+    .page-header { padding: 48px 0 24px; }
+    .page-header h1 { font-family: 'Cormorant Garamond', serif; font-size: clamp(32px, 5vw, 46px); font-weight: 500; line-height: 1.15; color: var(--text-primary); margin-bottom: 10px; }
+    .page-header p { color: var(--text-secondary); font-size: 16px; max-width: 600px; }
+
+    .faq-list { max-width: 760px; margin: 32px auto 0; }
+    .faq-item { border-bottom: 1px solid var(--border); }
+    .faq-q { width: 100%; background: none; border: none; padding: 20px 0; text-align: left; color: var(--text-primary); font-size: 16px; font-weight: 500; cursor: pointer; font-family: inherit; display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+    .faq-q:hover { color: var(--accent); }
+    .faq-arrow { font-size: 18px; color: var(--accent); transition: transform 0.3s; flex-shrink: 0; font-weight: 300; }
+    .faq-item.open .faq-arrow { transform: rotate(45deg); }
+    .faq-a { max-height: 0; overflow: hidden; transition: max-height 0.4s ease, padding 0.4s ease; padding: 0 0; }
+    .faq-item.open .faq-a { max-height: 300px; padding: 0 0 20px; }
+    .faq-a p { color: var(--text-secondary); font-size: 15px; line-height: 1.7; }
+
+    footer { padding: 48px 0 32px; border-top: 1px solid var(--border); margin-top: 48px; }
+    .footer-grid { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 40px; max-width: 1140px; margin: 0 auto; padding: 0 24px; }
+    .footer-brand p { color: var(--text-muted); font-size: 13px; line-height: 1.7; margin-top: 12px; max-width: 280px; }
+    .footer-col h5 { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 14px; font-weight: 600; }
+    .footer-col a { display: block; color: var(--text-secondary); text-decoration: none; font-size: 13px; padding: 4px 0; transition: color 0.2s; }
+    .footer-col a:hover { color: var(--accent); }
+    .footer-bottom { text-align: center; padding-top: 32px; margin-top: 32px; border-top: 1px solid var(--border); }
+    .footer-bottom p { color: var(--text-muted); font-size: 12px; }
+
+    @media (max-width: 768px) {
+      .nav-links { display: none; }
+      .mobile-menu-btn { display: flex; }
+      .footer-grid { grid-template-columns: 1fr; gap: 24px; }
+    }
+  </style>
+</head>
+<body>
+  <header id="header">
+    <div class="header-inner">
+      <a href="/" class="logo">
+        <div class="logo-mark">E</div>
+        <span class="logo-text">Excel AI</span>
+      </a>
+      <nav class="nav-links">
+        <a href="/">Home</a>
+        <a href="/faq.html">FAQ</a>
+        <a href="/privacy.html">Privacy</a>
+        <a href="/#demo" class="btn-nav">Registrati</a>
+      </nav>
+      <div class="header-actions">
+        <button class="theme-toggle" id="theme-toggle" title="Cambia tema">&#9728;</button>
+        <button class="mobile-menu-btn" id="mobile-menu-btn" onclick="toggleMobileMenu()">&#9776;</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="mobile-nav" id="mobile-nav">
+    <a href="/" onclick="toggleMobileMenu()">Home</a>
+    <a href="/faq.html" onclick="toggleMobileMenu()">FAQ</a>
+    <a href="/privacy.html" onclick="toggleMobileMenu()">Privacy</a>
+    <a href="/#demo" class="btn-nav" onclick="toggleMobileMenu()">Registrati</a>
+  </div>
+
+  <main>
+    <section class="page-header">
+      <div class="container">
+        <h1>Domande frequenti</h1>
+        <p>Tutto quello che ti serve sapere prima di iniziare a usare Excel AI.</p>
+      </div>
+    </section>
+    <section>
+      <div class="container">
+        <div class="faq-list">
+          <div class="faq-item">
+            <button class="faq-q" onclick="toggleFAQ(this)">
+              Excel AI funziona anche su Excel per Windows?
+              <span class="faq-arrow">+</span>
+            </button>
+            <div class="faq-a"><p>S&igrave;. Excel AI funziona su Microsoft Excel per Windows (versione 2016 o successiva, incluso Office 365) e su Excel per Mac. L&rsquo;installazione &egrave; identica: scarichi il file, fai doppio clic, apri Excel.</p></div>
+          </div>
+          <div class="faq-item">
+            <button class="faq-q" onclick="toggleFAQ(this)">
+              I miei dati Excel vengono inviati a server esterni?
+              <span class="faq-arrow">+</span>
+            </button>
+            <div class="faq-a"><p>Solo il contenuto necessario per elaborare la tua richiesta viene inviato via API. Non conserviamo i dati delle richieste. I contenuti delle celle non vengono mai memorizzati sui nostri server se non per l&rsquo;audit trail che tu puoi consultare ed esportare.</p></div>
+          </div>
+          <div class="faq-item">
+            <button class="faq-q" onclick="toggleFAQ(this)">
+              L&rsquo;AI pu&ograve; fare errori sui dati finanziari?
+              <span class="faq-arrow">+</span>
+            </button>
+            <div class="faq-a"><p>L&rsquo;AI pu&ograve; commettere errori, ed &egrave; per questo che ogni modifica richiede la tua approvazione esplicita. Vedi esattamente cosa verr&agrave; modificato prima che venga applicato. Il controllo finale resta sempre al professionista.</p></div>
+          </div>
+          <div class="faq-item">
+            <button class="faq-q" onclick="toggleFAQ(this)">
+              Serve una connessione internet?
+              <span class="faq-arrow">+</span>
+            </button>
+            <div class="faq-a"><p>S&igrave;, Excel AI richiede una connessione internet per comunicare con le API. La latenza media &egrave; inferiore a 3 secondi. Non &egrave; richiesta alcuna VPN o configurazione di rete particolare.</p></div>
+          </div>
+          <div class="faq-item">
+            <button class="faq-q" onclick="toggleFAQ(this)">
+              Posso usarlo con file Excel gi&agrave; esistenti?
+              <span class="faq-arrow">+</span>
+            </button>
+            <div class="faq-a"><p>Assolutamente s&igrave;. Apri il tuo file Excel esistente, attiva l&rsquo;add-in e inizia a fare domande. L&rsquo;AI analizza il foglio attivo e opera direttamente su di esso. Funziona con qualsiasi file .xlsx, .xlsm e .xls.</p></div>
+          </div>
+          <div class="faq-item">
+            <button class="faq-q" onclick="toggleFAQ(this)">
+              Come funziona l&rsquo;account demo gratuito?
+              <span class="faq-arrow">+</span>
+            </button>
+            <div class="faq-a"><p>L&rsquo;account demo ti d&agrave; accesso completo a tutte le funzionalit&agrave; di Excel AI per un periodo illimitato con un numero di richieste giornaliero limitato. Nessuna carta di credito richiesta. Al termine puoi contattarci per passare a un piano aziendale personalizzato.</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <a href="/" class="logo">
+          <div class="logo-mark">E</div>
+          <span class="logo-text">Excel AI</span>
+        </a>
+        <p>Assistente intelligente per Microsoft Excel. Progettato per chi usa Excel professionalmente.</p>
+      </div>
+      <div class="footer-col">
+        <h5>Prodotto</h5>
+        <a href="/">Home</a>
+        <a href="/faq.html">FAQ</a>
+        <a href="/privacy.html">Privacy Policy</a>
+      </div>
+      <div class="footer-col">
+        <h5>Installazione</h5>
+        <a href="/public/install-mac.command" download>Scarica per Mac</a>
+        <a href="/public/install-win.bat" download>Scarica per Windows</a>
+      </div>
+      <div class="footer-col">
+        <h5>Contatti</h5>
+        <a href="mailto:info@excel-ai-sigma.vercel.app">Email</a>
+        <a href="https://github.com/francescods04/excel-ai-" target="_blank" rel="noopener">GitHub</a>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <div class="container">
+        <p>&copy; 2026 Excel AI. Fatto in Italia.</p>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    (function() {
+      const toggle = document.getElementById('theme-toggle');
+      const html = document.documentElement;
+      const saved = localStorage.getItem('theme');
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      if (saved) { html.setAttribute('data-theme', saved); }
+      else if (prefersDark) { html.setAttribute('data-theme', 'dark'); }
+      else { html.setAttribute('data-theme', 'light'); }
+      function updateIcon() {
+        const isDark = html.getAttribute('data-theme') === 'dark';
+        toggle.innerHTML = isDark ? '&#9790;' : '&#9728;';
+        toggle.title = isDark ? 'Passa a tema chiaro' : 'Passa a tema scuro';
+      }
+      updateIcon();
+      toggle.addEventListener('click', () => {
+        const isDark = html.getAttribute('data-theme') === 'dark';
+        const next = isDark ? 'light' : 'dark';
+        html.setAttribute('data-theme', next);
+        localStorage.setItem('theme', next);
+        updateIcon();
+      });
+    })();
+    function toggleMobileMenu() { document.getElementById('mobile-nav').classList.toggle('open'); }
+    function toggleFAQ(btn) {
+      const item = btn.parentElement;
+      const wasOpen = item.classList.contains('open');
+      document.querySelectorAll('.faq-item.open').forEach(i => i.classList.remove('open'));
+      if (!wasOpen) item.classList.add('open');
+    }
+  </script>
+</body>
+</html>

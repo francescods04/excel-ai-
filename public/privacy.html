@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="it" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy Policy — Excel AI</title>
+  <link rel="icon" type="image/svg+xml" href="/public/favicon.svg">
+  <meta name="description" content="Informativa sul trattamento dei dati personali ai sensi del Regolamento UE 2016/679 (GDPR).">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg-deep: #f4f6f9; --bg-surface: #ffffff; --bg-card: #ffffff; --bg-raised: #eef1f5;
+      --border: #dde2e8; --border-light: #c9d0d8; --text-primary: #1a1d23; --text-secondary: #4b5563;
+      --text-muted: #889099; --accent: #008f7a; --accent-glow: rgba(0, 143, 122, 0.10); --accent-hover: #00a88f;
+      --radius: 10px; --radius-lg: 14px;
+    }
+    html[data-theme="dark"] {
+      --bg-deep: #070a0f; --bg-surface: #0d1118; --bg-card: #121820; --bg-raised: #181f2a;
+      --border: #1e2835; --border-light: #2a3544; --text-primary: #d8dde4; --text-secondary: #8a95a5;
+      --text-muted: #5a6578; --accent: #00c9a7; --accent-glow: rgba(0, 201, 167, 0.12); --accent-hover: #00e0b8;
+    }
+    html { scroll-behavior: smooth; }
+    body { font-family: 'DM Sans', -apple-system, sans-serif; background: var(--bg-deep); color: var(--text-primary); line-height: 1.65; -webkit-font-smoothing: antialiased; }
+    .container { max-width: 1140px; margin: 0 auto; padding: 0 24px; }
+    header { position: fixed; top: 0; left: 0; right: 0; z-index: 100; padding: 14px 24px; background: rgba(244,246,249,0.92); backdrop-filter: blur(20px); border-bottom: 1px solid var(--border); }
+    html[data-theme="dark"] header { background: rgba(7,10,15,0.88); }
+    .header-inner { max-width: 1140px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; }
+    .logo { display: flex; align-items: center; gap: 10px; text-decoration: none; color: var(--text-primary); }
+    .logo-mark { width: 30px; height: 30px; background: var(--accent); border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; color: #fff; }
+    .logo-text { font-size: 15px; font-weight: 700; color: var(--text-primary); letter-spacing: -0.3px; }
+    .nav-links { display: flex; gap: 28px; align-items: center; }
+    .nav-links a { color: var(--text-secondary); text-decoration: none; font-size: 13px; font-weight: 500; transition: color 0.2s; }
+    .nav-links a:hover { color: var(--text-primary); }
+    .btn-nav { padding: 8px 20px; border: 1px solid var(--border-light); color: var(--text-primary); border-radius: var(--radius); font-size: 13px; font-weight: 500; text-decoration: none; transition: all 0.2s; }
+    .btn-nav:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .header-actions { display: flex; align-items: center; gap: 12px; }
+    .theme-toggle { width: 36px; height: 36px; border-radius: 6px; border: 1px solid var(--border-light); background: transparent; color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 16px; transition: all 0.2s; }
+    .theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
+    .mobile-menu-btn { display: none; width: 36px; height: 36px; border: 1px solid var(--border-light); background: transparent; color: var(--text-primary); border-radius: 6px; cursor: pointer; align-items: center; justify-content: center; font-size: 18px; }
+    .mobile-nav { display: none; position: fixed; inset: 0; z-index: 99; background: var(--bg-surface); padding: 100px 32px 32px; flex-direction: column; gap: 8px; }
+    .mobile-nav.open { display: flex; }
+    .mobile-nav a { color: var(--text-primary); text-decoration: none; font-size: 18px; font-weight: 500; padding: 12px 0; border-bottom: 1px solid var(--border); }
+    .mobile-nav a.btn-nav { text-align: center; margin-top: 12px; border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: var(--radius); padding: 14px; }
+
+    main { padding-top: 100px; }
+    section { padding: 64px 0; }
+    .page-header { padding: 48px 0 24px; }
+    .page-header h1 { font-family: 'Cormorant Garamond', serif; font-size: clamp(32px, 5vw, 46px); font-weight: 500; line-height: 1.15; color: var(--text-primary); margin-bottom: 10px; }
+    .page-header p { color: var(--text-secondary); font-size: 16px; max-width: 600px; }
+
+    .privacy-content { max-width: 760px; }
+    .privacy-content h4 { font-size: 18px; font-weight: 600; color: var(--text-primary); margin: 32px 0 12px; }
+    .privacy-content p, .privacy-content li { color: var(--text-secondary); font-size: 15px; line-height: 1.7; margin-bottom: 10px; }
+    .privacy-content ul { margin-left: 20px; margin-bottom: 16px; }
+    .privacy-content a { color: var(--accent); text-decoration: none; }
+    .privacy-content a:hover { text-decoration: underline; }
+    .privacy-content strong { color: var(--text-primary); font-weight: 600; }
+    .last-update { margin-top: 24px; font-size: 13px; color: var(--text-muted); }
+
+    footer { padding: 48px 0 32px; border-top: 1px solid var(--border); margin-top: 48px; }
+    .footer-grid { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 40px; max-width: 1140px; margin: 0 auto; padding: 0 24px; }
+    .footer-brand p { color: var(--text-muted); font-size: 13px; line-height: 1.7; margin-top: 12px; max-width: 280px; }
+    .footer-col h5 { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 14px; font-weight: 600; }
+    .footer-col a { display: block; color: var(--text-secondary); text-decoration: none; font-size: 13px; padding: 4px 0; transition: color 0.2s; }
+    .footer-col a:hover { color: var(--accent); }
+    .footer-bottom { text-align: center; padding-top: 32px; margin-top: 32px; border-top: 1px solid var(--border); }
+    .footer-bottom p { color: var(--text-muted); font-size: 12px; }
+
+    @media (max-width: 768px) {
+      .nav-links { display: none; }
+      .mobile-menu-btn { display: flex; }
+      .footer-grid { grid-template-columns: 1fr; gap: 24px; }
+    }
+  </style>
+</head>
+<body>
+  <header id="header">
+    <div class="header-inner">
+      <a href="/" class="logo">
+        <div class="logo-mark">E</div>
+        <span class="logo-text">Excel AI</span>
+      </a>
+      <nav class="nav-links">
+        <a href="/">Home</a>
+        <a href="/faq.html">FAQ</a>
+        <a href="/privacy.html">Privacy</a>
+        <a href="/#demo" class="btn-nav">Registrati</a>
+      </nav>
+      <div class="header-actions">
+        <button class="theme-toggle" id="theme-toggle" title="Cambia tema">&#9728;</button>
+        <button class="mobile-menu-btn" id="mobile-menu-btn" onclick="toggleMobileMenu()">&#9776;</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="mobile-nav" id="mobile-nav">
+    <a href="/" onclick="toggleMobileMenu()">Home</a>
+    <a href="/faq.html" onclick="toggleMobileMenu()">FAQ</a>
+    <a href="/privacy.html" onclick="toggleMobileMenu()">Privacy</a>
+    <a href="/#demo" class="btn-nav" onclick="toggleMobileMenu()">Registrati</a>
+  </div>
+
+  <main>
+    <section class="page-header">
+      <div class="container">
+        <h1>Privacy Policy</h1>
+        <p>Informativa sul trattamento dei dati personali ai sensi del Regolamento UE 2016/679 (GDPR).</p>
+      </div>
+    </section>
+    <section>
+      <div class="container">
+        <div class="privacy-content">
+          <h4>1. Titolare del trattamento</h4>
+          <p>Il titolare del trattamento dei dati &egrave; Excel AI. Per qualsiasi informazione o richiesta &egrave; possibile contattarci all&rsquo;indirizzo email <a href="mailto:privacy@excel-ai-sigma.vercel.app">privacy@excel-ai-sigma.vercel.app</a>.</p>
+
+          <h4>2. Dati raccolti</h4>
+          <p>Raccogliamo i seguenti dati personali:</p>
+          <ul>
+            <li>Dati di registrazione: nome, cognome, email, professione, azienda/studio, telefono (facoltativo).</li>
+            <li>Dati di utilizzo: log delle operazioni eseguite nell&rsquo;audit trail, timestamp e metadati delle richieste.</li>
+            <li>Dati tecnici: indirizzo IP, tipo di browser, sistema operativo, log di errore.</li>
+          </ul>
+
+          <h4>3. Finalit&agrave; del trattamento</h4>
+          <p>I dati sono trattati per le seguenti finalit&agrave;:</p>
+          <ul>
+            <li>Erogazione del servizio Excel AI e gestione degli account demo.</li>
+            <li>Assistenza tecnica e risoluzione di problemi.</li>
+            <li>Invio di comunicazioni relative al servizio (aggiornamenti, sicurezza).</li>
+            <li>Adempimenti legali e fiscali.</li>
+            <li>Miglioramento del prodotto su base aggregata e anonima.</li>
+          </ul>
+
+          <h4>4. Base giuridica</h4>
+          <p>Il trattamento si basa su:</p>
+          <ul>
+            <li><strong>Esecuzione di un contratto</strong> (art. 6.1.b GDPR): fornitura del servizio agli utenti registrati.</li>
+            <li><strong>Consenso</strong> (art. 6.1.a GDPR): per comunicazioni marketing (facoltativo, revocabile in ogni momento).</li>
+            <li><strong>Obbligo legale</strong> (art. 6.1.c GDPR): conservazione di log per finalit&agrave; fiscali e di sicurezza.</li>
+            <li><strong>Legittimo interesse</strong> (art. 6.1.f GDPR): prevenzione frodi, garantire la sicurezza dei sistemi.</li>
+          </ul>
+
+          <h4>5. Conservazione</h4>
+          <p>I dati personali sono conservati per il tempo strettamente necessario alle finalit&agrave; indicate:</p>
+          <ul>
+            <li>Dati account: fino alla cancellazione dell&rsquo;account da parte dell&rsquo;utente, o dopo 24 mesi di inattivit&agrave;.</li>
+            <li>Audit log: 12 mesi dalla data dell&rsquo;operazione.</li>
+            <li>Dati tecnici e log: 6 mesi.</li>
+          </ul>
+
+          <h4>6. Condivisione dei dati</h4>
+          <p>I dati personali non sono venduti a terzi. Possono essere condivisi esclusivamente con:</p>
+          <ul>
+            <li>Fornitori di servizi cloud (hosting, database) sotto contratto e vincolo di riservatezza.</li>
+            <li>Autorit&agrave; competenti, su richiesta legittima.</li>
+          </ul>
+          <p>I contenuti dei fogli Excel non vengono mai utilizzati per addestrare modelli di intelligenza artificiale di terze parti.</p>
+
+          <h4>7. Trasferimenti internazionali</h4>
+          <p>I dati sono ospitati principalmente nell&rsquo;Unione Europea. Qualora si rendesse necessario un trasferimento extra-UE, garantiremo adeguate garanzie (clausole contrattuali standard).</p>
+
+          <h4>8. Diritti dell&rsquo;interessato</h4>
+          <p>In qualit&agrave; di interessato, hai diritto di:</p>
+          <ul>
+            <li>Accedere ai tuoi dati personali (art. 15 GDPR).</li>
+            <li>Rettificare dati inesatti (art. 16 GDPR).</li>
+            <li>Cancellare i tuoi dati (&ldquo;diritto all&rsquo;oblio&rdquo;, art. 17 GDPR).</li>
+            <li>Limitare il trattamento (art. 18 GDPR).</li>
+            <li>Opporsi al trattamento (art. 21 GDPR).</li>
+            <li>Richiedere la portabilit&agrave; dei dati (art. 20 GDPR).</li>
+            <li>Revocare il consenso in qualsiasi momento.</li>
+          </ul>
+          <p>Per esercitare i tuoi diritti, scrivi a <a href="mailto:privacy@excel-ai-sigma.vercel.app">privacy@excel-ai-sigma.vercel.app</a>. Rispondiamo entro 30 giorni.</p>
+
+          <h4>9. Cookie e tecnologie simili</h4>
+          <p>Utilizziamo solo cookie tecnici necessari al funzionamento del servizio (autenticazione, preferenze tema). Non utilizziamo cookie di profilazione o tracciamento di terze parti.</p>
+
+          <h4>10. Sicurezza</h4>
+          <p>Adottiamo misure tecniche e organizzative per proteggere i dati: crittografia TLS 1.3 in transito, password hashate, accesso ristretto ai server, backup cifrati, monitoraggio continuo.</p>
+
+          <h4>11. Modifiche alla privacy policy</h4>
+          <p>Ci riserviamo il diritto di aggiornare la presente informativa. Le modifiche saranno pubblicate su questa pagina con la data di ultimo aggiornamento.</p>
+          <p class="last-update">Ultimo aggiornamento: 28 maggio 2026</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <a href="/" class="logo">
+          <div class="logo-mark">E</div>
+          <span class="logo-text">Excel AI</span>
+        </a>
+        <p>Assistente intelligente per Microsoft Excel. Progettato per chi usa Excel professionalmente.</p>
+      </div>
+      <div class="footer-col">
+        <h5>Prodotto</h5>
+        <a href="/">Home</a>
+        <a href="/faq.html">FAQ</a>
+        <a href="/privacy.html">Privacy Policy</a>
+      </div>
+      <div class="footer-col">
+        <h5>Installazione</h5>
+        <a href="/public/install-mac.command" download>Scarica per Mac</a>
+        <a href="/public/install-win.bat" download>Scarica per Windows</a>
+      </div>
+      <div class="footer-col">
+        <h5>Contatti</h5>
+        <a href="mailto:info@excel-ai-sigma.vercel.app">Email</a>
+        <a href="https://github.com/francescods04/excel-ai-" target="_blank" rel="noopener">GitHub</a>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <div class="container">
+        <p>&copy; 2026 Excel AI. Fatto in Italia.</p>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    (function() {
+      const toggle = document.getElementById('theme-toggle');
+      const html = document.documentElement;
+      const saved = localStorage.getItem('theme');
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      if (saved) { html.setAttribute('data-theme', saved); }
+      else if (prefersDark) { html.setAttribute('data-theme', 'dark'); }
+      else { html.setAttribute('data-theme', 'light'); }
+      function updateIcon() {
+        const isDark = html.getAttribute('data-theme') === 'dark';
+        toggle.innerHTML = isDark ? '&#9790;' : '&#9728;';
+        toggle.title = isDark ? 'Passa a tema chiaro' : 'Passa a tema scuro';
+      }
+      updateIcon();
+      toggle.addEventListener('click', () => {
+        const isDark = html.getAttribute('data-theme') === 'dark';
+        const next = isDark ? 'light' : 'dark';
+        html.setAttribute('data-theme', next);
+        localStorage.setItem('theme', next);
+        updateIcon();
+      });
+    })();
+    function toggleMobileMenu() { document.getElementById('mobile-nav').classList.toggle('open'); }
+  </script>
+</body>
+</html>
