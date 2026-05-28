@@ -1954,6 +1954,34 @@ async function runAgentLoop(objective, context, options = {}) {
       if (recentToolTrail.length > STAGNATION_MAX_TRAIL) {
         recentToolTrail.splice(0, recentToolTrail.length - STAGNATION_MAX_TRAIL);
       }
+
+      // Bulk nudge: if the model just emitted N≥2 consecutive single-write
+      // tools of the SAME class, inject a one-line reminder so the next
+      // iteration collapses them into a bulk_* call. Belt-and-suspenders for
+      // the hard rule already in the system prompt — some model versions
+      // ignore the rule on the first violation; this catches them on the
+      // second. Disabled via AGENT_BULK_NUDGE=false.
+      if (process.env.AGENT_BULK_NUDGE !== 'false') {
+        const BULK_TRIGGER_RUN = 2;
+        const lastN = recentToolTrail.slice(-BULK_TRIGGER_RUN).map(e => e.toolName);
+        if (lastN.length === BULK_TRIGGER_RUN && lastN.every(n => n === 'set_cell_range')) {
+          messages.push(makeUserMessage(
+            'BATCH HINT: you just called set_cell_range twice in a row. If the next write is also a different sheet/section, consolidate the upcoming writes into ONE bulk_set_cell_ranges call instead of issuing them one at a time.'
+          ));
+        } else if (lastN.length === BULK_TRIGGER_RUN && lastN.every(n => n === 'set_format')) {
+          messages.push(makeUserMessage(
+            'BATCH HINT: you just called set_format twice in a row. Consolidate the next formats into ONE bulk_set_format call.'
+          ));
+        } else if (lastN.length === BULK_TRIGGER_RUN && lastN.every(n => n === 'create_sheet')) {
+          messages.push(makeUserMessage(
+            'BATCH HINT: you just created two sheets one at a time. If more are coming, use bulk_create_sheets with the full list.'
+          ));
+        } else if (lastN.length === BULK_TRIGGER_RUN && lastN.every(n => n === 'create_named_range')) {
+          messages.push(makeUserMessage(
+            'BATCH HINT: you just created two named ranges one at a time. Use bulk_create_named_ranges with the full list of remaining inputs.'
+          ));
+        }
+      }
       const stagnation = detectToolStagnation(recentToolTrail);
       if (stagnation) {
         aborted = true;
