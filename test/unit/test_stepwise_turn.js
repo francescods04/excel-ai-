@@ -49,6 +49,57 @@ const turns = require('../../server/runtime/turns.js');
   );
   console.log('OK stepTurn rejects unknown turnId');
 
+  /* resolveStaleStep: concurrency / lost-response guard */
+  {
+    // matching seq → proceed (null)
+    assert.strictEqual(
+      turns.resolveStaleStep({ agentStepSeq: 3, agentState: { status: 'running' } }, 3),
+      null,
+      'matching seq → proceed'
+    );
+    // null clientSeq → proceed (back-compat)
+    assert.strictEqual(
+      turns.resolveStaleStep({ agentStepSeq: 3, agentState: { status: 'running' } }, null),
+      null,
+      'null clientSeq → proceed'
+    );
+
+    // client one behind + recorded lastStepResult → re-deliver it (idempotent)
+    const lost = { control: 'emit_actions', payload: { actions: [{ type: 'setCellRange' }] }, stepSeq: 4 };
+    const redeliver = turns.resolveStaleStep(
+      { agentStepSeq: 4, agentState: { status: 'running' }, lastStepResult: lost },
+      3
+    );
+    assert.strictEqual(redeliver.control, 'emit_actions', 'lost response → re-deliver same control');
+    assert.deepStrictEqual(redeliver.payload.actions, lost.payload.actions, 're-deliver same actions');
+    assert.strictEqual(redeliver.stepSeq, 4, 're-deliver same stepSeq');
+    assert.strictEqual(redeliver.stale, true, 'marked stale');
+
+    // stale mismatch, awaiting_client pending → re-emit requests (no advance)
+    const reqs = [{ id: 'r1', toolName: 'workbook.readSheet', params: {} }];
+    const reEmit = turns.resolveStaleStep(
+      { agentStepSeq: 9, agentState: { status: 'awaiting_client', pending: { requests: reqs } } },
+      2
+    );
+    assert.strictEqual(reEmit.control, 'await_client', 'stale await → re-emit await_client');
+    assert.deepStrictEqual(reEmit.payload.requests, reqs, 're-emit pending requests');
+    assert.strictEqual(reEmit.stepSeq, 9, 're-emit keeps current seq');
+
+    // stale mismatch, paused pending → re-emit question
+    const paused = turns.resolveStaleStep(
+      { agentStepSeq: 5, agentState: { status: 'paused', pending: { question: [{ question: 'Q?' }] } } },
+      1
+    );
+    assert.strictEqual(paused.control, 'paused', 'stale paused → re-emit paused');
+    assert.ok(Array.isArray(paused.payload.question), 're-emit question payload');
+
+    // stale mismatch, running → continue
+    const cont = turns.resolveStaleStep({ agentStepSeq: 7, agentState: { status: 'running' } }, 1);
+    assert.strictEqual(cont.control, 'continue', 'stale running → continue');
+
+    console.log('OK resolveStaleStep (proceed / lost-response re-delivery / stale re-emit)');
+  }
+
   // restore env
   for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
   console.log('\nstepwise turn wiring tests completed.');

@@ -2489,6 +2489,31 @@ function initStepwiseAgentLoop(turnId, strategy) {
   return turn;
 }
 
+// Decide whether an incoming /step is a stale/retried request that must NOT
+// advance the loop. Returns a result object to return verbatim, or null when
+// the step should proceed normally. Pure (no I/O) so it is unit-testable.
+//   - clientSeq matches current seq  → null (proceed)
+//   - clientSeq is exactly one behind AND a recorded lastStepResult exists for
+//     the next seq → the client is retrying a step whose response was lost;
+//     re-deliver that result so actions/reads re-apply idempotently
+//   - otherwise → re-emit the current pending state without advancing
+function resolveStaleStep(turn, clientSeq) {
+  const curSeq = turn.agentStepSeq || 0;
+  if (clientSeq == null || Number(clientSeq) === curSeq) return null;
+  if (turn.lastStepResult && Number(clientSeq) === turn.lastStepResult.stepSeq - 1) {
+    return { ...turn.lastStepResult, stale: true };
+  }
+  const pending = turn.agentState && turn.agentState.pending;
+  const status = turn.agentState && turn.agentState.status;
+  const control = status === 'paused'
+    ? 'paused'
+    : (status === 'awaiting_client' ? 'await_client' : 'continue');
+  const payload = control === 'paused'
+    ? { question: pending && pending.question }
+    : (control === 'await_client' ? { requests: (pending && pending.requests) || [] } : {});
+  return { control, payload, stepSeq: curSeq, stale: true };
+}
+
 async function stepTurn(turnId, clientResult, clientSeq) {
   const turn = _getTurnRef(turnId);
   if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
@@ -2501,19 +2526,11 @@ async function stepTurn(turnId, clientResult, clientSeq) {
     return { control: 'aborted', payload: { reason: turn.error }, stepSeq: turn.agentStepSeq || 0 };
   }
 
-  // Concurrency guard: the client drives sequentially, so a step whose seq does
-  // not match the server's current seq is a stale retry. Re-emit current state
-  // instead of advancing (avoids double iterations).
-  if (clientSeq != null && Number(clientSeq) !== (turn.agentStepSeq || 0)) {
-    const pending = turn.agentState.pending;
-    const control = turn.agentState.status === 'paused'
-      ? 'paused'
-      : (turn.agentState.status === 'awaiting_client' ? 'await_client' : 'continue');
-    const payload = control === 'paused'
-      ? { question: pending && pending.question }
-      : (control === 'await_client' ? { requests: (pending && pending.requests) || [] } : {});
-    return { control, payload, stepSeq: turn.agentStepSeq || 0, stale: true };
-  }
+  // Concurrency / lost-response guard (see resolveStaleStep). A non-null result
+  // means the client's seq is behind: either retry the lost step (re-deliver
+  // recorded result, idempotent) or a stale retry (re-emit pending state).
+  const stale = resolveStaleStep(turn, clientSeq);
+  if (stale) return stale;
 
   const task = { id: AGENT_LOOP_TASK_ID, agent: 'ai', tool: 'agent.loop', description: turn.strategy?.label || 'Agent loop' };
   const itemId = taskItemId(task.id);
@@ -2538,6 +2555,10 @@ async function stepTurn(turnId, clientResult, clientSeq) {
     emitEphemeralLog(turnId, `[loop ${state.iteration}] Invio ${actions.length} azioni Excel`, 'info', { taskId: task.id, itemId });
   }
 
+  const result = { control, payload, stepSeq: turn.agentStepSeq };
+  // Record for lost-response re-delivery (client may retry this exact step).
+  turn.lastStepResult = result;
+
   if (control === 'done') {
     finalizeStepwiseTurn(turnId, task, itemId, 'completed');
     return { control: 'done', payload: { summary: state.summary }, stepSeq: turn.agentStepSeq };
@@ -2550,7 +2571,7 @@ async function stepTurn(turnId, clientResult, clientSeq) {
   }
 
   saveTurn(turn);
-  return { control, payload, stepSeq: turn.agentStepSeq };
+  return result;
 }
 
 function finalizeStepwiseTurn(turnId, task, itemId, kind) {
@@ -2719,6 +2740,7 @@ module.exports = {
   approveTurn,
   stepTurn,
   resolveExecutionEngine,
+  resolveStaleStep,
   loadTurn,
   buildExecutionMemory,
   chooseTurnStrategy,
