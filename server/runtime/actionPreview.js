@@ -121,6 +121,14 @@ function summarizeAction(action) {
         target,
         preview: valuePreview(action.options)
       };
+    case 'setNotes':
+      return {
+        kind: 'annotate',
+        label: `Aggiunge ${Array.isArray(action.notes) ? action.notes.length : 0} note alle celle`,
+        sheet,
+        target,
+        preview: valuePreview((action.notes || []).map(n => `${n.sheet ? n.sheet + '!' : ''}${n.addr}: ${n.text}`).join(' | '))
+      };
     case 'createChart':
       return {
         kind: 'visual',

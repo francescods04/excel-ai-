@@ -28,6 +28,7 @@ const MUTATION_TOOLS = new Set([
   'execute_excel_formula',
   'set_format',
   'bulk_set_format',
+  'bulk_set_notes',
   'add_chart',
   'suspend_calculation',
   'resume_calculation'
@@ -56,7 +57,8 @@ const STAGNATION_WATCH_TOOLS = new Set([
   'get_range_as_csv',
   'get_cell_ranges',
   'build_workbook_graph',
-  'execute_office_js'
+  'execute_office_js',
+  'read_format_summary'
 ]);
 const STAGNATION_MAX_REPEAT = Math.max(3, Number(process.env.AGENT_STAGNATION_MAX_REPEAT) || 4);
 const STAGNATION_ALT_CYCLES = Math.max(2, Number(process.env.AGENT_STAGNATION_ALT_CYCLES) || 3);
@@ -213,7 +215,7 @@ const DEFAULT_PROMPT_VARIANT = process.env.AGENT_PROMPT_VARIANT || 'default';
 let AGENT_SYSTEM_PROMPT = loadPromptVariant(DEFAULT_PROMPT_VARIANT);
 
 /* Common output format suffix appended to ANY variant */
-const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nOUTPUT FORMAT: Respond with a JSON object containing:\n{\n  "thought": "Your reasoning about what to do next",\n  "tool": "tool_name",\n  "params": { ...tool parameters... }\n}\n\nIMPORTANT: Call exactly one tool per response. The only way to do multiple things in one iteration is the parallel_calls tool, which fans out up to 8 INDEPENDENT read-only calls (reads, OpenBB fetches, bundles) in parallel. Use parallel_calls whenever you would otherwise emit multiple consecutive read-only tool calls — it cuts those N iterations down to 1. Mutations and writes still run sequentially, one per iteration.\n\nEXCEL AGENT WORKFLOW:\n- For complex workbook work, inspect the workbook first, build_workbook_graph for multi-sheet dependency context, create a brief task list, then execute in small visible chunks.\n- Prefer set_cell_range for each logical section instead of many single-cell writes.\n- **BATCH RULE (critical for speed):** when you are about to write to 2+ different sheets or 2+ different sections, you MUST use bulk_set_cell_ranges with all of them in a single call instead of consecutive set_cell_range calls. Same rule for formatting: 2+ formats → bulk_set_format. Issuing N consecutive single-write tools when bulk_* would have worked is the #1 source of slow runs.\n- After important writes, verify touched ranges or formulas before calling done.\n- Report only changes you actually made and checked, with sheet names and ranges.\n- Use allow_overwrite:false when exploring a new range. Use allow_overwrite:true only when the user asked to replace or the target sheet was just created by you.\n\nWHEN THE TASK IS COMPLETE: You MUST call the tool "done" with a summary. Do NOT keep calling other tools after the work is finished. Calling "done" ends the session.\n\nPYTHON RULES:\n- execute_python is ONLY for mathematical calculations on data provided as variables in the code string.\n- execute_python does NOT have access to the Excel workbook file system. Do NOT use openpyxl, xlrd, or any file paths like /tmp/current.xlsx, /files/input/workbook.xlsx, etc.\n- To read or write Excel, always use the dedicated Excel tools (set_cell_range, create_sheet, execute_excel_formula, etc.).\n\nDATA RULES:\n- For public-company valuation work, use available finance tools first (OpenBB/Yahoo, treasury/macro tools when relevant), then visible workbook data.\n- Do not invent live market data. If a value is from training memory or a heuristic, label it as an assumption in the workbook.\n- Add short notes/comments for externally sourced input cells when the write tool supports notes.\n- Search/fetch the web only when the user asks for current source material or when a required data point is unavailable from the provided finance tools.\n\nASK_USER_QUESTION RULES (CRITICAL):\n- The tool ask_user_question is an EMERGENCY BREAK. Use it ONLY when a truly critical piece of information is missing AND cannot be inferred from the workbook context or the user's original request.\n- NEVER ask the user for confirmation before proceeding (e.g. "Should I proceed?", "Continue?", "Go ahead?"). Just DO the work.\n- NEVER ask which sheet to use — the active sheet is provided in the context. If unspecified, default to the active sheet.\n- NEVER ask for a ticker/company name if the user already mentioned it in the original request.\n- NEVER ask for data that is already visible in the workbook context preview. Reference those cells directly.\n- If you are unsure about a minor assumption, make a reasonable default choice and proceed. Do NOT pause the flow.
+const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nOUTPUT FORMAT: Respond with a JSON object containing:\n{\n  "thought": "Your reasoning about what to do next",\n  "tool": "tool_name",\n  "params": { ...tool parameters... }\n}\n\nIMPORTANT: Call exactly one tool per response. The only way to do multiple things in one iteration is the parallel_calls tool, which fans out up to 8 INDEPENDENT read-only calls (reads, OpenBB fetches, bundles) in parallel. Use parallel_calls whenever you would otherwise emit multiple consecutive read-only tool calls — it cuts those N iterations down to 1. Mutations and writes still run sequentially, one per iteration.\n\nEXCEL AGENT WORKFLOW:\n- For complex workbook work, inspect the workbook first, build_workbook_graph for multi-sheet dependency context, create a brief task list, then execute in small visible chunks.\n- Prefer set_cell_range for each logical section instead of many single-cell writes.\n- **BATCH RULE (critical for speed):** when you are about to write to 2+ different sheets or 2+ different sections, you MUST use bulk_set_cell_ranges with all of them in a single call instead of consecutive set_cell_range calls. Same rule for formatting: 2+ formats → bulk_set_format. Issuing N consecutive single-write tools when bulk_* would have worked is the #1 source of slow runs.\n- **FORMATTING RULE:** use set_format / bulk_set_format for colors, number formats, borders, widths — they size number-format matrices to multi-cell ranges automatically. Do NOT hand-write numberFormat arrays in execute_office_js (a 1x1 matrix on a multi-cell range throws and wastes iterations). Reserve execute_office_js for what structured tools can't do (cell merges, freeze panes, pivots).\n- **VERIFY FORMATTING:** after a formatting pass, call read_format_summary on the key blocks to confirm styling actually landed (inputs colored, headers bold/filled, assumptions carry notes) — plain reads can't see colors or notes. If something's off, issue ONE targeted bulk_set_format / bulk_set_notes repair; do NOT loop re-reading.\n- After important writes, verify touched ranges or formulas before calling done.\n- Report only changes you actually made and checked, with sheet names and ranges.\n- Use allow_overwrite:false when exploring a new range. Use allow_overwrite:true only when the user asked to replace or the target sheet was just created by you.\n\nWHEN THE TASK IS COMPLETE: You MUST call the tool "done" with a summary. Do NOT keep calling other tools after the work is finished. Calling "done" ends the session.\n\nPYTHON RULES:\n- execute_python is ONLY for mathematical calculations on data provided as variables in the code string.\n- execute_python does NOT have access to the Excel workbook file system. Do NOT use openpyxl, xlrd, or any file paths like /tmp/current.xlsx, /files/input/workbook.xlsx, etc.\n- To read or write Excel, always use the dedicated Excel tools (set_cell_range, create_sheet, execute_excel_formula, etc.).\n\nDATA RULES:\n- For public-company valuation work, use available finance tools first (OpenBB/Yahoo, treasury/macro tools when relevant), then visible workbook data.\n- Do not invent live market data. If a value is from training memory or a heuristic, label it as an assumption in the workbook.\n- Annotate assumption INPUT cells and key outputs with notes: use the per-cell \"note\" field in set_cell_range / bulk_set_cell_ranges, or bulk_set_notes for many at once. Notes apply as native Excel comments (with an Assumption_Notes sheet fallback) and never block your data writes — add them generously for any externally sourced or assumed value.\n- Search/fetch the web only when the user asks for current source material or when a required data point is unavailable from the provided finance tools.\n\nASK_USER_QUESTION RULES (CRITICAL):\n- The tool ask_user_question is an EMERGENCY BREAK. Use it ONLY when a truly critical piece of information is missing AND cannot be inferred from the workbook context or the user's original request.\n- NEVER ask the user for confirmation before proceeding (e.g. "Should I proceed?", "Continue?", "Go ahead?"). Just DO the work.\n- NEVER ask which sheet to use — the active sheet is provided in the context. If unspecified, default to the active sheet.\n- NEVER ask for a ticker/company name if the user already mentioned it in the original request.\n- NEVER ask for data that is already visible in the workbook context preview. Reference those cells directly.\n- If you are unsure about a minor assumption, make a reasonable default choice and proceed. Do NOT pause the flow.
 
 CITATION RULES:
 - Every action explanation MUST include a citation in the format: [A1:D1](<citation:SheetName!A1:D1>)
@@ -353,6 +355,23 @@ const TOOL_DEFINITIONS = [
           target: { type: 'string', description: 'Range (e.g. A1:D100)' },
           maxRows: { type: 'number', description: 'Max rows to return (omit to read ALL rows)' },
           includeHeaders: { type: 'boolean', description: 'Include header row' }
+        },
+        required: ['sheet', 'target']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_format_summary',
+      description: `Read the VISUAL formatting of a range to VERIFY styling — font color, fill color, bold, number format, and cell notes. Plain reads (read_sheet/get_cell_ranges) return values/formulas only and CANNOT tell you whether colors or notes were applied. Returns only the non-default (styled) cells plus their notes, so it stays compact. Use after a formatting pass to confirm conventions (inputs colored, formulas plain, cross-sheet links green, headers bold/filled, assumptions carry notes) before calling done.\n\nExample: { "sheet": "Assumptions", "target": "A1:C20" }`,
+      parameters: {
+        type: 'object',
+        properties: {
+          sheet: { type: 'string', description: 'Sheet name' },
+          target: { type: 'string', description: 'Range in A1 notation (e.g. "A1:C20"). Scope it to the block you are verifying.' },
+          maxRows: { type: 'number', description: 'Max rows to inspect (default 50)' },
+          maxCols: { type: 'number', description: 'Max cols to inspect (default 26)' }
         },
         required: ['sheet', 'target']
       }
@@ -609,6 +628,33 @@ const TOOL_DEFINITIONS = [
   {
     type: 'function',
     function: {
+      name: 'bulk_set_notes',
+      description: `Attach explanatory notes/comments to specific cells (assumption rationale, methodology, source/derivation). Notes apply as native Excel comments in an isolated phase that CANNOT corrupt or abort your data writes; if a comment can't be attached, it is recorded on an "Assumption_Notes" sheet instead so the rationale is never lost. Use this to annotate assumption INPUT cells and key outputs after writing them.\n\nExample:\n{\n  "notes": [\n    { "sheet": "Assumptions", "cell": "B3", "note": "WACC 9.2% = CAPM: rf 4.3% + beta 1.1 x ERP 4.5%" },\n    { "sheet": "Assumptions", "cell": "B4", "note": "Terminal growth 2.5% = long-run GDP proxy" }\n  ]\n}`,
+      parameters: {
+        type: 'object',
+        required: ['notes'],
+        properties: {
+          notes: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 64,
+            items: {
+              type: 'object',
+              required: ['cell', 'note'],
+              properties: {
+                sheet: { type: 'string', description: 'Sheet name (defaults to active sheet)' },
+                cell: { type: 'string', description: 'A1 cell address, e.g. "B3"' },
+                note: { type: 'string', description: 'Annotation text' }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'execute_excel_formula',
       description: 'Write an Excel formula to a cell for Excel engine evaluation (XIRR, XNPV, etc). Writes the formula, letting Excel compute the result.\n\nExample:\n{\n  "sheet": "Valuation",\n  "target": "B10",\n  "formula": "=XIRR(B2:B9,A2:A9,0.1)"\n}',
       parameters: {
@@ -773,12 +819,13 @@ sheet.freezePanes.freezeAt("B2");
 \`\`\`
 
 5. BORDERS / ROW HEIGHTS / NUMBER FORMATS:
+For number formats, PREFER set_format / bulk_set_format (they size the format matrix to the range for you). If you must set numberFormat in raw Office.js, the array MUST match the range dimensions exactly — a 1x1 [["0.0%"]] on a multi-cell range THROWS. For A10:D10 (1 row x 4 cols) you need 4 entries:
 \`\`\`javascript
 const r = sheet.getRange("A10:D10");
 r.format.borders.getItem("EdgeBottom").style = "Continuous";
 r.format.borders.getItem("EdgeBottom").color = "#B0C8D5";
 r.format.rowHeight = 22;
-r.numberFormat = [["0.0%"]];\`\`\`
+r.numberFormat = [["0.0%", "0.0%", "0.0%", "0.0%"]];\`\`\`
 
 6. CLEAR CELLS:
 \`\`\`javascript
@@ -2196,6 +2243,7 @@ const PARALLEL_SAFE_TOOLS = new Set([
   'read_sheet',
   'get_cell_ranges',
   'get_range_as_csv',
+  'read_format_summary',
   'list_named_ranges',
   'build_workbook_graph',
   'read_instructions',
@@ -2372,6 +2420,21 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
         rowCount: context?.totalRows || context?.usedRangeSize?.rows,
         columnCount: context?.totalColumns || context?.usedRangeSize?.columns
       };
+    }
+    case 'read_format_summary': {
+      if (!requestClientTool) {
+        return { error: 'read_format_summary requires a live Excel client (visual formatting has no static fallback).' };
+      }
+      try {
+        return await requestClientTool('workbook.readFormatSummary', {
+          sheet: params.sheet,
+          target: params.target,
+          maxRows: params.maxRows,
+          maxCols: params.maxCols
+        });
+      } catch (err) {
+        return { error: `read_format_summary failed: ${err.message}` };
+      }
     }
     case 'get_range_as_csv': {
       // If requestClientTool is available, do a real client-side read
@@ -2793,6 +2856,33 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
         applied: accepted.length,
         errors: errors.length ? errors : undefined,
         actions
+      };
+    }
+    case 'bulk_set_notes': {
+      const notes = Array.isArray(params && params.notes) ? params.notes : [];
+      if (notes.length === 0) return { error: 'bulk_set_notes: "notes" must be a non-empty array' };
+      if (notes.length > 64) return { error: `bulk_set_notes: max 64 notes per call, got ${notes.length}` };
+      const collected = [];
+      const errors = [];
+      for (let i = 0; i < notes.length; i++) {
+        const n = notes[i] || {};
+        const sheet = n.sheet || context?.activeSheet;
+        if (!n.cell || typeof n.cell !== 'string') {
+          errors.push({ index: i, reason: 'missing or invalid cell' });
+          continue;
+        }
+        if (n.note == null || n.note === '') {
+          errors.push({ index: i, cell: n.cell, reason: 'missing note text' });
+          continue;
+        }
+        collected.push({ sheet, addr: n.cell, text: String(n.note) });
+      }
+      if (collected.length === 0) return { error: 'bulk_set_notes: no valid notes', errors };
+      return {
+        ok: true,
+        applied: collected.length,
+        errors: errors.length ? errors : undefined,
+        actions: [{ type: 'setNotes', notes: collected }]
       };
     }
     case 'execute_excel_formula': {

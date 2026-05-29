@@ -26,7 +26,8 @@ KEY PRINCIPLES:
 - Prefer 3-8 slices for complex tasks. Don't over-fragment.
 - Slices should be COHERENT units of work (e.g., "build the Assumptions sheet", "build IS revenue & EBITDA rows", "build Debt Schedule"), not micro-steps.
 - Cross-sheet circular dependencies (e.g., LBO Debt Schedule ↔ IS Interest ↔ Cash Flow) cannot be parallelized — put them in the same sequential slice, OR split into a deterministic first-pass and a second-pass slice.
-- Reserve a final "finalize" or "verify" slice (deps = ALL build slices) for formatting, validation, or fix-up if the task needs it.
+- ALWAYS end with a dedicated final slice (id like "format_and_verify", deps = ALL other slices) that runs alone in the LAST wave. It applies the global formatting conventions across every sheet, adds notes to assumption/input cells (bulk_set_notes), then verifies with read_format_summary and issues at most ONE targeted repair batch. Formatting and notes belong in THIS final wave — do NOT interleave them into data-build slices (it slows workers and risks write conflicts). Because it runs alone, this slice may list ALL sheets in sheets_owned.
+- MODEL TIER: set "tier":"flash" for every build and formatting worker (fast — this is the default). Use "tier":"pro" ONLY for a final audit/verification slice that needs deep cross-checking. Routine formatting is flash. Most blueprints are flash for everything.
 
 OUTPUT JSON SCHEMA (strict, no extras):
 {
@@ -43,7 +44,8 @@ OUTPUT JSON SCHEMA (strict, no extras):
         "may_read_from": ["<sheet>!<A1 range or label>", ...]
       },
       "instructions": "<concrete build instructions for the worker: which sections, which formulas at which cells, what data layout. The worker WILL follow these literally — be specific>",
-      "estimated_iters": <int 3-15>
+      "estimated_iters": <int 3-15>,
+      "tier": "flash"                              // "flash" (default — all build/format workers) or "pro" (reserve for a final audit slice only)
     }
   ]
 }
@@ -187,6 +189,7 @@ function validateBlueprint(raw) {
     const rangesOwned = Array.isArray(scope.ranges_owned) ? scope.ranges_owned.map(String) : [];
     const mayReadFrom = Array.isArray(scope.may_read_from) ? scope.may_read_from.map(String) : [];
     const estIters = Number(s.estimated_iters);
+    const tier = s.tier === 'pro' ? 'pro' : 'flash';
 
     normalizedSlices.push({
       id: s.id,
@@ -194,7 +197,8 @@ function validateBlueprint(raw) {
       deps,
       scope: { sheets_owned: sheetsOwned, ranges_owned: rangesOwned, may_read_from: mayReadFrom },
       instructions: String(s.instructions || '').slice(0, 8000),
-      estimated_iters: Number.isFinite(estIters) ? Math.max(3, Math.min(20, Math.round(estIters))) : 8
+      estimated_iters: Number.isFinite(estIters) ? Math.max(3, Math.min(20, Math.round(estIters))) : 8,
+      tier
     });
   }
 

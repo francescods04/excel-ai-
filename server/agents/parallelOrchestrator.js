@@ -22,6 +22,9 @@ const { buildSliceWorkerPrompt } = require('./architect');
 const logger = require('../utils/logger');
 
 const DEFAULT_MAX_PARALLEL = Number(process.env.PARALLEL_ORCHESTRATOR_MAX || 4);
+// Workers default to the fast model; a slice may opt into the pro model via tier:'pro'
+// (reserved by the architect for a final audit/verification slice, not routine formatting).
+const PRO_MODEL = process.env.AGENT_LOOP_PRO_MODEL || process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro';
 
 async function runParallelBlueprint({
   blueprint,
@@ -77,8 +80,9 @@ async function runParallelBlueprint({
     const slice = sliceMap.get(sliceId);
     state.set(sliceId, 'running');
     startedAt.set(sliceId, Date.now());
-    onEvent('sliceStarted', { sliceId, title: slice.title, estimatedIters: slice.estimated_iters });
-    logger.info(`[Orchestrator] slice "${sliceId}" started (${slice.title})`);
+    const sliceTier = slice.tier === 'pro' ? 'pro' : 'flash';
+    onEvent('sliceStarted', { sliceId, title: slice.title, estimatedIters: slice.estimated_iters, tier: sliceTier });
+    logger.info(`[Orchestrator] slice "${sliceId}" started (${slice.title}) [tier=${sliceTier}]`);
 
     try {
       const slicePrompt = buildSliceWorkerPrompt(slice, blueprint);
@@ -86,9 +90,11 @@ async function runParallelBlueprint({
       // Build a derived context the worker can use. Don't mutate the parent context.
       const workerContext = { ...context, _sliceId: sliceId, _sliceScope: slice.scope };
 
+      const tier = slice.tier === 'pro' ? 'pro' : 'flash';
       const workerOpts = {
         turnId,
-        promptVariant: 'fast',
+        promptVariant: tier === 'pro' ? 'default' : 'fast',
+        modelOverride: tier === 'pro' ? PRO_MODEL : undefined,
         maxIterations: Math.max(6, Math.min(20, slice.estimated_iters * 2)),
         systemPromptAddendum: slicePrompt,
         onEvent: (evt, data) => {

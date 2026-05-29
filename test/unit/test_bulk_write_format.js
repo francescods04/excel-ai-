@@ -118,6 +118,86 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     console.log('OK bulk_set_format enforces max 32 formats');
   }
 
+  // 8) bulk_set_notes fans many notes into ONE setNotes action; sheet defaults to active
+  {
+    const r = await executeAgentTool(
+      'bulk_set_notes',
+      {
+        notes: [
+          { sheet: 'Assumptions', cell: 'B3', note: 'WACC 9.2% = rf 4.3% + beta 1.1 x ERP 4.5%' },
+          { cell: 'B4', note: 'Terminal growth 2.5%' } // sheet omitted -> defaults to active
+        ]
+      },
+      { messages: [], iteration: 0, activeSheet: 'Assumptions' },
+      null
+    );
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.applied, 2);
+    assert.strictEqual(r.actions.length, 1);
+    assert.strictEqual(r.actions[0].type, 'setNotes');
+    assert.strictEqual(r.actions[0].notes.length, 2);
+    assert.deepStrictEqual(r.actions[0].notes[0], { sheet: 'Assumptions', addr: 'B3', text: 'WACC 9.2% = rf 4.3% + beta 1.1 x ERP 4.5%' });
+    assert.strictEqual(r.actions[0].notes[1].sheet, 'Assumptions'); // defaulted from active sheet
+    assert.strictEqual(r.actions[0].notes[1].addr, 'B4');
+    console.log('OK bulk_set_notes fans many notes into one setNotes action');
+  }
+
+  // 9) Invalid note entries reported, valid ones kept
+  {
+    const r = await executeAgentTool(
+      'bulk_set_notes',
+      {
+        notes: [
+          { sheet: 'A', cell: 'A1', note: 'ok' },
+          { sheet: 'A', note: 'no cell' },   // missing cell
+          { sheet: 'A', cell: 'A2' },         // missing note
+          { sheet: 'A', cell: 'A3', note: 'ok2' }
+        ]
+      },
+      { messages: [], iteration: 0 },
+      null
+    );
+    assert.strictEqual(r.applied, 2);
+    assert.strictEqual(r.actions[0].notes.length, 2);
+    assert.ok(Array.isArray(r.errors) && r.errors.length === 2);
+    console.log('OK bulk_set_notes surfaces per-entry errors and continues');
+  }
+
+  // 10) Over-cap (>64) rejected
+  {
+    const notes = Array.from({ length: 65 }, (_, i) => ({ sheet: 'X', cell: `A${i + 1}`, note: 'n' }));
+    const r = await executeAgentTool('bulk_set_notes', { notes }, { messages: [], iteration: 0 }, null);
+    assert.match(r.error, /max 64/);
+    console.log('OK bulk_set_notes enforces max 64 notes');
+  }
+
+  // 11) Empty / missing -> soft error
+  {
+    const r1 = await executeAgentTool('bulk_set_notes', { notes: [] }, { messages: [], iteration: 0 }, null);
+    assert.match(r1.error, /non-empty/);
+    const r2 = await executeAgentTool('bulk_set_notes', {}, { messages: [], iteration: 0 }, null);
+    assert.match(r2.error, /non-empty/);
+    console.log('OK bulk_set_notes rejects empty / missing notes');
+  }
+
+  // 12) read_format_summary requires a live client and passes through visual-format data
+  {
+    const noClient = await executeAgentTool('read_format_summary', { sheet: 'DCF', target: 'A1:C5' }, { messages: [], iteration: 0 }, null);
+    assert.match(noClient.error, /live Excel client/);
+
+    let captured = null;
+    const mockClient = async (toolName, p) => {
+      captured = { toolName, p };
+      return { sheet: 'DCF', styledCellCount: 1, styledCells: [{ addr: 'B2', fontColor: '#0000FF' }] };
+    };
+    const ok = await executeAgentTool('read_format_summary', { sheet: 'DCF', target: 'A1:C5', maxRows: 10 }, { messages: [], iteration: 0 }, mockClient);
+    assert.strictEqual(captured.toolName, 'workbook.readFormatSummary');
+    assert.strictEqual(captured.p.target, 'A1:C5');
+    assert.strictEqual(ok.styledCellCount, 1);
+    assert.strictEqual(ok.styledCells[0].fontColor, '#0000FF');
+    console.log('OK read_format_summary requires a client and passes through visual format data');
+  }
+
   console.log('\nbulk write + format tests completed.');
 })().catch(err => {
   console.error('TEST FAILED:', err);

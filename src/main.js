@@ -14,7 +14,7 @@ import { initApprovalModal, showApprovalModal, hideApprovalModal } from './ui/ap
 import { initUndoBadge, showUndoBadge } from './ui/undoBar.js';
 import { hideRequestPanel, showPermissionRequest, showUserInputRequest, showQuestionRequest, collectRequestFormValues, normalizeRequestFields } from './ui/requestPanel.js';
 import { getExcelContext } from './excel/context.js';
-import { worksheetExists, readWorkbookSnapshot, readSheetSnapshot, readRangeSnapshot, readRangeAsCsv, readNamedRanges, readMultiRangeBatch } from './excel/readers.js';
+import { worksheetExists, readWorkbookSnapshot, readSheetSnapshot, readRangeSnapshot, readRangeAsCsv, readNamedRanges, readMultiRangeBatch, readFormatSummary } from './excel/readers.js';
 import { enqueueActions, executeActions as execActions, undoLastSnapshot, waitForActionQueueIdle, execRunJavaScript, isRunJavaScriptEnabled } from './excel/writers.js';
 import { startTurn, approveTurnExecution, postTurnStep, postTurnResponse, postTurnResponseBatch, postTurnActionResult, getTurn, steerTurn, getErrorMessageFromResponse } from './api/turn.js';
 import { startAgent, resumeAgentWithResponse, postAgentClientResponse } from './api/agent.js';
@@ -761,6 +761,7 @@ async function runStepClientReads(requests) {
           break;
         }
         case 'workbook.listNamedRanges': data = await readNamedRanges(req.params || {}); break;
+        case 'workbook.readFormatSummary': data = await readFormatSummary(req.params || {}); break;
         case 'runJavaScript': data = await runJavaScriptRpc(req.params || {}); break;
         default: throw new Error(`Client tool non supportato: ${req.toolName}`);
       }
@@ -1235,6 +1236,9 @@ async function handleClientToolRequest(request) {
       case 'workbook.listNamedRanges':
         data = await readNamedRanges(request.params || {});
         break;
+      case 'workbook.readFormatSummary':
+        data = await readFormatSummary(request.params || {});
+        break;
       case 'runJavaScript':
         data = await runJavaScriptRpc(request.params || {});
         break;
@@ -1290,6 +1294,9 @@ async function handleClientToolBatch(requests) {
           }
           case 'workbook.listNamedRanges':
             data = await readNamedRanges(request.params || {});
+            break;
+          case 'workbook.readFormatSummary':
+            data = await readFormatSummary(request.params || {});
             break;
           case 'runJavaScript':
             data = await runJavaScriptRpc(request.params || {});
@@ -1432,6 +1439,9 @@ async function handleAgentClientToolBatch(agentId, requests) {
             break;
           case 'workbook.listNamedRanges':
             data = await readNamedRanges(request.params || {});
+            break;
+          case 'workbook.readFormatSummary':
+            data = await readFormatSummary(request.params || {});
             break;
           case 'runJavaScript':
             data = await runJavaScriptRpc(request.params || {});

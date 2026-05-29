@@ -134,6 +134,53 @@ function colToNumber(col) {
   return n || null;
 }
 
+// Office.js requires numberFormat (and values/formulas) to be a 2D array whose
+// dimensions match the target range exactly — a 1x1 [[fmt]] on a multi-cell range
+// throws InvalidArgument. These helpers size the matrix to the range.
+const MAX_NUMBERFORMAT_CELLS = 50000;
+
+function buildMatrix(rows, cols, value) {
+  return Array.from({ length: rows }, () => Array.from({ length: cols }, () => value));
+}
+
+// Reshape any value (scalar / 1D / 2D) into a 2D matrix matching {rows,cols},
+// filling row-major and padding with '' — so Office.js never rejects a dimension
+// mismatch when the LLM uses a range key (e.g. "A5:A104") with the wrong shape.
+function reshapeTo(dims, value) {
+  const flat = [];
+  (function pushFlat(a) { for (const x of a) Array.isArray(x) ? pushFlat(x) : flat.push(x); })(Array.isArray(value) ? value : [value]);
+  const out = [];
+  let i = 0;
+  for (let r = 0; r < dims.rows; r++) {
+    const row = [];
+    for (let c = 0; c < dims.cols; c++) row.push(i < flat.length ? flat[i++] : '');
+    out.push(row);
+  }
+  return out;
+}
+
+function isUnboundedA1(target) {
+  const raw = String(target || '').replace(/\$/g, '');
+  const withoutSheet = raw.includes('!') ? raw.split('!').pop() : raw;
+  return /^[A-Z]+:[A-Z]+$/i.test(withoutSheet) || /^\d+:\d+$/.test(withoutSheet);
+}
+
+// Returns {rows, cols} for a bounded A1 range, or null when the size cannot be
+// derived from the address alone (named range, or unbounded like "A:A").
+function dimsFromA1(target) {
+  const raw = String(target || '').replace(/\$/g, '');
+  const withoutSheet = raw.includes('!') ? raw.split('!').pop() : raw;
+  if (!withoutSheet || isUnboundedA1(withoutSheet)) return null;
+  const match = withoutSheet.match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/i);
+  if (!match) return null;
+  const c1 = colToNumber(match[1]);
+  const r1 = Number(match[2]);
+  const c2 = match[3] ? colToNumber(match[3]) : c1;
+  const r2 = match[4] ? Number(match[4]) : r1;
+  if (!c1 || !c2 || !Number.isFinite(r1) || !Number.isFinite(r2)) return null;
+  return { rows: Math.abs(r2 - r1) + 1, cols: Math.abs(c2 - c1) + 1 };
+}
+
 function estimateTargetCells(target) {
   const raw = String(target || '').replace(/\$/g, '');
   const withoutSheet = raw.includes('!') ? raw.split('!').pop() : raw;
@@ -322,6 +369,7 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
     const actionErrors = [];
     const defaultSheet = context.workbook.worksheets.getActiveWorksheet();
     const sheetCache = new Map();
+    const pendingNotes = [];
 
     // Pre-load sheet existence (also from cell-key prefixes "Sheet!Addr")
     const sheetNames = new Set();
@@ -382,6 +430,7 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
 
     // 2. Apply all actions
     for (const action of actions) {
+      collectNotes(action, pendingNotes);
       try {
         switch (action.type) {
           case 'setCellValue':
@@ -441,6 +490,9 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
           case 'todoWrite':
             if (updateStepsPanel && action.todos) updateStepsPanel(action.todos);
             break;
+          case 'setNotes':
+            // Notes are collected above and applied in the isolated post-sync phase.
+            break;
           default:
             console.warn('Azione non supportata:', action.type);
         }
@@ -454,10 +506,12 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
           break;
         }
         addLog(`Azione ${action.type} fallita${where}: ${detail}`, 'error');
+        const targetHint = action.target
+          || (action.cells && typeof action.cells === 'object' ? Object.keys(action.cells).slice(0, 8).join(',') : null);
         actionErrors.push({
           type: action.type,
           sheet: action.sheet || action.sheetName || null,
-          target: action.target || null,
+          target: targetHint,
           message: detail
         });
       }
@@ -482,6 +536,17 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
       // Keep only last 10 snapshots to avoid memory bloat
       if (state.undoStack.length > 10) state.undoStack.shift();
       addLog(`Snapshot salvato: ${snapshot.entries.length} celle (undo stack: ${state.undoStack.length})`);
+    }
+
+    // 4. Apply notes in an isolated phase AFTER the data sync. Never lets a bad
+    //    comment abort the value/formula writes that already succeeded above.
+    if (pendingNotes.length > 0) {
+      try {
+        const r = await applyNotes(context, pendingNotes);
+        addLog(`Note: ${r.applied}/${pendingNotes.length} applicate${r.fallback ? `, ${r.fallback} su ${ASSUMPTION_NOTES_SHEET}` : ''}.`);
+      } catch (err) {
+        addLog(`Applicazione note fallita (scritture dati non toccate): ${err.message}`, 'warn');
+      }
     }
 
     return {
@@ -519,7 +584,28 @@ async function execRunFormula(context, sheetCache, defaultSheet, action) {
 async function execSetCellFormat(context, sheetCache, defaultSheet, action) {
   const { sheet, target } = await resolveSheetAndTarget(context, sheetCache, defaultSheet, action);
   const range = sheet.getRange(target);
-  applyRangeFormat(range, action.options || {});
+  const opts = action.options || {};
+  const dims = dimsFromA1(target);
+
+  // numberFormat must be a matrix matching the range. When dims can't be derived
+  // from the A1 address (named range or unbounded "A:A"), measure the range —
+  // binding to the used range for unbounded targets to avoid a million-row matrix.
+  if (opts.numberFormat && !dims) {
+    const { numberFormat, ...rest } = opts;
+    if (Object.keys(rest).length) applyRangeFormat(range, rest);
+    const measured = isUnboundedA1(target) ? range.getUsedRangeOrNullObject(true) : range;
+    measured.load('rowCount,columnCount');
+    await context.sync();
+    if (!measured.isNullObject && measured.rowCount > 0 &&
+        measured.rowCount * measured.columnCount <= MAX_NUMBERFORMAT_CELLS) {
+      measured.numberFormat = buildMatrix(measured.rowCount, measured.columnCount, numberFormat);
+    } else {
+      addLog(`numberFormat saltato su ${target}: range vuoto o troppo grande (>${MAX_NUMBERFORMAT_CELLS} celle).`, 'warn');
+    }
+    return;
+  }
+
+  applyRangeFormat(range, opts, dims);
 }
 
 function enumValue(enumObject, candidates, fallback) {
@@ -553,14 +639,14 @@ function applyBorder(range, edge, spec = {}) {
   }
 }
 
-function applyRangeFormat(range, fmt = {}) {
+function applyRangeFormat(range, fmt = {}, dims = null) {
   if (fmt.backgroundColor) range.format.fill.color = fmt.backgroundColor;
   if (fmt.fontColor) range.format.font.color = fmt.fontColor;
   if (fmt.bold !== undefined) range.format.font.bold = fmt.bold;
   if (fmt.italic !== undefined) range.format.font.italic = fmt.italic;
   if (fmt.fontSize !== undefined) range.format.font.size = Number(fmt.fontSize);
   if (fmt.fontName) range.format.font.name = fmt.fontName;
-  if (fmt.numberFormat) range.numberFormat = [[fmt.numberFormat]];
+  if (fmt.numberFormat) range.numberFormat = buildMatrix(dims?.rows || 1, dims?.cols || 1, fmt.numberFormat);
   if (fmt.horizontalAlignment) range.format.horizontalAlignment = fmt.horizontalAlignment;
   if (fmt.verticalAlignment) range.format.verticalAlignment = fmt.verticalAlignment;
   if (fmt.wrapText !== undefined) range.format.wrapText = !!fmt.wrapText;
@@ -574,6 +660,87 @@ function applyRangeFormat(range, fmt = {}) {
       applyBorder(range, edge, spec || {});
     }
   }
+}
+
+// ---------- Notes / Comments (isolated post-sync phase) ----------
+
+const ASSUMPTION_NOTES_SHEET = 'Assumption_Notes';
+
+// Pull notes out of mutation actions so they can be applied AFTER the value/formula
+// sync. A failing comment must never abort the data writes.
+function collectNotes(action, out) {
+  if (!action) return;
+  if (action.type === 'setNotes' && Array.isArray(action.notes)) {
+    for (const n of action.notes) {
+      const text = n && (n.text ?? n.note);
+      if (n && n.addr && text != null && text !== '') {
+        const parsed = parseTargetReference(n.addr);
+        out.push({ sheet: parsed.sheetName || n.sheet || action.sheet || null, addr: parsed.rangeAddress || n.addr, text });
+      }
+    }
+    return;
+  }
+  if (action.type === 'setCellRange' && action.cells) {
+    for (const [addr, spec] of Object.entries(action.cells)) {
+      if (spec && spec.note != null && spec.note !== '') {
+        const parsed = parseTargetReference(addr);
+        out.push({ sheet: parsed.sheetName || action.sheet || action.sheetName || null, addr: parsed.rangeAddress || addr, text: spec.note });
+      }
+    }
+  }
+}
+
+// Apply notes as native Excel comments, one at a time with its own sync so a single
+// bad comment is logged and skipped rather than aborting the batch. Anything that
+// still fails is written to an Assumption_Notes sheet so the annotation is never lost.
+async function applyNotes(context, notes) {
+  let applied = 0;
+  const failed = [];
+  for (const n of notes) {
+    const address = n.sheet ? `${n.sheet}!${n.addr}` : n.addr;
+    try {
+      context.workbook.comments.add(address, String(n.text));
+      await context.sync();
+      applied++;
+    } catch (addErr) {
+      try {
+        // A comment likely already exists on this cell → update its content instead.
+        const existing = context.workbook.comments.getItemByCell(address);
+        existing.content = String(n.text);
+        await context.sync();
+        applied++;
+      } catch (updErr) {
+        failed.push(n);
+        addLog(`Nota non applicata su ${address}: ${updErr.message || addErr.message}`, 'warn');
+      }
+    }
+  }
+  let fallback = 0;
+  if (failed.length > 0) {
+    try {
+      fallback = await writeNotesFallback(context, failed);
+    } catch (err) {
+      addLog(`Fallback ${ASSUMPTION_NOTES_SHEET} fallito: ${err.message}`, 'warn');
+    }
+  }
+  return { applied, failed: failed.length, fallback };
+}
+
+async function writeNotesFallback(context, notes) {
+  const sheetCache = new Map();
+  const sheet = await ensureWorksheet(context, sheetCache, ASSUMPTION_NOTES_SHEET, { createIfMissing: true });
+  const used = sheet.getUsedRangeOrNullObject(true);
+  used.load('rowCount');
+  await context.sync();
+  let startRow = (!used.isNullObject && used.rowCount > 0) ? used.rowCount : 0;
+  if (startRow === 0) {
+    sheet.getRange('A1:C1').values = [['Sheet', 'Cell', 'Note']];
+    startRow = 1;
+  }
+  const rows = notes.map(n => [n.sheet || '', n.addr, String(n.text)]);
+  sheet.getRange(`A${startRow + 1}:C${startRow + rows.length}`).values = rows;
+  await context.sync();
+  return rows.length;
 }
 
 async function execFillRange(context, sheetCache, defaultSheet, action) {
@@ -672,18 +839,51 @@ async function execSetCellRange(context, sheetCache, defaultSheet, action) {
     }
   }
 
-  for (const { cellSheet, cellAddr, spec } of resolved) {
-    const cell = cellSheet.getRange(cellAddr);
-    if (spec.formula) {
-      cell.formulas = [[spec.formula]];
-    } else if (spec.value !== undefined) {
-      cell.values = [[spec.value]];
+  const cellWriteErrors = [];
+  for (const { originalAddr, cellSheet, cellAddr, spec } of resolved) {
+    try {
+      const cell = cellSheet.getRange(cellAddr);
+      const dims = dimsFromA1(cellAddr) || { rows: 1, cols: 1 };
+      const single = dims.rows * dims.cols === 1;
+      let formula = spec.formula;
+      let value = spec.value;
+      // LLM sometimes puts a formula string in the `value` field.
+      if (formula == null && typeof value === 'string' && value.startsWith('=')) { formula = value; value = undefined; }
+
+      if (formula != null) {
+        if (Array.isArray(formula)) {
+          cell.formulas = reshapeTo(dims, formula);
+        } else if (single) {
+          cell.formulas = [[String(formula)]];
+        } else {
+          // Same formula across a multi-cell range key → autoFill from the top-left
+          // so relative references adjust (the usual "fill down/across" intent).
+          const src = cell.getCell(0, 0);
+          src.formulas = [[String(formula)]];
+          try { src.autoFill(cell, Excel.AutoFillType.fillDefault); }
+          catch (_) { cell.formulas = buildMatrix(dims.rows, dims.cols, String(formula)); }
+        }
+      } else if (value !== undefined) {
+        if (Array.isArray(value)) {
+          cell.values = reshapeTo(dims, value);
+        } else {
+          const v = (value !== null && typeof value === 'object') ? JSON.stringify(value) : value;
+          cell.values = single ? [[v]] : buildMatrix(dims.rows, dims.cols, v);
+        }
+      }
+
+      // Notes are NOT applied here: Excel comments can fail late during context.sync
+      // and abort the whole batch. They are collected and applied separately in a
+      // post-sync, per-note isolated phase (see collectNotes / applyNotes).
+      if (spec.cellStyles) {
+        applyRangeFormat(cell, spec.cellStyles, dims);
+      }
+    } catch (cellErr) {
+      cellWriteErrors.push(`${originalAddr}: ${cellErr.message}`);
     }
-    // Excel comments can fail late during context.sync and abort the whole batch.
-    // Keep notes out of the write path until comments have a dedicated safe action.
-    if (spec.cellStyles) {
-      applyRangeFormat(cell, spec.cellStyles);
-    }
+  }
+  if (cellWriteErrors.length > 0 && cellWriteErrors.length === resolved.length) {
+    throw new Error(`setCellRange: tutte le ${resolved.length} scritture cella fallite. Prime: ${cellWriteErrors.slice(0, 3).join(' | ')}`);
   }
 
   // Activate the sheet of the first written cell (best-effort UX)

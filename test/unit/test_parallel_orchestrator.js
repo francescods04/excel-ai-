@@ -157,6 +157,29 @@ async function test_worker_receives_slice_prompt() {
   console.log('  ✓ each worker receives scoped prompt and slice context');
 }
 
+async function test_pro_tier_routes_to_pro_model() {
+  const received = {};
+  async function spy(objective, context, opts) {
+    const sliceId = (opts.systemPromptAddendum.match(/SLICE: (\S+)/) || [])[1];
+    received[sliceId] = { modelOverride: opts.modelOverride, promptVariant: opts.promptVariant };
+    return { status: 'completed', iteration: 1, summary: 'ok' };
+  }
+  const bp = validateBlueprint({
+    objective_restated: 'test',
+    global_layout_notes: 'none',
+    slices: [
+      { id: 'build', title: 'Build', deps: [], scope: { sheets_owned: ['S1'], may_read_from: [] }, instructions: 'x', estimated_iters: 5 },
+      { id: 'audit', title: 'Audit', deps: ['build'], scope: { sheets_owned: [], may_read_from: ['S1'] }, instructions: 'x', estimated_iters: 5, tier: 'pro' }
+    ]
+  }).blueprint;
+  await runParallelBlueprint({ blueprint: bp, turnId: 't1', context: {}, runAgentLoopFn: spy, maxParallel: 2 });
+  assert.strictEqual(received.build.modelOverride, undefined, 'flash worker must not override model');
+  assert.strictEqual(received.build.promptVariant, 'fast', 'flash worker uses fast variant');
+  assert.ok(received.audit.modelOverride && /pro/.test(received.audit.modelOverride), `pro slice should route to a pro model, got ${received.audit.modelOverride}`);
+  assert.strictEqual(received.audit.promptVariant, 'default', 'pro slice uses default variant');
+  console.log('  ✓ tier:pro routes worker to pro model, flash stays fast');
+}
+
 (async () => {
   console.log('Parallel orchestrator tests:');
   await test_runs_all_slices_in_correct_topological_order();
@@ -165,6 +188,7 @@ async function test_worker_receives_slice_prompt() {
   await test_throw_in_worker_treated_as_failure();
   await test_orchestrator_emits_lifecycle_events();
   await test_worker_receives_slice_prompt();
+  await test_pro_tier_routes_to_pro_model();
   console.log('All orchestrator tests passed.\n');
 })().catch(err => {
   console.error('Orchestrator test failed:', err);

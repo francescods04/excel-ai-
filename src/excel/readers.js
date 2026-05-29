@@ -46,6 +46,15 @@ function matrixToCsv(values) {
   return (values || []).map(row => row.map(escapeCsvValue).join(',')).join('\n');
 }
 
+function stripSheetPrefix(addr) {
+  const s = String(addr || '').replace(/\$/g, '');
+  return s.includes('!') ? s.split('!').pop() : s;
+}
+
+function isDefaultFill(c) { return !c || c === '' || String(c).toUpperCase() === '#FFFFFF'; }
+function isDefaultFontColor(c) { return !c || c === '' || String(c).toUpperCase() === '#000000'; }
+function isDefaultNumberFormat(f) { return !f || f === 'General'; }
+
 async function worksheetExists(sheetName) {
   if (!sheetName) return false;
   return Excel.run(async (context) => {
@@ -216,6 +225,91 @@ async function readRangeSnapshot(params) {
       totalRowCount: range.rowCount,
       totalColumnCount: range.columnCount,
       truncated: rowsToRead < range.rowCount || colsToRead < range.columnCount
+    };
+  });
+}
+
+// Reads the VISUAL format of a range so the agent can verify styling (plain reads
+// only return values/formulas/numberFormat, never colors/bold/notes). Uses
+// getCellProperties for true per-cell format (range.format.*.color collapses to ""
+// when cells differ). Returns only non-default cells + notes to keep the payload small.
+async function readFormatSummary(params) {
+  const options = params || {};
+  const parsedTarget = parseTargetReference(options.target);
+  const sheetName = options.sheet || options.sheetName || parsedTarget.sheetName;
+  const caps = getReadCaps(options, { maxRows: 50, maxCols: 26 });
+
+  return Excel.run(async (context) => {
+    const worksheet = sheetName
+      ? context.workbook.worksheets.getItem(sheetName)
+      : context.workbook.worksheets.getActiveWorksheet();
+    worksheet.load('name');
+    let target = parsedTarget.rangeAddress || options.target;
+    if (!target) {
+      const selectedRange = context.workbook.getSelectedRange();
+      selectedRange.load('address');
+      await context.sync();
+      target = selectedRange.address;
+    }
+
+    const range = worksheet.getRange(target);
+    range.load('address,rowCount,columnCount');
+    await context.sync();
+
+    const rowsToRead = Math.min(range.rowCount, caps.maxRows);
+    const colsToRead = Math.min(range.columnCount, caps.maxCols);
+    const limited = range.getCell(0, 0).getResizedRange(rowsToRead - 1, colsToRead - 1);
+    limited.load('address');
+    const props = limited.getCellProperties({
+      address: true,
+      format: { font: { color: true, bold: true }, fill: { color: true } },
+      numberFormat: true
+    });
+    const comments = worksheet.comments;
+    comments.load('items/cellAddress,items/content');
+    await context.sync();
+
+    const noteMap = {};
+    for (const cm of comments.items) {
+      const a = stripSheetPrefix(cm.cellAddress || '');
+      if (a) noteMap[a] = String(cm.content || '').slice(0, 120);
+    }
+
+    const styled = [];
+    const grid = props.value || [];
+    for (let r = 0; r < grid.length; r++) {
+      for (let c = 0; c < (grid[r] || []).length; c++) {
+        const cell = grid[r][c] || {};
+        const fmt = cell.format || {};
+        const font = fmt.font || {};
+        const fill = fmt.fill || {};
+        const addr = stripSheetPrefix(cell.address || '');
+        const note = addr ? noteMap[addr] : undefined;
+        const hasFill = !isDefaultFill(fill.color);
+        const hasFontColor = !isDefaultFontColor(font.color);
+        const hasNumFmt = !isDefaultNumberFormat(cell.numberFormat);
+        if (!font.bold && !hasFill && !hasFontColor && !hasNumFmt && note === undefined) continue;
+        const entry = { addr };
+        if (hasFontColor) entry.fontColor = font.color;
+        if (hasFill) entry.fillColor = fill.color;
+        if (font.bold) entry.bold = true;
+        if (hasNumFmt) entry.numberFormat = cell.numberFormat;
+        if (note !== undefined) entry.note = note;
+        styled.push(entry);
+      }
+    }
+
+    return {
+      sheet: worksheet.name,
+      target: limited.address,
+      rowCount: rowsToRead,
+      columnCount: colsToRead,
+      totalRowCount: range.rowCount,
+      totalColumnCount: range.columnCount,
+      truncated: rowsToRead < range.rowCount || colsToRead < range.columnCount,
+      styledCellCount: styled.length,
+      noteCountInSheet: Object.keys(noteMap).length,
+      styledCells: styled
     };
   });
 }
@@ -424,4 +518,4 @@ async function readMultiRangeBatch(requests) {
   });
 }
 
-export { worksheetExists, readWorkbookSnapshot, readSheetSnapshot, readRangeSnapshot, readRangeAsCsv, readNamedRanges, readMultiRangeBatch };
+export { worksheetExists, readWorkbookSnapshot, readSheetSnapshot, readRangeSnapshot, readRangeAsCsv, readNamedRanges, readMultiRangeBatch, readFormatSummary };
