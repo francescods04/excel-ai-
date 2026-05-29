@@ -2957,10 +2957,15 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
               _message: `execute_office_js error: ${rpc.error}${Array.isArray(rpc.logs) && rpc.logs.length ? `\nLogs:\n${rpc.logs.join('\n').slice(0, 1500)}` : ''}`
             };
           }
+          const value = rpc && Object.prototype.hasOwnProperty.call(rpc, 'value') ? rpc.value : null;
+          const noReturn = value === null || value === undefined;
           return {
             ok: true,
-            value: rpc && Object.prototype.hasOwnProperty.call(rpc, 'value') ? rpc.value : null,
-            logs: rpc && Array.isArray(rpc.logs) ? rpc.logs : []
+            value,
+            logs: rpc && Array.isArray(rpc.logs) ? rpc.logs : [],
+            _message: noReturn
+              ? 'execute_office_js: code executed successfully (no return value — your code did not explicitly return anything). Do NOT retry the same code. If you need to verify state, read it with get_cell_ranges / read_sheet.'
+              : 'execute_office_js: code executed successfully.'
           };
         } catch (err) {
           const msg = err && err.message ? err.message : String(err);

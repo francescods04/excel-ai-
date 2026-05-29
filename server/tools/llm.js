@@ -79,9 +79,44 @@ function extractJSON(text) {
   return text.slice(start).trim();
 }
 
+// Escape raw control chars (\n, \t, \r, \b, \f, \0..\x1F) that appear INSIDE JSON
+// string literals — common LLM emission bug that JSON.parse rejects with
+// "Bad control character in string literal". State machine tracks string scope so
+// structural newlines outside strings (which are valid JSON whitespace) are kept.
+function repairJsonControlChars(s) {
+  let out = '';
+  let inStr = false, escape = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (escape) { out += c; escape = false; continue; }
+      if (c === '\\') { out += c; escape = true; continue; }
+      if (c === '"') { out += c; inStr = false; continue; }
+      const code = c.charCodeAt(0);
+      if (code < 0x20) {
+        if (c === '\n') out += '\\n';
+        else if (c === '\r') out += '\\r';
+        else if (c === '\t') out += '\\t';
+        else if (c === '\b') out += '\\b';
+        else if (c === '\f') out += '\\f';
+        else out += '\\u' + code.toString(16).padStart(4, '0');
+        continue;
+      }
+      out += c;
+    } else {
+      if (c === '"') { out += c; inStr = true; continue; }
+      out += c;
+    }
+  }
+  return out;
+}
+
 function tryParseJSON(content) {
   try { return { ok: true, value: JSON.parse(content) }; } catch (_) {}
-  try { return { ok: true, value: JSON.parse(extractJSON(content)) }; } catch (e) { return { ok: false, error: e }; }
+  try { return { ok: true, value: JSON.parse(extractJSON(content)) }; } catch (_) {}
+  // Repair pass: escape bare control chars in string literals, then try again.
+  try { return { ok: true, value: JSON.parse(repairJsonControlChars(content)) }; } catch (_) {}
+  try { return { ok: true, value: JSON.parse(repairJsonControlChars(extractJSON(content))) }; } catch (e) { return { ok: false, error: e }; }
 }
 
 function safeTimeoutMs(value, fallback) {

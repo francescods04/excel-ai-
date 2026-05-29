@@ -666,6 +666,16 @@ function applyRangeFormat(range, fmt = {}, dims = null) {
 
 const ASSUMPTION_NOTES_SHEET = 'Assumption_Notes';
 
+// Module-level cache: some Excel WebView builds (Mac, web) throw "This operation is not
+// implemented" on workbook.comments.add. After the first such failure, skip the native
+// attempt entirely and go straight to the Assumption_Notes fallback — avoids the
+// per-note try/catch/sync round-trips that flood the log.
+let _nativeCommentsUnsupported = false;
+function looksLikeNotImplemented(err) {
+  const m = (err && err.message ? String(err.message) : '').toLowerCase();
+  return m.includes('not implemented') || m.includes('not supported');
+}
+
 // Pull notes out of mutation actions so they can be applied AFTER the value/formula
 // sync. A failing comment must never abort the data writes.
 function collectNotes(action, out) {
@@ -696,22 +706,39 @@ function collectNotes(action, out) {
 async function applyNotes(context, notes) {
   let applied = 0;
   const failed = [];
-  for (const n of notes) {
-    const address = n.sheet ? `${n.sheet}!${n.addr}` : n.addr;
-    try {
-      context.workbook.comments.add(address, String(n.text));
-      await context.sync();
-      applied++;
-    } catch (addErr) {
+
+  // If we've already learned native comments aren't supported here, skip the per-note
+  // try/catch/sync and send everything straight to the fallback sheet.
+  if (_nativeCommentsUnsupported) {
+    failed.push(...notes);
+  } else {
+    for (const n of notes) {
+      const address = n.sheet ? `${n.sheet}!${n.addr}` : n.addr;
       try {
-        // A comment likely already exists on this cell → update its content instead.
-        const existing = context.workbook.comments.getItemByCell(address);
-        existing.content = String(n.text);
+        context.workbook.comments.add(address, String(n.text));
         await context.sync();
         applied++;
-      } catch (updErr) {
-        failed.push(n);
-        addLog(`Nota non applicata su ${address}: ${updErr.message || addErr.message}`, 'warn');
+      } catch (addErr) {
+        if (looksLikeNotImplemented(addErr)) {
+          // Excel build doesn't support native comments at all — flip the cache and
+          // route this note + everything remaining in the batch to the fallback.
+          _nativeCommentsUnsupported = true;
+          addLog('Native Excel comments non supportati in questo workbook → uso solo il foglio Assumption_Notes per le note.', 'warn');
+          failed.push(n);
+          const idx = notes.indexOf(n);
+          for (let i = idx + 1; i < notes.length; i++) failed.push(notes[i]);
+          break;
+        }
+        try {
+          // A comment likely already exists on this cell → update its content instead.
+          const existing = context.workbook.comments.getItemByCell(address);
+          existing.content = String(n.text);
+          await context.sync();
+          applied++;
+        } catch (updErr) {
+          failed.push(n);
+          addLog(`Nota non applicata su ${address}: ${updErr.message || addErr.message}`, 'warn');
+        }
       }
     }
   }
