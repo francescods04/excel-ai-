@@ -16,6 +16,12 @@ FLASH="${FLASH_MODEL:-deepseek-v4-flash}"
 PRO="${PRO_MODEL:-deepseek-v4-pro}"
 export BENCH_JUDGE_MODEL="${BENCH_JUDGE_MODEL:-$PRO}"
 export BENCH_SCENARIOS="${BENCH_SCENARIOS:-all}"
+# Run scenarios concurrently within each config (DeepSeek concurrency limit:
+# flash 2500, pro 500 — plenty of room). Drops a 9-scenario config from ~30 min
+# sequential to ~5 min parallel. Per-scenario token attribution becomes the even
+# split of the config total; per-config sums in the report stay exact.
+export BENCH_PARALLEL="${BENCH_PARALLEL:-true}"
+export BENCH_CONCURRENCY="${BENCH_CONCURRENCY:-5}"
 
 run() { # label model thinking
   echo ""

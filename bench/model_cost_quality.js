@@ -244,10 +244,12 @@ function summarizeTurn(turn) {
   return { status: turn.status, error: turn.error || null, totalActions, loopIteration };
 }
 
-async function runScenario(scenarioKey) {
+async function runScenario(scenarioKey, opts = {}) {
   const scenario = SCENARIOS[scenarioKey];
   const startedAt = Date.now();
-  llm.resetUsageStats();
+  // In parallel mode the outer driver resets/reads usage once per config — skip here.
+  const trackUsage = opts.trackUsage !== false;
+  if (trackUsage) llm.resetUsageStats();
 
   const turn = turns.startTurn(scenario.objective, clone(scenario.context), null, { strategy: buildStrategy(scenarioKey) });
   const handled = new Set();
@@ -278,7 +280,9 @@ async function runScenario(scenarioKey) {
     await sleep(POLL_MS);
   }
 
-  const usage = llm.getUsageStats(); // agent token usage (judge runs AFTER this read)
+  // Agent token usage (judge runs AFTER this read so its tokens aren't counted).
+  // In parallel mode the outer driver gets one accumulator per config; here = null.
+  const usage = trackUsage ? llm.getUsageStats() : null;
   const totalMs = Date.now() - startedAt;
   const construction = buildConstructionSummary(finalTurn);
   const meta = summarizeTurn(finalTurn);
@@ -322,23 +326,67 @@ async function main() {
   const outFile = path.join(__dirname, `model-cost-quality-${safeLabel}-${ts}.jsonl`);
   const out = fs.createWriteStream(outFile, { flags: 'a' });
 
+  const PARALLEL = process.env.BENCH_PARALLEL === 'true';
+  const CONCURRENCY = Math.max(1, Number(process.env.BENCH_CONCURRENCY) || 5);
+
   console.log(`Model cost/quality bench`);
   console.log(`  config=${CONFIG_LABEL}  agentModel=${AGENT_MODEL}  thinking=${THINKING}  judge=${JUDGE_MODEL}`);
   console.log(`  scenarios=[${keys.join(', ')}]`);
+  console.log(`  mode=${PARALLEL ? `parallel x${CONCURRENCY}` : 'sequential'}`);
   console.log(`  output=${outFile}\n`);
 
   const results = [];
-  for (const key of keys) {
-    process.stdout.write(`  ${key.padEnd(26)} ... `);
-    try {
-      const r = await runScenario(key);
+
+  if (PARALLEL) {
+    // ONE accumulator for the whole config; per-scenario usage is the even split.
+    llm.resetUsageStats();
+    let cursor = 0;
+    async function worker(id) {
+      while (cursor < keys.length) {
+        const idx = cursor++;
+        const key = keys[idx];
+        process.stdout.write(`  [w${id} start] ${key}\n`);
+        try {
+          const r = await runScenario(key, { trackUsage: false });
+          results.push(r);
+          process.stdout.write(`  [w${id} done ] ${key.padEnd(26)}  ${r.status}  ${Math.round(r.totalMs / 1000)}s  iter=${r.iterations ?? '-'}  actions=${r.actions}  Q=${r.quality?.score ?? 'n/a'}\n`);
+        } catch (err) {
+          process.stdout.write(`  [w${id} ERR  ] ${key}: ${err.message}\n`);
+          results.push({ config: CONFIG_LABEL, scenario: key, status: 'error', error: err.message });
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, keys.length) }, (_, i) => worker(i + 1)));
+
+    // Spread the config-wide aggregate across the runs so per-config sums in the
+    // report stay correct (per-scenario attribution is approximate in parallel mode).
+    const total = llm.getUsageStats() || { calls: 0, promptTokens: 0, completionTokens: 0, cacheHitTokens: 0, cacheMissTokens: 0 };
+    const n = results.length || 1;
+    for (const r of results) {
+      if (r.status === 'error' && !r.scenario) continue;
+      r.usage = {
+        calls: Math.round(total.calls / n),
+        promptTokens: Math.round(total.promptTokens / n),
+        completionTokens: Math.round(total.completionTokens / n),
+        cacheHitTokens: Math.round(total.cacheHitTokens / n),
+        cacheMissTokens: Math.round(total.cacheMissTokens / n),
+        _note: 'evenly distributed across scenarios (BENCH_PARALLEL)'
+      };
       out.write(JSON.stringify(r) + '\n');
-      results.push(r);
-      const tok = r.usage ? r.usage.promptTokens + r.usage.completionTokens : 0;
-      console.log(`${r.status}  ${Math.round(r.totalMs / 1000)}s  iter=${r.iterations ?? '-'}  actions=${r.actions}  tok=${tok}  Q=${r.quality?.score ?? 'n/a'}`);
-    } catch (err) {
-      console.log(`ERROR ${err.message}`);
-      out.write(JSON.stringify({ config: CONFIG_LABEL, scenario: key, status: 'error', error: err.message }) + '\n');
+    }
+  } else {
+    for (const key of keys) {
+      process.stdout.write(`  ${key.padEnd(26)} ... `);
+      try {
+        const r = await runScenario(key);
+        out.write(JSON.stringify(r) + '\n');
+        results.push(r);
+        const tok = r.usage ? r.usage.promptTokens + r.usage.completionTokens : 0;
+        console.log(`${r.status}  ${Math.round(r.totalMs / 1000)}s  iter=${r.iterations ?? '-'}  actions=${r.actions}  tok=${tok}  Q=${r.quality?.score ?? 'n/a'}`);
+      } catch (err) {
+        console.log(`ERROR ${err.message}`);
+        out.write(JSON.stringify({ config: CONFIG_LABEL, scenario: key, status: 'error', error: err.message }) + '\n');
+      }
     }
   }
   out.end();
