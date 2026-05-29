@@ -171,6 +171,66 @@ function assertSerializable(state, label) {
     }
   }
 
+  /* 9) todo_write → continue, recorded as todo_write result + todoWrite event */
+  {
+    const state = initAgentRun('plan todos', CTX, { promptVariant: 'fast' });
+    let todoEvent = null;
+    const deps = scripted([{ thought: 'planning', tool: 'todo_write', params: { todos: [{ status: 'in_progress', content: 'build IS' }] } }]);
+    deps.onProgress = (t, d) => { if (t === 'todoWrite') todoEvent = d; };
+    const { state: s, control } = await runAgentStep(state, null, deps);
+    assert.strictEqual(control, 'continue', 'todo_write → continue');
+    assert.ok(todoEvent && Array.isArray(todoEvent.todos), 'todoWrite progress event emitted');
+    assert.strictEqual(s.results[s.results.length - 1].type, 'todo_write', 'todo_write result recorded');
+    console.log('OK todo_write → control=continue + todoWrite event');
+  }
+
+  /* 10) web_search over cap → continue without executing (no network).
+        Pre-seed the counter past the cap so the guard fires before dispatch. */
+  {
+    const state = initAgentRun('search web', CTX, { promptVariant: 'fast' });
+    state.webSearchCount = state.config.maxWebSearch; // next web_search exceeds
+    const deps = scripted([{ thought: 'searching', tool: 'web_search', params: { query: 'x' } }]);
+    const { state: s, control } = await runAgentStep(state, null, deps);
+    assert.strictEqual(control, 'continue', 'web cap → continue (not executed)');
+    const last = s.results[s.results.length - 1];
+    assert.strictEqual(last.type, 'error', 'cap recorded as error result');
+    assert.match(last.error, /Maximum web search/, 'cap message');
+    console.log('OK web_search over cap → control=continue (no network)');
+  }
+
+  /* 11) consecutive LLM errors → aborted after maxConsecutiveErrors */
+  {
+    const state = initAgentRun('flaky llm', CTX, { promptVariant: 'fast', maxConsecutiveErrors: 3 });
+    const deps = { callLLM: async () => { throw new Error('provider boom'); } };
+    let control;
+    for (let i = 0; i < 3; i++) {
+      ({ control } = await runAgentStep(state, null, deps));
+    }
+    assert.strictEqual(control, 'aborted', 'repeated identical errors → aborted');
+    assert.match(state.abortReason, /repeated_error/, 'abort reason flags repeated error');
+    console.log('OK consecutive LLM errors → control=aborted');
+  }
+
+  /* 12) set_cell_range allow_overwrite=false → preflight via client → conflict → continue */
+  {
+    const state = initAgentRun('safe write', CTX, { promptVariant: 'fast' });
+    const deps = scripted([{
+      thought: 'guarded write',
+      tool: 'set_cell_range',
+      params: { sheet: 'Sheet1', cells: { A1: 'new' }, allow_overwrite: false }
+    }]);
+    const first = await runAgentStep(state, null, deps);
+    assert.strictEqual(first.control, 'await_client', 'preflight needs a client read');
+    assert.strictEqual(first.payload.requests[0].toolName, 'workbook.readRange', 'preflight reads target range');
+
+    // Client reports the target already has data → conflict path.
+    const conflict = await runAgentStep(first.state, { results: [{ data: { values: [['existing']] } }] }, deps);
+    assert.strictEqual(conflict.control, 'continue', 'conflict → continue (no actions emitted)');
+    const last = conflict.state.results[conflict.state.results.length - 1];
+    assert.strictEqual(last.type, 'preflight_conflict', 'conflict recorded');
+    console.log('OK set_cell_range preflight conflict (via client) → continue');
+  }
+
   console.log('\nagent step tests completed.');
 })().catch(err => {
   console.error('FAIL:', err && err.stack ? err.stack : err);
