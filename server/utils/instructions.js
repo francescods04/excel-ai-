@@ -2,8 +2,12 @@ const fs = require('fs');
 const path = require('path');
 const logger = require('./logger');
 
-const INSTRUCTIONS_PATH = path.join(__dirname, '..', '..', 'docs', 'user-instructions.md');
-const BACKUP_PATH = path.join(__dirname, '..', '..', 'docs', 'user-instructions.md.bak');
+const INSTRUCTIONS_PATH = process.env.DATA_DIR
+  ? path.join(process.env.DATA_DIR, 'user-instructions.md')
+  : path.join(__dirname, '..', '..', 'docs', 'user-instructions.md');
+const BACKUP_PATH = process.env.DATA_DIR
+  ? path.join(process.env.DATA_DIR, 'user-instructions.md.bak')
+  : path.join(__dirname, '..', '..', 'docs', 'user-instructions.md.bak');
 
 function loadInstructions() {
   try {

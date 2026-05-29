@@ -4,7 +4,9 @@ const fs = require('fs');
 const path = require('path');
 const logger = require('../utils/logger');
 
-const MEMORY_DIR = path.join(__dirname, '..', 'memory');
+const MEMORY_DIR = process.env.DATA_DIR
+  ? path.join(process.env.DATA_DIR, 'memory')
+  : path.join(__dirname, '..', 'memory');
 const USER_ID = process.env.MEMORY_USER_ID || 'default';
 const MAX_MEMORY_TURNS = Number(process.env.MEMORY_MAX_TURNS) || 15;
 const COMPACT_THRESHOLD = Number(process.env.MEMORY_COMPACT_THRESHOLD) || 30;

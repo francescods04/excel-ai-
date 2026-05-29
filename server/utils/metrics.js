@@ -2,7 +2,9 @@ const fs = require('fs');
 const path = require('path');
 const logger = require('./logger');
 
-const METRICS_DIR = path.join(__dirname, '..', 'metrics');
+const METRICS_DIR = process.env.DATA_DIR
+  ? path.join(process.env.DATA_DIR, 'metrics')
+  : path.join(__dirname, '..', 'metrics');
 if (!fs.existsSync(METRICS_DIR)) {
   try { fs.mkdirSync(METRICS_DIR, { recursive: true }); } catch (_) {}
 }

@@ -2,7 +2,7 @@
 # Excel AI — macOS Installer (via curl)
 # bash <(curl -s https://francescodelsesto.com/install.sh)
 
-BASE_URL="${1:-https://francescodelsesto.com}"
+BASE_URL="${1:-https://excel-six-plum.vercel.app}"
 MANIFEST_DIR="$HOME/Library/Containers/com.microsoft.Excel/Data/Documents/wef"
 MANIFEST_FILE="$MANIFEST_DIR/manifest.xml"
 ADDIN_ID="1c7b92c5-2c4d-4b1e-9f3a-8e2d5f4c3a2b"
