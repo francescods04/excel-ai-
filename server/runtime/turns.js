@@ -179,6 +179,23 @@ function flushDiskWrite(turnId) {
   }
 }
 
+function turnUpsertRow(turn) {
+  return {
+    id: turn.id,
+    user_id: turn.userId || null,
+    status: turn.status,
+    input_message_length: turn.objective?.length || 0,
+    plan_json: turn.plan || null,
+    task_count: turn.plan?.tasks?.length || 0,
+    action_count: turn.actionCount || 0,
+    model: turn.llm?.modelOverride || process.env.OPENROUTER_MODEL || null,
+    created_at: turn.createdAt,
+    completed_at: (turn.status === 'completed' || turn.status === 'error') ? nowIso() : null,
+    total_latency_ms: turn.totalLatencyMs || null,
+    full_json: turn
+  };
+}
+
 function saveTurn(turn) {
   turn.updatedAt = nowIso();
   activeTurns.set(turn.id, turn);
@@ -188,20 +205,7 @@ function saveTurn(turn) {
   try {
     const { getSupabase } = require('../supabase/client');
     const supabase = getSupabase();
-    supabase.from('turns').upsert({
-      id: turn.id,
-      user_id: turn.userId || null,
-      status: turn.status,
-      input_message_length: turn.objective?.length || 0,
-      plan_json: turn.plan || null,
-      task_count: turn.plan?.tasks?.length || 0,
-      action_count: turn.actionCount || 0,
-      model: turn.llm?.modelOverride || process.env.OPENROUTER_MODEL || null,
-      created_at: turn.createdAt,
-      completed_at: (turn.status === 'completed' || turn.status === 'error') ? nowIso() : null,
-      total_latency_ms: turn.totalLatencyMs || null,
-      full_json: turn
-    }).then(({ error }) => {
+    supabase.from('turns').upsert(turnUpsertRow(turn)).then(({ error }) => {
       if (error) logger.warn(`[Turn] Supabase save error for ${turn.id}: ${error.message}`);
     });
   } catch (err) {
@@ -214,6 +218,26 @@ function saveTurn(turn) {
   } else {
     scheduleDiskWrite(turn.id);
   }
+  return turn;
+}
+
+// Durable save: AWAIT the Supabase upsert before returning. The stepwise engine
+// uses this so the committed state is fresh before the /step response — the next
+// step (which may land on a different serverless instance) then reads the latest
+// state instead of a stale one. Prevents cross-instance rewind / duplicate work.
+async function saveTurnDurable(turn) {
+  turn.updatedAt = nowIso();
+  activeTurns.set(turn.id, turn);
+  enforceActiveTurnsLimit();
+  try {
+    const { getSupabase } = require('../supabase/client');
+    const { error } = await getSupabase().from('turns').upsert(turnUpsertRow(turn));
+    if (error) logger.warn(`[Turn] Supabase durable save error for ${turn.id}: ${error.message}`);
+  } catch (err) {
+    logger.warn(`[Turn] Supabase durable save error for ${turn.id}: ${err.message}`);
+  }
+  if (turn.status === 'completed' || turn.status === 'error') flushDiskWrite(turn.id);
+  else scheduleDiskWrite(turn.id);
   return turn;
 }
 
@@ -2523,7 +2547,15 @@ function resolveStaleStep(turn, clientSeq) {
 }
 
 async function stepTurn(turnId, clientResult, clientSeq) {
-  const turn = _getTurnRef(turnId);
+  let turn = _getTurnRef(turnId);
+  // Multi-instance staleness guard: if the client has acknowledged a step beyond
+  // what this instance's in-memory copy knows, another serverless instance
+  // advanced the turn. Reload the committed state from Supabase so we don't
+  // rewind and re-run already-completed iterations.
+  if (turn && clientSeq != null && Number(clientSeq) > (turn.agentStepSeq || 0)) {
+    const fresh = await hydrateTurnFromSupabase(turnId);
+    if (fresh) turn = fresh;
+  }
   if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
   if (!turn.agentState) throw new Error(`Turn ${turnId} non è in modalità stepwise`);
 
@@ -2568,7 +2600,7 @@ async function stepTurn(turnId, clientResult, clientSeq) {
   turn.lastStepResult = result;
 
   if (control === 'done') {
-    finalizeStepwiseTurn(turnId, task, itemId, 'completed');
+    await finalizeStepwiseTurn(turnId, task, itemId, 'completed');
     return { control: 'done', payload: { summary: state.summary }, stepSeq: turn.agentStepSeq };
   }
   if (control === 'aborted') {
@@ -2578,11 +2610,13 @@ async function stepTurn(turnId, clientResult, clientSeq) {
     return { control: 'aborted', payload: { reason: state.abortReason }, stepSeq: turn.agentStepSeq };
   }
 
-  saveTurn(turn);
+  // Durable: commit before responding so the next step (possibly on another
+  // serverless instance) reads fresh state. See saveTurnDurable.
+  await saveTurnDurable(turn);
   return result;
 }
 
-function finalizeStepwiseTurn(turnId, task, itemId, kind) {
+async function finalizeStepwiseTurn(turnId, task, itemId, kind) {
   const turn = _getTurnRef(turnId);
   if (!turn) return;
   const state = turn.agentState || {};
@@ -2603,7 +2637,7 @@ function finalizeStepwiseTurn(turnId, task, itemId, kind) {
   emitAgentLoopTodos(turnId, 'verify');
   const completedTurn = setTurnStatus(turnId, 'completed');
   completedTurn.narration = { message: state.summary || 'Task completato dal loop AI.', suggestions: [] };
-  saveTurn(completedTurn);
+  await saveTurnDurable(completedTurn);
 
   track({
     eventType: 'turn.completed',
