@@ -692,6 +692,9 @@ function buildTurn(message, context, parentTurnId = null, options = {}) {
       plannerModelOverride: options.plannerModelOverride || null
     },
     speedMode: speedModeFlags,
+    executionEngineOverride: (options.executionEngineOverride === 'stepwise' || options.executionEngineOverride === 'legacy')
+      ? options.executionEngineOverride
+      : null,
     status: 'planning',
     error: null,
     plan: null,
@@ -2405,6 +2408,11 @@ function approveTurn(turnId) {
 }
 
 function resolveExecutionEngine(turn) {
+  // Explicit per-turn override (from the client) wins — used for A/B testing
+  // stepwise vs legacy in the same environment.
+  if (turn && (turn.executionEngineOverride === 'stepwise' || turn.executionEngineOverride === 'legacy')) {
+    return turn.executionEngineOverride;
+  }
   if (turn && (turn.executionEngine === 'stepwise' || turn.executionEngine === 'legacy')) {
     return turn.executionEngine;
   }

@@ -634,7 +634,14 @@ async function runTurnMode(text) {
     }
 
     const speedMode = getSelectedSpeedMode();
-    const startData = await startTurn(text, context, modelSelect.value, parentTurnId, speedMode);
+    // Optional per-turn engine override for A/B testing stepwise vs legacy.
+    // Set via console: localStorage.setItem('excelAi.execEngine','stepwise'|'legacy').
+    let execEngine = null;
+    try {
+      const v = window.localStorage && window.localStorage.getItem('excelAi.execEngine');
+      if (v === 'stepwise' || v === 'legacy') execEngine = v;
+    } catch (_) {}
+    const startData = await startTurn(text, context, modelSelect.value, parentTurnId, speedMode, execEngine);
     state.currentTurnId = startData.turnId;
     state.lastTurnId = startData.turnId;
     state.lastContextFingerprint = currentFingerprint;

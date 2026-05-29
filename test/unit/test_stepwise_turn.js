@@ -32,13 +32,19 @@ const turns = require('../../server/runtime/turns.js');
   clearEnv(); process.env.NODE_ENV = 'production';
   assert.strictEqual(turns.resolveExecutionEngine({}), 'stepwise', 'NODE_ENV=production → stepwise');
 
-  // per-turn override beats everything
+  // post-init marker on the turn is honored
   clearEnv(); process.env.VERCEL = '1';
-  assert.strictEqual(turns.resolveExecutionEngine({ executionEngine: 'legacy' }), 'legacy', 'per-turn override wins over prod default');
+  assert.strictEqual(turns.resolveExecutionEngine({ executionEngine: 'legacy' }), 'legacy', 'turn marker wins over prod default');
   clearEnv();
-  assert.strictEqual(turns.resolveExecutionEngine({ executionEngine: 'stepwise' }), 'stepwise', 'per-turn override wins over local default');
+  assert.strictEqual(turns.resolveExecutionEngine({ executionEngine: 'stepwise' }), 'stepwise', 'turn marker wins over local default');
 
-  console.log('OK resolveExecutionEngine matrix (env / prod / per-turn override)');
+  // explicit client override beats env and the post-init marker
+  clearEnv(); process.env.AGENT_EXEC_ENGINE = 'stepwise';
+  assert.strictEqual(turns.resolveExecutionEngine({ executionEngineOverride: 'legacy' }), 'legacy', 'client override beats env');
+  clearEnv();
+  assert.strictEqual(turns.resolveExecutionEngine({ executionEngineOverride: 'stepwise', executionEngine: 'legacy' }), 'stepwise', 'client override beats turn marker');
+
+  console.log('OK resolveExecutionEngine matrix (env / prod / marker / client override)');
 
   /* stepTurn guards */
   clearEnv();

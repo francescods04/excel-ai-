@@ -430,7 +430,7 @@ app.get('/admin', optionalAuth, (req, res) => {
 
 app.post('/api/turn/start', authenticate, quotaCheck, async (req, res) => {
   try {
-    const { message, context, parentTurnId, modelOverride, speedMode } = req.body;
+    const { message, context, parentTurnId, modelOverride, speedMode, executionEngine } = req.body;
     if (!message) return res.status(400).json({ error: 'Messaggio richiesto' });
 
     // Map user-facing speed mode to a concrete strategy preset.
@@ -453,7 +453,8 @@ app.post('/api/turn/start', authenticate, quotaCheck, async (req, res) => {
       userId: req.userId,
       speedMode: overlay.speedMode,
       thinkingDisabled: overlay.thinkingDisabled,
-      postWriteCritic: overlay.postWriteCritic
+      postWriteCritic: overlay.postWriteCritic,
+      executionEngineOverride: executionEngine
     });
     res.json({
       turnId: turn.id,
