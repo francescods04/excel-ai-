@@ -197,6 +197,35 @@ function shouldRetryWithFallback(error, fallbackModel) {
 
 /* ---------- DeepSeek API calls ---------- */
 
+/* ---------- Usage accumulator (opt-in, for benchmarks / cost measurement) ----------
+ * No-op in production until resetUsageStats() is called. Records token usage per
+ * model across the non-streaming provider calls (callDeepSeek / callOpenRouter).
+ * Streaming calls don't report usage, so the bench forces AGENT_USE_STREAMING=false. */
+let _usageStats = null;
+
+function resetUsageStats() {
+  _usageStats = { calls: 0, promptTokens: 0, completionTokens: 0, cacheHitTokens: 0, cacheMissTokens: 0, byModel: {} };
+}
+
+function recordUsage(model, usage) {
+  if (!_usageStats || !usage) return;
+  const pt = usage.prompt_tokens || 0;
+  const ct = usage.completion_tokens || 0;
+  const hit = usage.prompt_cache_hit_tokens || 0;
+  const miss = usage.prompt_cache_miss_tokens != null ? usage.prompt_cache_miss_tokens : Math.max(0, pt - hit);
+  _usageStats.calls += 1;
+  _usageStats.promptTokens += pt;
+  _usageStats.completionTokens += ct;
+  _usageStats.cacheHitTokens += hit;
+  _usageStats.cacheMissTokens += miss;
+  const m = _usageStats.byModel[model] || (_usageStats.byModel[model] = { calls: 0, promptTokens: 0, completionTokens: 0, cacheHitTokens: 0, cacheMissTokens: 0 });
+  m.calls += 1; m.promptTokens += pt; m.completionTokens += ct; m.cacheHitTokens += hit; m.cacheMissTokens += miss;
+}
+
+function getUsageStats() {
+  return _usageStats ? JSON.parse(JSON.stringify(_usageStats)) : null;
+}
+
 async function callDeepSeek(messages, options = {}) {
   const model = options.model || DEEPSEEK_MODEL;
   const requestTimeoutMs = safeTimeoutMs(options.requestTimeoutMs, 120000);
@@ -241,6 +270,7 @@ async function callDeepSeek(messages, options = {}) {
           prompt_cache_miss_tokens: response.data.usage.prompt_cache_miss_tokens,
         }
       : null;
+    recordUsage(model, usage);
 
     let cacheInfo = '';
     if (usage?.prompt_cache_hit_tokens != null) {
@@ -312,6 +342,7 @@ async function callOpenRouter(messages, options = {}) {
     const usage = response.data?.usage
       ? { prompt_tokens: response.data.usage.prompt_tokens, completion_tokens: response.data.usage.completion_tokens }
       : null;
+    recordUsage(model, usage);
 
     logger.info(`[LLM] OpenRouter ← ${model} in ${elapsed}ms`);
     const parsed = tryParseJSON(content);
@@ -828,6 +859,8 @@ module.exports = {
   callLLMStreaming,
   setLLMConfig,
   getLLMConfig,
+  resetUsageStats,
+  getUsageStats,
   _buildTraceContext: buildTraceContext,
   _resolveRoleConfig: resolveRoleConfig
 };
