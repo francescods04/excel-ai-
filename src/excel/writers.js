@@ -115,9 +115,55 @@ const MUTATION_TYPES = new Set([
   'setCellValue', 'runFormula', 'fillRange', 'writeRange', 'setCellRange',
   'setCellFormat', 'addConditionalFormat', 'setConditionalFormat'
 ]);
+const MAX_SNAPSHOT_TARGETS = 300;
+const MAX_SNAPSHOT_CELLS_PER_TARGET = 2000;
+const HEAVY_BATCH_ACTIONS = 12;
+const HEAVY_BATCH_SNAPSHOT_TARGETS = 80;
 
 function isMutationAction(action) {
   return action && MUTATION_TYPES.has(action.type);
+}
+
+function colToNumber(col) {
+  let n = 0;
+  for (const ch of String(col || '').toUpperCase()) {
+    const code = ch.charCodeAt(0);
+    if (code < 65 || code > 90) return null;
+    n = n * 26 + (code - 64);
+  }
+  return n || null;
+}
+
+function estimateTargetCells(target) {
+  const raw = String(target || '').replace(/\$/g, '');
+  const withoutSheet = raw.includes('!') ? raw.split('!').pop() : raw;
+  if (!withoutSheet) return 1;
+  if (/^[A-Z]+:[A-Z]+$/i.test(withoutSheet) || /^\d+:\d+$/.test(withoutSheet)) return Infinity;
+  const match = withoutSheet.match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/i);
+  if (!match) return 1;
+  const c1 = colToNumber(match[1]);
+  const r1 = Number(match[2]);
+  const c2 = match[3] ? colToNumber(match[3]) : c1;
+  const r2 = match[4] ? Number(match[4]) : r1;
+  if (!c1 || !c2 || !Number.isFinite(r1) || !Number.isFinite(r2)) return 1;
+  return (Math.abs(r2 - r1) + 1) * (Math.abs(c2 - c1) + 1);
+}
+
+function estimateActionCells(action) {
+  if (!action) return 1;
+  if (action.type === 'setCellRange' && action.cells) return Object.keys(action.cells).length;
+  const matrix = Array.isArray(action.formulas) ? action.formulas : action.values;
+  if (Array.isArray(matrix)) {
+    const rows = matrix.length;
+    const cols = Array.isArray(matrix[0]) ? matrix[0].length : 1;
+    return Math.max(1, rows * cols);
+  }
+  return estimateTargetCells(action.target);
+}
+
+function shouldSkipSnapshotTarget(action, target) {
+  const estimated = action?.type === 'setCellRange' ? 1 : estimateActionCells({ ...action, target });
+  return estimated > MAX_SNAPSHOT_CELLS_PER_TARGET;
 }
 
 function isRunJavaScriptEnabled() {
@@ -132,6 +178,7 @@ function isRunJavaScriptEnabled() {
 
 function extractSnapshotTargets(actions) {
   const targets = []; // { sheet, target, actionType }
+  let skipped = 0;
   for (const action of actions) {
     if (!isMutationAction(action)) continue;
     const parsedTarget = parseTargetReference(action.target);
@@ -148,14 +195,22 @@ function extractSnapshotTargets(actions) {
       continue;
     }
     if (action.type === 'setCellFormat' && action.options) {
+      if (shouldSkipSnapshotTarget(action, target)) {
+        skipped++;
+        continue;
+      }
       targets.push({ sheet, target, actionType: action.type, isFormat: true });
       continue;
     }
     if (target) {
+      if (shouldSkipSnapshotTarget(action, target)) {
+        skipped++;
+        continue;
+      }
       targets.push({ sheet, target, actionType: action.type });
     }
   }
-  return targets;
+  return { targets, skipped };
 }
 
 async function captureSnapshot(context, targets) {
@@ -180,7 +235,7 @@ async function captureSnapshot(context, targets) {
     for (const t of sheetTargets) {
       const range = worksheet.getRange(t.target);
       if (t.isFormat) {
-        range.load('values,formulas,format/fill/color,format/font/color,format/font/bold,numberFormat');
+        range.load('format/fill/color,format/font/color,format/font/bold,numberFormat');
       } else {
         range.load('values,formulas');
       }
@@ -192,8 +247,8 @@ async function captureSnapshot(context, targets) {
       snapshot.entries.push({
         sheet: sheetName === '__default__' ? null : sheetName,
         target: r.target,
-        previousValues: r.range.values,
-        previousFormulas: r.range.formulas,
+        previousValues: r.isFormat ? null : r.range.values,
+        previousFormulas: r.isFormat ? null : r.range.formulas,
         previousFormat: r.isFormat ? {
           fillColor: r.range.format.fill.color,
           fontColor: r.range.format.font.color,
@@ -221,10 +276,10 @@ export async function undoLastSnapshot() {
         : context.workbook.worksheets.getActiveWorksheet();
       const range = worksheet.getRange(entry.target);
 
-      // Restore formulas if they existed, otherwise values
-      if (entry.previousFormulas && entry.previousFormulas.some(row => row.some(f => f && f.startsWith('=')))) {
+      // Restore formulas/values when the snapshot captured cell contents.
+      if (Array.isArray(entry.previousFormulas) && entry.previousFormulas.some(row => row.some(f => f && f.startsWith('=')))) {
         range.formulas = entry.previousFormulas;
-      } else {
+      } else if (Array.isArray(entry.previousValues)) {
         range.values = entry.previousValues;
       }
 
@@ -299,10 +354,30 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
     }
 
     // 1. Capture pre-mutation snapshot for undo
-    const mutationTargets = extractSnapshotTargets(actions);
+    const snapshotPlan = extractSnapshotTargets(actions);
+    const mutationTargets = snapshotPlan.targets;
+    if (snapshotPlan.skipped > 0) {
+      addLog(`Snapshot undo parziale: ${snapshotPlan.skipped} target troppo grandi saltati per proteggere Excel.`, 'warn');
+    }
     let snapshot = null;
-    if (mutationTargets.length > 0) {
+    if (mutationTargets.length > MAX_SNAPSHOT_TARGETS) {
+      addLog(`Snapshot undo saltato: ${mutationTargets.length} target superano il limite sicuro (${MAX_SNAPSHOT_TARGETS}).`, 'warn');
+    } else if (mutationTargets.length > 0) {
       snapshot = await captureSnapshot(context, mutationTargets);
+    }
+
+    const mutationActionCount = actions.filter(isMutationAction).length;
+    if (mutationActionCount >= HEAVY_BATCH_ACTIONS || mutationTargets.length >= HEAVY_BATCH_SNAPSHOT_TARGETS) {
+      try {
+        if (context.application && typeof context.application.suspendApiCalculationUntilNextSync === 'function') {
+          context.application.suspendApiCalculationUntilNextSync();
+        }
+      } catch (_) {}
+      try {
+        if (context.application && typeof context.application.suspendScreenUpdatingUntilNextSync === 'function') {
+          context.application.suspendScreenUpdatingUntilNextSync();
+        }
+      } catch (_) {}
     }
 
     // 2. Apply all actions
@@ -625,7 +700,8 @@ async function execSetCellRange(context, sheetCache, defaultSheet, action) {
     destRange.copyFrom(firstCell, Excel.RangeCopyType.all);
   }
 
-  await context.sync();
+  // The outer executeActions() performs the batch sync. Syncing here for every
+  // setCellRange makes large AI-generated writes much more likely to freeze Excel.
 }
 
 async function execCreateChart(context, sheetCache, defaultSheet, action) {

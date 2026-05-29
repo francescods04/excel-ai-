@@ -2,6 +2,50 @@
 
 import { parseTargetReference } from './parseTarget.js';
 
+const DEFAULT_SELECTION_PREVIEW_ROWS = 40;
+const DEFAULT_SELECTION_PREVIEW_COLS = 16;
+const DEFAULT_RANGE_MAX_ROWS = 200;
+const DEFAULT_RANGE_MAX_COLS = 50;
+const DEFAULT_CSV_MAX_ROWS = 500;
+const DEFAULT_CSV_MAX_COLS = 80;
+const HARD_RANGE_MAX_ROWS = 1200;
+const HARD_RANGE_MAX_COLS = 160;
+const HARD_LARGE_RANGE_MAX_ROWS = 3000;
+const HARD_LARGE_RANGE_MAX_COLS = 240;
+
+function isLargeReadAllowed(options = {}) {
+  return options.allowLargeRead === true || options.allowLargeRead === 'true';
+}
+
+function positiveInt(value, fallback, hardMax) {
+  const n = Number(value);
+  const base = Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+  return Math.max(1, Math.min(base, hardMax));
+}
+
+function getReadCaps(options = {}, defaults = {}) {
+  const large = isLargeReadAllowed(options);
+  const hardRows = large ? HARD_LARGE_RANGE_MAX_ROWS : HARD_RANGE_MAX_ROWS;
+  const hardCols = large ? HARD_LARGE_RANGE_MAX_COLS : HARD_RANGE_MAX_COLS;
+  return {
+    maxRows: positiveInt(options.maxRows, defaults.maxRows, hardRows),
+    maxCols: positiveInt(options.maxCols, defaults.maxCols, hardCols)
+  };
+}
+
+function escapeCsvValue(val) {
+  if (val == null) return '';
+  const str = String(val);
+  if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+    return '"' + str.replace(/"/g, '""') + '"';
+  }
+  return str;
+}
+
+function matrixToCsv(values) {
+  return (values || []).map(row => row.map(escapeCsvValue).join(',')).join('\n');
+}
+
 async function worksheetExists(sheetName) {
   if (!sheetName) return false;
   return Excel.run(async (context) => {
@@ -18,6 +62,8 @@ async function readWorkbookSnapshot(params) {
   const maxCols = Number(options.maxCols) || 10;
   const includeFormulas = options.includeFormulas !== false;
   const includeNumberFormats = options.includeNumberFormats === true;
+  const selectionRows = positiveInt(options.selectionMaxRows, DEFAULT_SELECTION_PREVIEW_ROWS, HARD_RANGE_MAX_ROWS);
+  const selectionCols = positiveInt(options.selectionMaxCols, DEFAULT_SELECTION_PREVIEW_COLS, HARD_RANGE_MAX_COLS);
 
   return Excel.run(async (context) => {
     const worksheets = context.workbook.worksheets;
@@ -25,8 +71,16 @@ async function readWorkbookSnapshot(params) {
     const activeSheet = context.workbook.worksheets.getActiveWorksheet();
     activeSheet.load('name');
     const selectedRange = context.workbook.getSelectedRange();
-    selectedRange.load('address,values,formulas,rowCount,columnCount');
+    selectedRange.load('address,rowCount,columnCount,rowIndex,columnIndex');
     await context.sync();
+
+    const selectionPreviewRange = activeSheet.getRangeByIndexes(
+      selectedRange.rowIndex,
+      selectedRange.columnIndex,
+      Math.min(selectedRange.rowCount, selectionRows),
+      Math.min(selectedRange.columnCount, selectionCols)
+    );
+    selectionPreviewRange.load(includeFormulas ? 'values,formulas' : 'values');
 
     const sheetRefs = worksheets.items.map((sheet) => {
       const usedRange = sheet.getUsedRangeOrNullObject(true);
@@ -54,8 +108,10 @@ async function readWorkbookSnapshot(params) {
       activeSheet: activeSheet.name,
       workbookSheets: worksheets.items.map(ws => ws.name),
       selectedRange: selectedRange.address,
-      selectedValues: selectedRange.values,
-      selectedFormulas: selectedRange.formulas,
+      selectionSize: { rows: selectedRange.rowCount, columns: selectedRange.columnCount },
+      selectedValues: selectionPreviewRange.values,
+      selectedFormulas: includeFormulas ? selectionPreviewRange.formulas : [],
+      selectedRangeTruncated: selectedRange.rowCount > selectionRows || selectedRange.columnCount > selectionCols,
       sheets: sheetRefs.map(({ sheet, usedRange, previewRange }) => ({
         name: sheet.name,
         usedRange: usedRange.isNullObject ? null : usedRange.address,
@@ -120,6 +176,8 @@ async function readRangeSnapshot(params) {
   const options = params || {};
   const parsedTarget = parseTargetReference(options.target);
   const sheetName = options.sheet || options.sheetName || parsedTarget.sheetName;
+  const caps = getReadCaps(options, { maxRows: DEFAULT_RANGE_MAX_ROWS, maxCols: DEFAULT_RANGE_MAX_COLS });
+  const includeNumberFormats = options.includeNumberFormats !== false;
 
   return Excel.run(async (context) => {
     const worksheet = sheetName
@@ -135,18 +193,29 @@ async function readRangeSnapshot(params) {
     }
 
     const range = worksheet.getRange(target);
-    range.load('address,values,formulas,rowCount,columnCount,numberFormat');
+    range.load('address,rowCount,columnCount');
+    await context.sync();
+
+    const rowsToRead = Math.min(range.rowCount, caps.maxRows);
+    const colsToRead = Math.min(range.columnCount, caps.maxCols);
+    const limitedRange = range.getCell(0, 0).getResizedRange(rowsToRead - 1, colsToRead - 1);
+    const loadProps = ['address', 'values', 'formulas', 'rowCount', 'columnCount'];
+    if (includeNumberFormats) loadProps.push('numberFormat');
+    limitedRange.load(loadProps.join(','));
     await context.sync();
 
     return {
       sheet: worksheet.name,
       target: target,
-      address: range.address,
-      values: range.values,
-      formulas: range.formulas,
-      numberFormat: range.numberFormat,
-      rowCount: range.rowCount,
-      columnCount: range.columnCount
+      address: limitedRange.address,
+      values: limitedRange.values,
+      formulas: limitedRange.formulas,
+      numberFormat: includeNumberFormats ? limitedRange.numberFormat : [],
+      rowCount: rowsToRead,
+      columnCount: colsToRead,
+      totalRowCount: range.rowCount,
+      totalColumnCount: range.columnCount,
+      truncated: rowsToRead < range.rowCount || colsToRead < range.columnCount
     };
   });
 }
@@ -155,7 +224,7 @@ async function readRangeAsCsv(params) {
   const options = params || {};
   const parsedTarget = parseTargetReference(options.target);
   const sheetName = options.sheet || options.sheetName || parsedTarget.sheetName;
-  const maxRows = Number(options.maxRows) || 0; // 0 = no limit (read all rows in range)
+  const caps = getReadCaps(options, { maxRows: DEFAULT_CSV_MAX_ROWS, maxCols: DEFAULT_CSV_MAX_COLS });
 
   return Excel.run(async (context) => {
     const worksheet = sheetName
@@ -171,36 +240,26 @@ async function readRangeAsCsv(params) {
     }
 
     const range = worksheet.getRange(target);
-    range.load('values,rowCount,columnCount');
+    range.load('address,rowCount,columnCount');
     await context.sync();
 
-    const rowsToRead = maxRows > 0 ? Math.min(range.rowCount, maxRows) : range.rowCount;
-    let values = range.values;
-    if (rowsToRead < range.rowCount) {
-      const limitedRange = worksheet.getRange(target).getCell(0, 0).getResizedRange(rowsToRead - 1, range.columnCount - 1);
-      limitedRange.load('values');
-      await context.sync();
-      values = limitedRange.values;
-    }
+    const rowsToRead = Math.min(range.rowCount, caps.maxRows);
+    const colsToRead = Math.min(range.columnCount, caps.maxCols);
+    const limitedRange = range.getCell(0, 0).getResizedRange(rowsToRead - 1, colsToRead - 1);
+    limitedRange.load('values');
+    await context.sync();
 
-    const escapeCsv = (val) => {
-      if (val == null) return '';
-      const str = String(val);
-      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-        return '"' + str.replace(/"/g, '""') + '"';
-      }
-      return str;
-    };
-
-    const csv = values.map(row => row.map(escapeCsv).join(',')).join('\n');
+    const csv = matrixToCsv(limitedRange.values);
 
     return {
       sheet: worksheet.name,
       target: target,
       csv: csv,
       rowCount: rowsToRead,
-      columnCount: range.columnCount,
-      truncated: rowsToRead < range.rowCount
+      columnCount: colsToRead,
+      totalRowCount: range.rowCount,
+      totalColumnCount: range.columnCount,
+      truncated: rowsToRead < range.rowCount || colsToRead < range.columnCount
     };
   });
 }
@@ -248,7 +307,7 @@ async function readMultiRangeBatch(requests) {
     }
     await context.sync();
 
-    // Second pass: create all range proxies and load data
+    // Second pass: create all range proxies and load only metadata first.
     for (const req of requests) {
       const sheetName = req.sheet || req.sheetName || '__active__';
       const worksheet = sheetProxies.get(sheetName);
@@ -265,12 +324,9 @@ async function readMultiRangeBatch(requests) {
       let target;
       try {
         target = req.target || req.range;
+        if (!target) throw new Error('Range target is required for batched read');
         const range = worksheet.getRange(target);
-        if (isCsv) {
-          range.load('values,rowCount,columnCount');
-        } else {
-          range.load('address,values,formulas,rowCount,columnCount,numberFormat');
-        }
+        range.load('address,rowCount,columnCount');
         rangeProxies.push({
           requestId: req.id,
           worksheet,
@@ -278,7 +334,10 @@ async function readMultiRangeBatch(requests) {
           isCsv,
           sheetName: worksheet.name || sheetName,
           target,
-          maxRows: req.maxRows || (isCsv ? 0 : 100) // 0 = no limit
+          includeNumberFormats: req.includeNumberFormats !== false,
+          caps: getReadCaps(req, isCsv
+            ? { maxRows: DEFAULT_CSV_MAX_ROWS, maxCols: DEFAULT_CSV_MAX_COLS }
+            : { maxRows: DEFAULT_RANGE_MAX_ROWS, maxCols: DEFAULT_RANGE_MAX_COLS })
         });
       } catch (err) {
         rangeProxies.push({
@@ -290,8 +349,30 @@ async function readMultiRangeBatch(requests) {
     }
     await context.sync();
 
-    // Third pass: build results from loaded proxies
+    // Third pass: load only clipped ranges. This avoids pulling huge ranges into
+    // the Excel WebView before applying maxRows/maxCols.
+    const limitedProxies = [];
+    for (const proxy of rangeProxies) {
+      if (proxy.error || !proxy.range) continue;
+      const rowsToRead = Math.min(proxy.range.rowCount, proxy.caps.maxRows);
+      const colsToRead = Math.min(proxy.range.columnCount, proxy.caps.maxCols);
+      const limitedRange = proxy.range.getCell(0, 0).getResizedRange(rowsToRead - 1, colsToRead - 1);
+      if (proxy.isCsv) {
+        limitedRange.load('values');
+      } else {
+        const loadProps = ['address', 'values', 'formulas'];
+        if (proxy.includeNumberFormats) loadProps.push('numberFormat');
+        limitedRange.load(loadProps.join(','));
+      }
+      limitedProxies.push({ ...proxy, limitedRange, rowsToRead, colsToRead });
+    }
+    if (limitedProxies.length > 0) {
+      await context.sync();
+    }
+
+    // Fourth pass: build results from loaded clipped proxies
     const results = [];
+    const limitedById = new Map(limitedProxies.map(proxy => [proxy.requestId, proxy]));
     for (const proxy of rangeProxies) {
       if (proxy.error) {
         results.push({ requestId: proxy.requestId, error: proxy.error });
@@ -299,28 +380,14 @@ async function readMultiRangeBatch(requests) {
       }
       if (!proxy.range) continue;
 
-      const { range, isCsv, sheetName, target, maxRows } = proxy;
+      const loaded = limitedById.get(proxy.requestId);
+      if (!loaded) continue;
+      const { range, isCsv, sheetName, target, limitedRange, rowsToRead, colsToRead, includeNumberFormats } = loaded;
 
       if (isCsv) {
         const totalRows = range.rowCount;
-        const rowsToRead = maxRows > 0 ? Math.min(totalRows, maxRows) : totalRows;
-        let values = range.values;
-        if (rowsToRead < totalRows) {
-          const limitedRange = proxy.worksheet.getRange(target).getCell(0, 0).getResizedRange(rowsToRead - 1, range.columnCount - 1);
-          limitedRange.load('values');
-          await context.sync();
-          values = limitedRange.values;
-        }
-
-        const escapeCsv = (val) => {
-          if (val == null) return '';
-          const str = String(val);
-          if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-            return '"' + str.replace(/"/g, '""') + '"';
-          }
-          return str;
-        };
-        const csv = values.map(row => row.map(escapeCsv).join(',')).join('\n');
+        const totalCols = range.columnCount;
+        const csv = matrixToCsv(limitedRange.values);
         results.push({
           requestId: proxy.requestId,
           data: {
@@ -328,32 +395,27 @@ async function readMultiRangeBatch(requests) {
             target: target,
             csv: csv,
             rowCount: rowsToRead,
-            columnCount: range.columnCount,
-            truncated: rowsToRead < totalRows
+            columnCount: colsToRead,
+            totalRowCount: totalRows,
+            totalColumnCount: totalCols,
+            truncated: rowsToRead < totalRows || colsToRead < totalCols
           }
         });
       } else {
         // Snapshot format
-        const finalRows = maxRows > 0 ? Math.min(range.rowCount, maxRows) : range.rowCount;
-        let values = range.values;
-        let formulas = range.formulas;
-        if (finalRows < range.rowCount) {
-          const limitedRange = proxy.worksheet.getRange(target).getCell(0, 0).getResizedRange(finalRows - 1, range.columnCount - 1);
-          limitedRange.load('values,formulas');
-          await context.sync();
-          values = limitedRange.values;
-          formulas = limitedRange.formulas;
-        }
         results.push({
           requestId: proxy.requestId,
           data: {
             sheet: sheetName,
-            target: range.address,
-            values: values,
-            formulas: formulas,
-            numberFormat: range.numberFormat,
-            rowCount: finalRows,
-            columnCount: range.columnCount
+            target: limitedRange.address,
+            values: limitedRange.values,
+            formulas: limitedRange.formulas,
+            numberFormat: includeNumberFormats ? limitedRange.numberFormat : [],
+            rowCount: rowsToRead,
+            columnCount: colsToRead,
+            totalRowCount: range.rowCount,
+            totalColumnCount: range.columnCount,
+            truncated: rowsToRead < range.rowCount || colsToRead < range.columnCount
           }
         });
       }

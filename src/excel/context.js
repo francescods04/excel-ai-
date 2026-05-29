@@ -1,13 +1,15 @@
 'use strict';
 
-// Per-sheet preview limits (kept small to avoid prompt bloat with many sheets)
-const ACTIVE_PREVIEW_ROWS = 200;
-const ACTIVE_PREVIEW_COLS = 40;
-const OTHER_PREVIEW_ROWS = 30;
-const OTHER_PREVIEW_COLS = 20;
-const MAX_OTHER_SHEETS = 12;
-const SELECTION_PREVIEW_ROWS = 100;
-const SELECTION_PREVIEW_COLS = 30;
+// Keep the automatic startup context intentionally small. Deep reads should be
+// explicit client-tool requests, not part of every prompt bootstrap.
+const ACTIVE_PREVIEW_ROWS = 80;
+const ACTIVE_PREVIEW_COLS = 24;
+const OTHER_PREVIEW_ROWS = 12;
+const OTHER_PREVIEW_COLS = 8;
+const MAX_OTHER_SHEETS = 8;
+const SELECTION_PREVIEW_ROWS = 40;
+const SELECTION_PREVIEW_COLS = 16;
+const MAX_FORMULA_PREVIEW_CELLS = 800;
 
 async function getExcelContext() {
   try {
@@ -21,10 +23,13 @@ async function getExcelContext() {
       await context.sync();
 
       // Snapshot of every worksheet's used range
+      let otherPreviewCount = 0;
       const sheetEntries = worksheets.items.map((ws) => {
         const usedRange = ws.getUsedRangeOrNullObject(true);
         usedRange.load('address,rowCount,columnCount,rowIndex,columnIndex');
-        return { ws, usedRange, isActive: ws.name === activeSheet.name, previewRange: null, formulasRange: null };
+        const isActive = ws.name === activeSheet.name;
+        const includePreview = isActive || otherPreviewCount++ < MAX_OTHER_SHEETS;
+        return { ws, usedRange, isActive, includePreview, previewRange: null, formulasRange: null, loadedFormulas: false };
       });
 
       // Selection preview (clipped on active sheet)
@@ -34,13 +39,18 @@ async function getExcelContext() {
         Math.min(selectedRange.rowCount, SELECTION_PREVIEW_ROWS),
         Math.min(selectedRange.columnCount, SELECTION_PREVIEW_COLS)
       );
-      selectionPreviewRange.load('values,formulas');
+      const selectionPreviewCells =
+        Math.min(selectedRange.rowCount, SELECTION_PREVIEW_ROWS) *
+        Math.min(selectedRange.columnCount, SELECTION_PREVIEW_COLS);
+      const loadSelectionFormulas = selectionPreviewCells <= MAX_FORMULA_PREVIEW_CELLS;
+      selectionPreviewRange.load(loadSelectionFormulas ? 'values,formulas' : 'values');
 
       await context.sync();
 
       // Build preview ranges for each sheet (active gets larger window + formulas)
       for (const entry of sheetEntries) {
         if (entry.usedRange.isNullObject) continue;
+        if (!entry.includePreview) continue;
         const maxR = entry.isActive ? ACTIVE_PREVIEW_ROWS : OTHER_PREVIEW_ROWS;
         const maxC = entry.isActive ? ACTIVE_PREVIEW_COLS : OTHER_PREVIEW_COLS;
         const r = Math.min(entry.usedRange.rowCount, maxR);
@@ -51,8 +61,10 @@ async function getExcelContext() {
           r,
           c
         );
-        if (entry.isActive) {
+        const previewCells = r * c;
+        if (entry.isActive && previewCells <= MAX_FORMULA_PREVIEW_CELLS) {
           entry.previewRange.load('values,formulas');
+          entry.loadedFormulas = true;
         } else {
           entry.previewRange.load('values');
         }
@@ -66,7 +78,7 @@ async function getExcelContext() {
         selectedRange: selectedRange.address,
         selectionSize: { rows: selectedRange.rowCount, columns: selectedRange.columnCount },
         selectedValues: selectionPreviewRange.values,
-        selectedFormulas: selectionPreviewRange.formulas,
+        selectedFormulas: loadSelectionFormulas ? selectionPreviewRange.formulas : [],
         selectedRangeTruncated:
           selectedRange.rowCount > SELECTION_PREVIEW_ROWS ||
           selectedRange.columnCount > SELECTION_PREVIEW_COLS,
@@ -104,7 +116,7 @@ async function getExcelContext() {
           }
         }
         const previewVals = entry.previewRange ? entry.previewRange.values : [];
-        const previewForm = entry.isActive && entry.previewRange ? entry.previewRange.formulas : [];
+        const previewForm = entry.loadedFormulas && entry.previewRange ? entry.previewRange.formulas : [];
         const truncated =
           entry.usedRange.rowCount > (entry.isActive ? ACTIVE_PREVIEW_ROWS : OTHER_PREVIEW_ROWS) ||
           entry.usedRange.columnCount > (entry.isActive ? ACTIVE_PREVIEW_COLS : OTHER_PREVIEW_COLS);

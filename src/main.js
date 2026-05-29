@@ -695,11 +695,62 @@ async function waitForPendingExcelActions(reason = 'lettura workbook') {
 // work — the fix for the serverless 300s / reconnect stalls.
 const stepLoopStarted = new Set();
 
+function clientReadKey(req, index) {
+  return req.id || `__idx_${index}`;
+}
+
+async function runBatchedRangeReads(entries) {
+  if (!entries || entries.length === 0) return new Map();
+  const batchInputs = entries.map(({ req, index }) => {
+    const p = req.params || {};
+    return {
+      id: clientReadKey(req, index),
+      sheet: p.sheet || p.sheetName,
+      sheetName: p.sheetName || p.sheet,
+      target: p.target || p.range,
+      range: p.range || p.target,
+      format: p.format,
+      maxRows: p.maxRows,
+      maxCols: p.maxCols,
+      includeNumberFormats: p.includeNumberFormats,
+      allowLargeRead: p.allowLargeRead
+    };
+  });
+  try {
+    const batchResults = await readMultiRangeBatch(batchInputs);
+    const out = new Map();
+    for (const result of batchResults) {
+      out.set(result.requestId, result.error ? { error: result.error } : { data: result.data });
+    }
+    return out;
+  } catch (err) {
+    addLog(`Batch readRange non riuscito, fallback a letture singole: ${err.message}`, 'warn');
+    return new Map();
+  }
+}
+
 async function runStepClientReads(requests) {
   await waitForPendingExcelActions('step reads');
   const results = [];
-  for (const req of (requests || [])) {
+  const allRequests = requests || [];
+  const rangeEntries = allRequests
+    .map((req, index) => ({ req, index }))
+    .filter(({ req }) => {
+      const p = req.params || {};
+      return req.toolName === 'workbook.readRange' && (p.target || p.range);
+    });
+  const batchedRangeResults = rangeEntries.length > 1
+    ? await runBatchedRangeReads(rangeEntries)
+    : new Map();
+
+  for (let index = 0; index < allRequests.length; index++) {
+    const req = allRequests[index];
     try {
+      const batched = batchedRangeResults.get(clientReadKey(req, index));
+      if (batched) {
+        results.push(batched);
+        continue;
+      }
       let data;
       switch (req.toolName) {
         case 'workbook.readWorkbook': data = await readWorkbookSnapshot(req.params || {}); break;
@@ -1204,10 +1255,26 @@ async function handleClientToolBatch(requests) {
 
   try {
     await waitForPendingExcelActions('batch clientTool');
-    // NOTE: each reader already wraps itself in Excel.run(); do NOT nest here
     const outputs = [];
-    for (const request of requests) {
+    const rangeEntries = requests
+      .map((req, index) => ({ req, index }))
+      .filter(({ req }) => {
+        const p = req.params || {};
+        return req.toolName === 'workbook.readRange' && (p.target || p.range);
+      });
+    const batchedRangeResults = rangeEntries.length > 1
+      ? await runBatchedRangeReads(rangeEntries)
+      : new Map();
+
+    for (let index = 0; index < requests.length; index++) {
+      const request = requests[index];
       try {
+        const batched = batchedRangeResults.get(clientReadKey(request, index));
+        if (batched) {
+          outputs.push({ requestId: request.id, response: batched });
+          addLog(`[${request.taskId || 'runtime'}] ${request.toolName} completato (batch unico)`);
+          continue;
+        }
         let data;
         switch (request.toolName) {
           case 'workbook.readWorkbook':
