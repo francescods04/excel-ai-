@@ -482,6 +482,19 @@ app.post('/api/turn/approve', authenticate, async (req, res) => {
   }
 });
 
+app.post('/api/turn/step', authenticate, async (req, res) => {
+  try {
+    const { turnId, clientResult, stepSeq } = req.body || {};
+    if (!turnId) return res.status(400).json({ error: 'turnId richiesto' });
+    await turns.getTurnRefAsync(turnId);
+    const result = await turns.stepTurn(turnId, clientResult, stepSeq);
+    res.json(result);
+  } catch (error) {
+    logger.error('Errore turn/step:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/turn/steer', authenticate, async (req, res) => {
   try {
     const { turnId, text } = req.body;
@@ -1070,6 +1083,13 @@ app.post('/api/agent/respond', async (req, res) => {
       resumeResults: prev.results,
       resumeIteration: prev.iteration,
       resumeCodeLog: prev.codeLog,
+      resumeConsecutiveErrors: prev.consecutiveErrors,
+      resumeLastErrorMessage: prev.lastErrorMessage,
+      resumeWebSearchCount: prev.webSearchCount,
+      resumeParseFailureStreak: prev.parseFailureStreak,
+      resumeForceThinkingNext: prev.forceThinkingNext,
+      resumeLoadedSkillNames: prev.loadedSkillNames,
+      resumeRecentToolTrail: prev.recentToolTrail,
       onEvent: (eventType, data) => {
         streaming.sendEvent(newAgentId, eventType, data);
       },

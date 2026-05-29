@@ -3,7 +3,7 @@ const path = require('path');
 
 const logger = require('../utils/logger');
 const planner = require('../agents/planner');
-const { runAgentLoop } = require('../agents/agentLoop');
+const { runAgentLoop, initAgentRun, runAgentStep } = require('../agents/agentLoop');
 const streaming = require('../agents/streaming');
 const conversationMemory = require('./conversationMemory');
 const { executeTool, registry } = require('../tools/registry');
@@ -2380,6 +2380,19 @@ function approveTurn(turnId) {
   const runningTurn = setTurnStatus(turnId, 'running');
   appendLog(turnId, 'Avvio esecuzione del piano approvato.');
   emitExecutionTodos(turnId, 'queued');
+
+  // Stepwise engine (serverless-friendly): for the agent_loop strategy, do NOT
+  // fire a long-running background executeTurn (it dies when the serverless
+  // function freezes after this response). Instead initialize the serializable
+  // agent state on the turn and let the client drive iterations via
+  // POST /api/turn/step. See agentLoop.runAgentStep.
+  const strategy = turn.strategy || chooseTurnStrategy(turn.objective, turn.context, turn.parentTurnId);
+  if (strategy.mode === 'agent_loop' && resolveExecutionEngine(turn) === 'stepwise') {
+    appendLog(turnId, 'Motore stepwise attivo: esecuzione guidata dal client.', 'info');
+    initStepwiseAgentLoop(turnId, strategy);
+    return runningTurn;
+  }
+
   void runWithExecutionContext({
     turnId: turn.id,
     userId: turn.userId || null,
@@ -2389,6 +2402,214 @@ function approveTurn(turnId) {
     source: 'turn.approve',
   }, () => executeTurn(turnId));
   return runningTurn;
+}
+
+function resolveExecutionEngine(turn) {
+  if (turn && (turn.executionEngine === 'stepwise' || turn.executionEngine === 'legacy')) {
+    return turn.executionEngine;
+  }
+  const env = process.env.AGENT_EXEC_ENGINE;
+  if (env === 'stepwise' || env === 'legacy') return env;
+  // Default: stepwise on serverless/production (background work dies there),
+  // legacy on local dev where a persistent process keeps the loop alive.
+  if (process.env.VERCEL || process.env.NODE_ENV === 'production') return 'stepwise';
+  return 'legacy';
+}
+
+// Per-step progress → turn SSE events. Mirrors the onEvent mapping in the
+// legacy executeAgentLoopTurn so the UI behaves identically under stepwise.
+function makeStepProgress(turnId, task, itemId) {
+  return (eventType, data = {}) => {
+    if (eventType === 'thought') {
+      const toolName = data.tool || 'step';
+      if (toolName === 'todo_write' || toolName === 'done') return;
+      if (['read_workbook', 'read_sheet', 'get_cell_ranges', 'get_range_as_csv', 'build_workbook_graph'].includes(toolName)) {
+        emitAgentLoopTodos(turnId, 'inspect');
+      } else if (['set_cell_range', 'set_format', 'execute_excel_formula', 'create_sheet', 'rename_sheet', 'copy_range', 'bulk_set_cell_ranges'].includes(toolName)) {
+        emitAgentLoopTodos(turnId, 'apply');
+      }
+      emitEphemeralLog(turnId, `[loop ${data.iteration || '?'}] ${toolName}: ${(data.thought || '').slice(0, 180)}`, 'info', { taskId: task.id, itemId });
+      return;
+    }
+    if (eventType === 'todoWrite') {
+      if (Array.isArray(data.todos)) emitTodoWrite(turnId, data.todos);
+      return;
+    }
+    if (eventType === 'iterationError') {
+      appendLog(turnId, `[loop ${data.iteration || '?'}] ${data.error || 'errore sconosciuto'}`, data.fatal ? 'error' : 'warn', { taskId: task.id, itemId });
+      return;
+    }
+    if (eventType === 'agentAutoAnswer') {
+      emitEphemeralLog(turnId, `[loop ${data.iteration || '?'}] Risposta automatica usata: ${data.answer}`, 'info', { taskId: task.id, itemId });
+      return;
+    }
+    if (eventType === 'agentPaused') {
+      emitAgentLoopTodos(turnId, 'awaiting_input');
+      appendLog(turnId, `[loop ${data.iteration || '?'}] Serve una scelta utente per continuare.`, 'info', { taskId: task.id, itemId });
+    }
+  };
+}
+
+function initStepwiseAgentLoop(turnId, strategy) {
+  const turn = _getTurnRef(turnId);
+  if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
+
+  const task = { id: AGENT_LOOP_TASK_ID, agent: 'ai', tool: 'agent.loop', description: strategy.label };
+  const itemId = taskItemId(task.id);
+  const runningItem = upsertItem(turnId, {
+    id: itemId,
+    type: 'taskExecution',
+    taskId: task.id,
+    agent: task.agent,
+    tool: task.tool,
+    description: task.description,
+    deps: [],
+    status: 'inProgress'
+  });
+  emitItemStarted(turnId, runningItem);
+  appendLog(turnId, `Avvio ${strategy.label} (stepwise) — ${strategy.reason}.`, 'info', { taskId: task.id, itemId });
+  emitAgentLoopTodos(turnId, 'inspect');
+
+  const context = buildTurnExecutionContext(turn);
+  const speedModeFlags = turn.speedMode || {};
+  turn.agentState = initAgentRun(turn.objective, context, {
+    promptVariant: strategy.promptVariant || 'fast',
+    modelOverride: turn.llm?.modelOverride || undefined,
+    maxIterations: strategy.maxIterations || undefined,
+    forceThinkingDisabled: speedModeFlags.thinkingDisabled === true ? true : undefined,
+    postWriteCriticEnabled: speedModeFlags.postWriteCritic !== false
+  });
+  turn.agentStepSeq = 0;
+  turn.agentCollectedActions = [];
+  turn.executionEngine = 'stepwise';
+  saveTurn(turn);
+  // Emit AFTER agentState is set + persisted so the first client /step finds it.
+  // Replayable, so a late/reconnected SSE client still picks it up.
+  streaming.sendEvent(turnId, 'stepwiseReady', { turnId, engine: 'stepwise' });
+  return turn;
+}
+
+async function stepTurn(turnId, clientResult, clientSeq) {
+  const turn = _getTurnRef(turnId);
+  if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
+  if (!turn.agentState) throw new Error(`Turn ${turnId} non è in modalità stepwise`);
+
+  if (turn.status === 'completed') {
+    return { control: 'done', payload: { summary: turn.narration?.message }, stepSeq: turn.agentStepSeq || 0 };
+  }
+  if (turn.status === 'error') {
+    return { control: 'aborted', payload: { reason: turn.error }, stepSeq: turn.agentStepSeq || 0 };
+  }
+
+  // Concurrency guard: the client drives sequentially, so a step whose seq does
+  // not match the server's current seq is a stale retry. Re-emit current state
+  // instead of advancing (avoids double iterations).
+  if (clientSeq != null && Number(clientSeq) !== (turn.agentStepSeq || 0)) {
+    const pending = turn.agentState.pending;
+    const control = turn.agentState.status === 'paused'
+      ? 'paused'
+      : (turn.agentState.status === 'awaiting_client' ? 'await_client' : 'continue');
+    const payload = control === 'paused'
+      ? { question: pending && pending.question }
+      : (control === 'await_client' ? { requests: (pending && pending.requests) || [] } : {});
+    return { control, payload, stepSeq: turn.agentStepSeq || 0, stale: true };
+  }
+
+  const task = { id: AGENT_LOOP_TASK_ID, agent: 'ai', tool: 'agent.loop', description: turn.strategy?.label || 'Agent loop' };
+  const itemId = taskItemId(task.id);
+  const steer = drainSteerQueue(turnId);
+
+  const { state, control, payload } = await runAgentStep(turn.agentState, clientResult, {
+    steerMessages: steer,
+    onProgress: makeStepProgress(turnId, task, itemId)
+  });
+
+  turn.agentState = state;
+  turn.agentStepSeq = (turn.agentStepSeq || 0) + 1;
+
+  if (control === 'emit_actions') {
+    const actions = Array.isArray(payload.actions) ? payload.actions : [];
+    if (!Array.isArray(turn.agentCollectedActions)) turn.agentCollectedActions = [];
+    turn.agentCollectedActions.push(...actions);
+    turn.actionCount = (turn.actionCount || 0) + actions.length;
+    // NOTE: do NOT emit actions over SSE here. In stepwise the client applies
+    // actions from the /step response payload; pushing them on SSE too would
+    // double-apply. Only the informational log line goes to the stream.
+    emitEphemeralLog(turnId, `[loop ${state.iteration}] Invio ${actions.length} azioni Excel`, 'info', { taskId: task.id, itemId });
+  }
+
+  if (control === 'done') {
+    finalizeStepwiseTurn(turnId, task, itemId, 'completed');
+    return { control: 'done', payload: { summary: state.summary }, stepSeq: turn.agentStepSeq };
+  }
+  if (control === 'aborted') {
+    await failTurn(turnId, `Errore esecuzione loop AI: ${state.abortReason || 'aborted'}`, {
+      id: itemId, type: 'taskExecution', taskId: task.id, agent: task.agent, tool: task.tool, description: task.description
+    });
+    return { control: 'aborted', payload: { reason: state.abortReason }, stepSeq: turn.agentStepSeq };
+  }
+
+  saveTurn(turn);
+  return { control, payload, stepSeq: turn.agentStepSeq };
+}
+
+function finalizeStepwiseTurn(turnId, task, itemId, kind) {
+  const turn = _getTurnRef(turnId);
+  if (!turn) return;
+  const state = turn.agentState || {};
+  const collectedActions = Array.isArray(turn.agentCollectedActions) ? turn.agentCollectedActions : [];
+
+  storeTaskResult(turnId, task.id, {
+    data: {
+      builder: 'agent-loop',
+      strategy: turn.strategy?.reason,
+      promptVariant: turn.strategy?.promptVariant,
+      status: state.status,
+      summary: state.summary,
+      iteration: state.iteration
+    },
+    actions: collectedActions
+  });
+
+  emitAgentLoopTodos(turnId, 'verify');
+  const completedTurn = setTurnStatus(turnId, 'completed');
+  completedTurn.narration = { message: state.summary || 'Task completato dal loop AI.', suggestions: [] };
+  saveTurn(completedTurn);
+
+  track({
+    eventType: 'turn.completed',
+    userId: completedTurn.userId || null,
+    properties: { actionCount: collectedActions.length || 0 },
+    success: 1,
+  });
+
+  const completedItem = upsertItem(turnId, {
+    id: itemId,
+    type: 'taskExecution',
+    taskId: task.id,
+    agent: task.agent,
+    tool: task.tool,
+    description: task.description,
+    deps: [],
+    status: 'completed',
+    result: { status: state.status, summary: state.summary, iteration: state.iteration },
+    actionCount: collectedActions.length
+  });
+  emitItemCompleted(turnId, completedItem);
+
+  appendLog(turnId, state.summary || 'Turn completato con il loop AI.', 'info');
+  emitAgentLoopTodos(turnId, 'done');
+  emitTurnCompleted(completedTurn);
+
+  const memorySummary = extractTurnMemorySummary(completedTurn);
+  conversationMemory.addTurnMemory({
+    turnId,
+    objective: completedTurn.objective,
+    planSummary: `Loop AI (stepwise) completato in ${state.iteration || 0} iterazioni`,
+    sheetsCreated: memorySummary.sheetsCreated,
+    modelType: memorySummary.modelType,
+    keyCells: memorySummary.keyCells
+  });
 }
 
 function respondToTurnRequest(turnId, requestId, response) {
@@ -2496,6 +2717,8 @@ function drainSteerQueue(turnId) {
 module.exports = {
   startTurn,
   approveTurn,
+  stepTurn,
+  resolveExecutionEngine,
   loadTurn,
   buildExecutionMemory,
   chooseTurnStrategy,
