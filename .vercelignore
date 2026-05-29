@@ -1,0 +1,36 @@
+# Exclude things Vercel doesn't need to upload.
+# The build only serves src/**, api/**, assets/**, public/** + traced server/** files.
+
+# Don't upload local node_modules — Vercel reinstalls from package.json (production-only,
+# skips devDeps like @remotion/@rspack). The local copy is 495MB and was pushing the
+# serverless function bundle over Vercel's 250MB unzipped limit.
+node_modules
+
+# Local-only / dev tooling
+.venv-openbb
+.ruff_cache
+har_extract
+videos
+public/videos
+dist
+test
+*.log
+.DS_Store
+opencode-serve.log
+server-restart.log
+server.log
+openbb-api.log
+server-openrouter.log
+
+# Bench: scripts ARE useful (small .js), but run artifacts are huge and
+# actively being written during a sweep — including them creates a tarball
+# read/write race that silently breaks deploys. Keep .js, exclude outputs.
+bench/sweep.log
+bench/archive
+bench/*.jsonl
+
+# Internal docs / planning markdown (server reads only the prompts under docs/)
+PIANO_ERRORI.md
+PIANO_MASTER.md
+PIANO_PARALLELIZZAZIONE.md
+PIANO_PRODOTTO.md

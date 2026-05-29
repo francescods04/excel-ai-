@@ -14,6 +14,7 @@
     "bench:cost": "node bench/model_cost_quality.js",
     "bench:cost:sweep": "bash bench/sweep_models.sh",
     "bench:cost:report": "node bench/model_cost_quality_report.js",
+    "bench:cost:progress": "node bench/progress.js",
     "render-videos": "npx remotion render videos/src/index.ts LogoAnimation public/videos/logo-anim.mp4 --scale=1 && npx remotion render videos/src/index.ts HeroBackground public/videos/hero-bg.mp4 --scale=1 && npx remotion render videos/src/index.ts TerminalDemo public/videos/terminal-demo.mp4 --scale=1 && npx remotion render videos/src/index.ts UseCaseSlides public/videos/use-case-slides.mp4 --scale=1",
     "manifest:prod": "node scripts/build-production-manifest.js",
     "test": "node test/unit/test_preflight.js && node test/unit/test_schema_drift.js && node test/unit/test_action_preview.js && node test/unit/test_workbook_graph.js && node test/unit/test_runtime_safety.js && node test/unit/test_dcf_backend.js && node test/unit/test_llm_trace.js && node test/unit/test_runtime_outcomes.js && node test/unit/test_production_manifest.js && node test/unit/test_execute_office_js_rpc.js && node test/unit/test_finance_bundle.js && node test/unit/test_tool_result_size_cap.js && node test/unit/test_parallel_calls.js && node test/unit/test_client_read_cache.js && node test/unit/test_bulk_setup.js && node test/unit/test_bulk_write_format.js && node test/unit/test_agent_step.js && node test/unit/test_stepwise_turn.js",
@@ -44,12 +45,12 @@
     "express": "4.18.2",
     "lru-cache": "^11.1.0",
     "pino": "^9.7.0",
-    "pino-pretty": "^13.1.3",
     "yahoo-finance2": "3.14.0"
   },
   "devDependencies": {
     "@remotion/cli": "^4.0.467",
     "esbuild": "^0.28.0",
+    "pino-pretty": "^13.1.3",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "remotion": "^4.0.467"
