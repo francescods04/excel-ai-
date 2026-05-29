@@ -44,10 +44,14 @@ const POSTWRITE_CRITIC_TOOLS = new Set([
   'execute_office_js',
   'execute_excel_formula'
 ]);
-const AGENT_THINKING_FIRST_ITER = process.env.AGENT_THINKING_FIRST_ITER !== 'false';
+// Agent-loop thinking defaults to OFF: the cost/quality benchmark (2026-05-29) showed
+// flash no-thinking beat flash full-thinking on quality (72 vs 60), speed (183s vs 448s
+// per scenario) and tokens (13.3M vs 20.1M). Re-enable per-knob via env if needed.
+// (Architect/planner role thinking is separate — unchanged.)
+const AGENT_THINKING_FIRST_ITER = process.env.AGENT_THINKING_FIRST_ITER === 'true';
 const AGENT_THINKING_EVERY_ITER = process.env.AGENT_THINKING_EVERY_ITER === 'true';
-const AGENT_THINKING_INTERVAL = Math.max(2, Number(process.env.AGENT_THINKING_INTERVAL) || 6);
-const AGENT_FORCE_THINKING_AFTER_ERROR = process.env.AGENT_FORCE_THINKING_AFTER_ERROR !== 'false';
+const AGENT_THINKING_INTERVAL = Math.max(0, Number(process.env.AGENT_THINKING_INTERVAL) || 0);
+const AGENT_FORCE_THINKING_AFTER_ERROR = process.env.AGENT_FORCE_THINKING_AFTER_ERROR === 'true';
 const AGENT_USE_STREAMING = process.env.AGENT_USE_STREAMING !== 'false';
 const AGENT_LOOP_FAST_MODEL = process.env.AGENT_LOOP_FAST_MODEL || process.env.DEEPSEEK_FALLBACK_MODEL || 'deepseek-v4-flash';
 const AGENT_LOOP_DEFAULT_MODEL = process.env.AGENT_LOOP_MODEL || process.env.DEEPSEEK_FALLBACK_MODEL || 'deepseek-v4-flash';
