@@ -30,6 +30,18 @@ async function approveTurnExecution(turnId) {
   }
 }
 
+async function postTurnStep(turnId, clientResult, stepSeq) {
+  const res = await fetch(`${API_BASE}/api/turn/step`, {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ turnId, clientResult, stepSeq })
+  });
+  if (!res.ok) {
+    throw new Error(await getErrorMessageFromResponse(res, 'Errore step turn'));
+  }
+  return res.json();
+}
+
 async function steerTurn(turnId, text) {
   const res = await fetch(`${API_BASE}/api/turn/steer`, {
     method: 'POST',
@@ -125,4 +137,4 @@ async function getErrorMessageFromResponse(response, fallbackMessage) {
   return fallback;
 }
 
-export { startTurn, approveTurnExecution, postTurnResponse, postTurnResponseBatch, postTurnActionResult, getTurn, steerTurn, getErrorMessageFromResponse, API_BASE };
+export { startTurn, approveTurnExecution, postTurnStep, postTurnResponse, postTurnResponseBatch, postTurnActionResult, getTurn, steerTurn, getErrorMessageFromResponse, API_BASE };

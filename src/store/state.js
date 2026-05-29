@@ -26,6 +26,7 @@ const state = {
   undoStack: [], // Stack of mutation snapshots for client-side undo
   isAgentPaused: false, // True when agent is waiting for user response
   pausedAgentId: null, // AgentId of the paused agent (for resume)
+  stepQuestionResolver: null, // Resolver fn for a stepwise paused question (free-text answer via chat)
 };
 
 export default state;

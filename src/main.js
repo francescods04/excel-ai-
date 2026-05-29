@@ -16,7 +16,7 @@ import { hideRequestPanel, showPermissionRequest, showUserInputRequest, showQues
 import { getExcelContext } from './excel/context.js';
 import { worksheetExists, readWorkbookSnapshot, readSheetSnapshot, readRangeSnapshot, readRangeAsCsv, readNamedRanges, readMultiRangeBatch } from './excel/readers.js';
 import { enqueueActions, executeActions as execActions, undoLastSnapshot, waitForActionQueueIdle, execRunJavaScript, isRunJavaScriptEnabled } from './excel/writers.js';
-import { startTurn, approveTurnExecution, postTurnResponse, postTurnResponseBatch, postTurnActionResult, getTurn, steerTurn, getErrorMessageFromResponse } from './api/turn.js';
+import { startTurn, approveTurnExecution, postTurnStep, postTurnResponse, postTurnResponseBatch, postTurnActionResult, getTurn, steerTurn, getErrorMessageFromResponse } from './api/turn.js';
 import { startAgent, resumeAgentWithResponse, postAgentClientResponse } from './api/agent.js';
 import { loadModelConfig, changeModel, warmupLLM } from './api/config.js';
 import { init as initAuth, getAccessToken, apiCall } from './auth/auth.js';
@@ -225,6 +225,15 @@ async function init() {
 async function handleSend() {
   const text = userInput.value.trim();
   if (!text) return;
+
+  // Stepwise paused question: route this message as the free-text answer.
+  if (state.stepQuestionResolver) {
+    addMessage(text, 'user');
+    userInput.value = '';
+    const resolver = state.stepQuestionResolver;
+    resolver({ text });
+    return;
+  }
 
   // If agent is paused waiting for a response, route this message as the answer
   if (state.isAgentPaused && state.pausedAgentId) {
@@ -671,6 +680,144 @@ async function waitForPendingExcelActions(reason = 'lettura workbook') {
   }
 }
 
+// ---- Stepwise client driver -------------------------------------------------
+// The client owns the agent loop: it calls /api/turn/step repeatedly, applies
+// Excel actions and runs Excel reads locally, and feeds results back. The
+// server is stateless per request (state lives in the turn, Supabase-backed),
+// so nothing here depends on a long-lived SSE connection or server background
+// work — the fix for the serverless 300s / reconnect stalls.
+const stepLoopStarted = new Set();
+
+async function runStepClientReads(requests) {
+  await waitForPendingExcelActions('step reads');
+  const results = [];
+  for (const req of (requests || [])) {
+    try {
+      let data;
+      switch (req.toolName) {
+        case 'workbook.readWorkbook': data = await readWorkbookSnapshot(req.params || {}); break;
+        case 'workbook.readSheet': data = await readSheetSnapshot(req.params || {}); break;
+        case 'workbook.readRange': {
+          const p = req.params || {};
+          data = p.format === 'csv' ? await readRangeAsCsv(p) : await readRangeSnapshot(p);
+          break;
+        }
+        case 'workbook.listNamedRanges': data = await readNamedRanges(req.params || {}); break;
+        case 'runJavaScript': data = await runJavaScriptRpc(req.params || {}); break;
+        default: throw new Error(`Client tool non supportato: ${req.toolName}`);
+      }
+      results.push({ data });
+    } catch (err) {
+      results.push({ error: err && err.message ? err.message : String(err) });
+    }
+  }
+  return results;
+}
+
+async function applyStepActions(actions) {
+  if (!actions || actions.length === 0) return;
+  enqueueActions(
+    { actions, meta: { turnId: state.currentTurnId, taskId: 'agent-loop' } },
+    state.excelActionQueue, showActionsPreview, hideActionsPreview,
+    (acts) => execActions(acts, updateStepsPanel)
+  );
+  // Wait for the queue to drain so the next read/iteration sees the writes.
+  await waitForPendingExcelActions('step apply');
+}
+
+function awaitStepQuestion(turnId, question) {
+  return new Promise((resolve) => {
+    state.isAgentPaused = true;
+    switchTab('chat');
+    showPendingQuestionBanner('In attesa della tua risposta — scegli o scrivi in basso.');
+    const finish = (answer) => {
+      state.isAgentPaused = false;
+      state.stepQuestionResolver = null;
+      hidePendingQuestionBanner();
+      resolve(answer);
+    };
+    // Free-text answers arrive through the chat input (see handleSend).
+    state.stepQuestionResolver = (payload) => finish(payload && payload.text !== undefined ? { text: payload.text } : payload);
+    if (Array.isArray(question)) {
+      showQuestionOptionsInChat(question, turnId, (label) => {
+        addMessage(`Hai scelto: ${escapeHtml(label)}`, 'user');
+        finish({ answers: [label] });
+      });
+    } else {
+      addMessage(`<div class="inline-question-alert"><span>Domanda</span>${escapeHtml(String(question || ''))}</div>`, 'bot');
+    }
+  });
+}
+
+async function runStepLoop(turnId) {
+  if (stepLoopStarted.has(turnId)) return;
+  stepLoopStarted.add(turnId);
+  addLog('Motore stepwise: avvio esecuzione guidata dal client.');
+  let clientResult = null;
+  let stepSeq = 0;
+  let consecutiveFailures = 0;
+  const MAX_STEPS = 8000;
+  const MAX_CONSECUTIVE_FAILURES = 6;
+  try {
+    let steps = 0;
+    while (state.currentTurnId === turnId && steps++ < MAX_STEPS) {
+      let resp;
+      try {
+        resp = await postTurnStep(turnId, clientResult, stepSeq);
+        consecutiveFailures = 0;
+      } catch (err) {
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          addLog(`Step interrotto dopo ${MAX_CONSECUTIVE_FAILURES} errori consecutivi: ${err.message}`, 'error');
+          addMessage(`Esecuzione interrotta: ${escapeHtml(err.message)}`, 'error');
+          return;
+        }
+        const delay = Math.min(1000 * Math.pow(2, consecutiveFailures), 8000);
+        addLog(`Step fallito (${err.message}); riprovo tra ${Math.round(delay / 1000)}s...`, 'warn');
+        await new Promise(r => setTimeout(r, delay));
+        continue; // retry same stepSeq; server's seq guard prevents double-advance
+      }
+
+      if (resp.stepSeq != null) stepSeq = resp.stepSeq;
+      const payload = resp.payload || {};
+
+      switch (resp.control) {
+        case 'continue':
+          clientResult = null;
+          break;
+        case 'emit_actions':
+          if (Array.isArray(payload.actions) && payload.actions.length > 0) {
+            addLog(`Eseguo ${payload.actions.length} azioni su Excel`);
+            await applyStepActions(payload.actions);
+          }
+          clientResult = null;
+          break;
+        case 'await_client': {
+          const results = await runStepClientReads(payload.requests);
+          clientResult = { results };
+          break;
+        }
+        case 'paused': {
+          const answer = await awaitStepQuestion(turnId, payload.question);
+          clientResult = { response: answer };
+          break;
+        }
+        case 'done':
+          addLog('Esecuzione completata (stepwise).');
+          return;
+        case 'aborted':
+          addLog(`Esecuzione interrotta: ${payload.reason || 'errore sconosciuto'}`, 'error');
+          return;
+        default:
+          addLog(`Controllo step sconosciuto: ${resp.control}`, 'warn');
+          clientResult = null;
+      }
+    }
+  } finally {
+    stepLoopStarted.delete(turnId);
+  }
+}
+
 function openTurnEventStream(turnId, planMsgId) {
   if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
 
@@ -722,6 +869,15 @@ function openTurnEventStream(turnId, planMsgId) {
     src.addEventListener('turnAwaitingApproval', () => {
       addLog('Piano pronto. In attesa della tua conferma per eseguire.');
       showApproveBar();
+    });
+
+    // Stepwise engine: server has initialized the agent state; the client now
+    // drives the loop via POST /api/turn/step (no SSE-pushed actions). Fires on
+    // both auto-approve and manual approve, and is replayed on reconnect.
+    src.addEventListener('stepwiseReady', (e) => {
+      let tid = turnId;
+      try { const d = JSON.parse(e.data); if (d && d.turnId) tid = d.turnId; } catch (_) {}
+      runStepLoop(tid);
     });
 
     src.addEventListener('triageDecision', (e) => {
