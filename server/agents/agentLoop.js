@@ -1587,16 +1587,36 @@ async function runAgentLoop(objective, context, options = {}) {
   logger.info(`[AgentLoop] Starting loop for: ${objective}`);
   onEvent('agentStarted', { objective, iteration });
 
-  let webSearchCount = 0;
+  let webSearchCount = options.resumeWebSearchCount || 0;
   const MAX_WEB_SEARCH = Number(process.env.AGENT_MAX_WEB_SEARCH) || 20;
-  let consecutiveErrors = 0;
-  let lastErrorMessage = '';
+  let consecutiveErrors = options.resumeConsecutiveErrors || 0;
+  let lastErrorMessage = options.resumeLastErrorMessage || '';
   let aborted = false;
   let abortReason = '';
-  let forceThinkingNext = false;
-  let parseFailureStreak = 0;
-  const loadedSkillNames = new Set();
-  const recentToolTrail = [];
+  let forceThinkingNext = options.resumeForceThinkingNext || false;
+  let parseFailureStreak = options.resumeParseFailureStreak || 0;
+  const loadedSkillNames = new Set(options.resumeLoadedSkillNames || []);
+  const recentToolTrail = Array.isArray(options.resumeRecentToolTrail)
+    ? [...options.resumeRecentToolTrail]
+    : [];
+
+  // Snapshot of every loop variable that must survive a pause/resume boundary.
+  // Reads live values at call time (let counters + in-place-mutated arrays).
+  // Sets serialize to arrays; arrays are copied so the snapshot can't be
+  // mutated after capture.
+  const captureResumableState = () => ({
+    messages,
+    results,
+    iteration,
+    codeLog,
+    consecutiveErrors,
+    lastErrorMessage,
+    webSearchCount,
+    parseFailureStreak,
+    forceThinkingNext,
+    loadedSkillNames: Array.from(loadedSkillNames),
+    recentToolTrail: [...recentToolTrail]
+  });
 
   while (!done && iteration < maxIterations) {
     iteration++;
@@ -1793,11 +1813,8 @@ async function runAgentLoop(objective, context, options = {}) {
           status: 'paused',
           reason: 'user_input_required',
           question: questionData,
-          messages,
-          results,
-          iteration,
-          codeLog,
-          context
+          context,
+          ...captureResumableState()
         };
       }
 
@@ -2090,11 +2107,10 @@ async function runAgentLoop(objective, context, options = {}) {
 
   return {
     status: finalStatus,
-    results,
-    messages,
-    iteration,
-    codeLog,
-    summary: finalSummary
+    summary: finalSummary,
+    aborted,
+    abortReason,
+    ...captureResumableState()
   };
 }
 
@@ -3044,8 +3060,641 @@ async function executePythonCode(code) {
   }
 }
 
+/* ==========================================================================
+ * STEPWISE AGENT ENGINE (serverless-friendly, client-driven)
+ *
+ * runAgentLoop (above) is the server-driven loop: it owns the while loop and
+ * blocks on requestClientTool for every Excel read. That model dies on
+ * serverless (background work killed after the HTTP response; 300s function
+ * cap; in-memory state lost on reconnect).
+ *
+ * The stepwise engine inverts control: the CLIENT drives the loop, the server
+ * does ONE iteration per HTTP request and is fully stateless across calls.
+ * `runAgentStep(state, clientResult)` advances the loop by exactly one LLM
+ * turn and returns a `control` telling the client what to do next:
+ *   - continue       → call step again immediately
+ *   - emit_actions   → apply payload.actions to Excel, then call step again
+ *   - await_client   → run payload.requests (Excel reads), return results, step
+ *   - paused         → show payload.question, return answer, step
+ *   - done / aborted  → terminal
+ *
+ * Reuse strategy: executeAgentTool stays the single source of truth for tool
+ * behavior + result formatting. We discover which client reads a tool needs by
+ * a "dry-run collect" pass (placeholderBroker returns {} for each client call;
+ * every read formatter guards with `|| default`, so the dry result is only
+ * trusted when ZERO client calls were made). On resume we re-run the tool ONCE
+ * with a replay broker that feeds the real client data back in call order.
+ * parallel_calls is split explicitly so server sub-tools (openbb/web — side
+ * effects) run exactly once and only client sub-tools are deferred.
+ * ======================================================================== */
+
+const CLIENT_READ_TOOLS = new Set([
+  'read_workbook',
+  'read_sheet',
+  'get_cell_ranges',
+  'get_range_as_csv',
+  'list_named_ranges',
+  'build_workbook_graph'
+]);
+// Tools that MAY need a client round-trip: reads + execute_office_js (runs JS
+// on the client) + set_cell_range (conditional allow_overwrite preflight read).
+const CLIENT_CAPABLE_TOOLS = new Set([
+  ...CLIENT_READ_TOOLS,
+  'set_cell_range',
+  'execute_office_js'
+]);
+
+const STEP_FATAL_ERROR_PATTERNS = [
+  /no api key configured/i,
+  /invalid api key/i,
+  /authentication failed/i,
+  /unauthorized/i,
+  /402/i,
+  /payment required/i,
+  /credit exhausted/i,
+  /insufficient quota/i,
+  /rate limit/i
+];
+
+// Build the initial serializable run state. Mirrors runAgentLoop's prompt
+// construction (1547-1599) but produces a plain object that survives
+// JSON round-trips through Supabase between HTTP requests.
+function initAgentRun(objective, context, options = {}) {
+  const promptVariant = options.promptVariant || DEFAULT_PROMPT_VARIANT;
+  const systemPromptForRun = getSystemPrompt(promptVariant);
+
+  const compactCtx = compactAgentContext(context);
+  const overview = buildWorkbookOverview(context);
+  let userPrompt = `Goal: ${objective}\n\n${overview}\n\nWorkbook context (compact JSON):\n${JSON.stringify(compactCtx, null, 2)}\n\nProceed step by step. When writing, ALWAYS pass an explicit "sheet" parameter — the active sheet at task start may NOT be where the user wants the data.`;
+  const lowerObjective = String(objective || '').toLowerCase();
+  if (lowerObjective.includes('apple') || lowerObjective.includes('aapl')) {
+    userPrompt += `\n\nHINT — These publicly known Apple FY2024 figures are rough sanity-check anchors, not live sources:\n- Revenue: ~$394B\n- Net Income: ~$97B\n- EBITDA: ~$120B\n- CapEx: ~$10B\n- D&A: ~$12B\n- Shares Outstanding: ~15.5B\n- Cash & Equivalents: ~$70B\n- Total Debt: ~$110B\n- Tax Rate: ~16%\nVerify or update current market/filing inputs with tools when available, then build the model with visible sources and review flags.`;
+  }
+
+  let skillReminder = '';
+  const suggestedSkills = detectSkills(objective);
+  if (suggestedSkills.length > 0) {
+    const loaded = suggestedSkills.map(name => readSkill(name)).filter(Boolean);
+    if (loaded.length > 0) {
+      skillReminder = `<system-reminder>\nPre-loaded skill${loaded.length > 1 ? 's' : ''} based on user request: ${suggestedSkills.join(', ')}.\n\n` +
+        loaded.map(s => `--- ${s.name} ---\n${s.content.slice(0, 4000)}`).join('\n\n') +
+        '\n</system-reminder>';
+    }
+  }
+  const systemPromptAddendum = typeof options.systemPromptAddendum === 'string' && options.systemPromptAddendum.trim()
+    ? '\n\n' + options.systemPromptAddendum.trim()
+    : '';
+
+  const explicitCap = options.maxIterations || Number(process.env.AGENT_MAX_ITER);
+  const maxIterations = explicitCap && explicitCap > 0 ? explicitCap : 10000;
+
+  return {
+    objective,
+    context,
+    messages: [
+      { role: 'system', content: systemPromptForRun + (skillReminder ? '\n\n' + skillReminder : '') + systemPromptAddendum },
+      makeUserMessage(userPrompt)
+    ],
+    results: [],
+    iteration: 0,
+    codeLog: [],
+    consecutiveErrors: 0,
+    lastErrorMessage: '',
+    webSearchCount: 0,
+    parseFailureStreak: 0,
+    forceThinkingNext: false,
+    loadedSkillNames: [],
+    recentToolTrail: [],
+    status: 'running',
+    pending: null,
+    summary: null,
+    abortReason: null,
+    config: {
+      promptVariant,
+      modelOverride: options.modelOverride || null,
+      maxIterations,
+      maxConsecutiveErrors: options.maxConsecutiveErrors || 4,
+      timeoutMs: options.timeoutMs || Number(process.env.AGENT_LLM_TIMEOUT_MS) || 300000,
+      fallbackTimeoutMs: options.fallbackTimeoutMs || Number(process.env.AGENT_LLM_FALLBACK_TIMEOUT_MS) || 180000,
+      forceThinkingDisabled: options.forceThinkingDisabled === true,
+      postWriteCriticEnabled: options.postWriteCriticEnabled,
+      maxWebSearch: Number(process.env.AGENT_MAX_WEB_SEARCH) || 20
+    }
+  };
+}
+
+function markSkillLoaded(state, params) {
+  const n = String((params && params.name) || '').trim();
+  if (n && !state.loadedSkillNames.includes(n)) state.loadedSkillNames.push(n);
+}
+
+function terminalControl(state) {
+  if (state.status === 'completed') return { state, control: 'done', payload: { summary: state.summary } };
+  return { state, control: 'aborted', payload: { reason: state.abortReason } };
+}
+
+// Dry-run a tool to discover the client read requests it would make, without
+// performing the real round-trip. Trust the dryResult ONLY when requests is
+// empty (then no client was needed and the tool ran for real).
+async function collectToolClientRequests(toolName, params, context) {
+  const requests = [];
+  const placeholderBroker = async (clientTool, clientParams) => {
+    requests.push({
+      id: `creq-${requests.length}-${Date.now().toString(36)}`,
+      toolName: clientTool,
+      params: clientParams || {}
+    });
+    return {};
+  };
+  let dryResult = null;
+  try {
+    dryResult = await executeAgentTool(toolName, params, context, placeholderBroker);
+  } catch (e) {
+    dryResult = { error: e && e.message ? e.message : String(e) };
+  }
+  return { requests, dryResult };
+}
+
+// Re-run a tool with pre-fetched client results. The replay broker returns
+// staged data in the same order the tool calls requestClientTool.
+async function runToolWithStagedResults(toolName, params, context, staged) {
+  let i = 0;
+  const replayBroker = async () => {
+    const entry = staged[i++];
+    if (entry && entry.error) throw new Error(entry.error);
+    if (entry && entry.data !== undefined) return entry.data;
+    return entry !== undefined && entry !== null ? entry : {};
+  };
+  return executeAgentTool(toolName, params, context, replayBroker);
+}
+
+// Normalize whatever the client sent back into an ordered [{data}|{error}] list.
+function normalizeClientResults(clientResult) {
+  if (!clientResult) return [];
+  const arr = Array.isArray(clientResult)
+    ? clientResult
+    : Array.isArray(clientResult.results) ? clientResult.results : [];
+  return arr.map(r => {
+    if (r && typeof r === 'object') {
+      if (r.response) return r.response;
+      if (r.data !== undefined || r.error !== undefined) return r;
+    }
+    return { data: r };
+  });
+}
+
+function bulkNudgeFor(lastN) {
+  if (lastN.length !== 2) return null;
+  if (lastN.every(n => n === 'set_cell_range')) {
+    return 'BATCH HINT: you just called set_cell_range twice in a row. If the next write is also a different sheet/section, consolidate the upcoming writes into ONE bulk_set_cell_ranges call instead of issuing them one at a time.';
+  }
+  if (lastN.every(n => n === 'set_format')) {
+    return 'BATCH HINT: you just called set_format twice in a row. Consolidate the next formats into ONE bulk_set_format call.';
+  }
+  if (lastN.every(n => n === 'create_sheet')) {
+    return 'BATCH HINT: you just created two sheets one at a time. If more are coming, use bulk_create_sheets with the full list.';
+  }
+  if (lastN.every(n => n === 'create_named_range')) {
+    return 'BATCH HINT: you just created two named ranges one at a time. Use bulk_create_named_ranges with the full list of remaining inputs.';
+  }
+  return null;
+}
+
+// Mirror of runAgentLoop's auto-compaction (2006-2051), operating on state.messages.
+function autoCompactMessages(state) {
+  const messages = state.messages;
+  const AUTO_COMPACT_LIMIT = Number(process.env.AGENT_AUTO_COMPACT_LIMIT) || 80;
+  if (messages.length <= AUTO_COMPACT_LIMIT) return;
+  const keepCount = Number(process.env.AGENT_AUTO_COMPACT_KEEP) || 12;
+  const toCompact = messages.slice(1, messages.length - keepCount);
+  const userMsgs = toCompact.filter(m => m.role === 'user');
+  let snipApplied = false;
+  if (userMsgs.length >= 2) {
+    const firstId = extractMsgId(userMsgs[0].content);
+    const lastId = extractMsgId(userMsgs[userMsgs.length - 1].content);
+    if (firstId && lastId) {
+      const snipResult = snipContext(messages, firstId, lastId, 'Auto-compacted history');
+      if (snipResult.ok) snipApplied = true;
+    }
+  }
+  if (snipApplied) return;
+  const compacted = toCompact.filter(m => {
+    if (m.role === 'assistant') {
+      try { const p = JSON.parse(m.content); return p.tool && !['done', 'todo_write', 'context_snip'].includes(p.tool); }
+      catch (_) { return m.content.length > 50; }
+    }
+    return m.role === 'user' && !m.content.startsWith('Tool result') && !m.content.startsWith('CONVERSATION SUMMARY');
+  });
+  const compactLines = compacted.map(m => {
+    if (m.role === 'assistant') {
+      try { const p = JSON.parse(m.content); return `[${p.tool}] ${(p.thought || '').slice(0, 100)}`; }
+      catch (_) { return m.content.slice(0, 100); }
+    }
+    return m.content.slice(0, 100);
+  });
+  if (compactLines.length === 0) return;
+  const summary = 'AUTO-COMPACTED HISTORY (' + toCompact.length + ' msgs):\n' + compactLines.join('\n').slice(0, 3000);
+  const newMsgs = [messages[0], makeUserMessage(summary + '\n\nContinue from where you left off.'), ...messages.slice(messages.length - keepCount)];
+  messages.length = 0;
+  messages.push(...newMsgs);
+}
+
+async function callStepLLM(state, deps) {
+  const doLLM = deps.callLLM || callLLM;
+  const useThinking = state.config.forceThinkingDisabled
+    ? false
+    : shouldUseAgentThinking(state.iteration, {
+        forceThinkingNext: state.forceThinkingNext,
+        consecutiveErrors: state.consecutiveErrors,
+        parseFailureStreak: state.parseFailureStreak,
+        lastToolName: state.recentToolTrail.length > 0 ? state.recentToolTrail[state.recentToolTrail.length - 1].toolName : null
+      });
+  const modelForRun = resolveAgentLoopModel(state.config.modelOverride || undefined, state.config.promptVariant);
+  const llmResult = await doLLM({
+    messages: state.messages,
+    timeoutMs: state.config.timeoutMs,
+    fallbackTimeoutMs: state.config.fallbackTimeoutMs,
+    label: `AgentStep iter ${state.iteration}`,
+    modelOverride: modelForRun,
+    thinkingDisabled: !useThinking,
+    reasoningEffort: useThinking ? (process.env.DEEPSEEK_REASONING_EFFORT || 'high') : AGENT_REASONING_EFFORT
+  });
+  return { llmResult, useThinking };
+}
+
+function handleAskUser(state, toolName, params, thought, onProgress) {
+  let questionData = toolName === 'ask_user_question' ? params.questions : params.question;
+  if (!questionData && params.question) questionData = Array.isArray(params.question) ? params.question : [params.question];
+  if (!questionData || (Array.isArray(questionData) && questionData.length === 0)) {
+    state.messages.push(makeUserMessage('You called ask_user_question with no valid questions. The "questions" parameter must be a non-empty array of objects with "question" (or "header") and "options" fields. Call ask_user_question again with a proper question.'));
+    return { state, control: 'continue', payload: { thought } };
+  }
+  const autoAnswer = tryAutoAnswer(questionData, state.context, state.objective);
+  if (autoAnswer) {
+    state.messages.push(makeUserMessage(`Auto-answered: ${autoAnswer}. Do NOT ask again unless absolutely critical. Proceed with the task.`));
+    state.results.push({ type: 'ask_user', question: questionData, autoAnswer });
+    onProgress('agentAutoAnswer', { question: questionData, answer: autoAnswer, iteration: state.iteration });
+    return { state, control: 'continue', payload: { thought } };
+  }
+  state.results.push({ type: 'ask_user', question: questionData });
+  state.status = 'paused';
+  state.pending = { kind: 'question', question: questionData, thought };
+  onProgress('agentPaused', { reason: 'user_input_required', question: questionData, iteration: state.iteration });
+  return { state, control: 'paused', payload: { question: questionData } };
+}
+
+function handleStepError(state, error, onProgress) {
+  const msg = error && error.message ? error.message : String(error);
+  if (STEP_FATAL_ERROR_PATTERNS.some(p => p.test(msg))) {
+    state.status = 'aborted';
+    state.abortReason = `fatal_error: ${msg}`;
+    state.results.push({ type: 'error', error: msg, fatal: true });
+    onProgress('iterationError', { iteration: state.iteration, error: msg, fatal: true });
+    return { state, control: 'aborted', payload: { reason: state.abortReason } };
+  }
+  if (msg === state.lastErrorMessage) state.consecutiveErrors++;
+  else { state.consecutiveErrors = 1; state.lastErrorMessage = msg; }
+  state.results.push({ type: 'error', error: msg });
+  onProgress('iterationError', { iteration: state.iteration, error: msg });
+  if (AGENT_FORCE_THINKING_AFTER_ERROR) state.forceThinkingNext = true;
+  if (state.consecutiveErrors >= state.config.maxConsecutiveErrors) {
+    state.status = 'aborted';
+    state.abortReason = `repeated_error_x${state.consecutiveErrors}: ${msg}`;
+    return { state, control: 'aborted', payload: { reason: state.abortReason } };
+  }
+  state.messages.push(makeUserMessage(`Error: ${msg}. Please try a different approach.`));
+  return { state, control: 'continue', payload: {} };
+}
+
+function buildParallelPlan(callsInput) {
+  return callsInput.map((c, idx) => {
+    const tool = c && typeof c.tool === 'string' ? c.tool : '';
+    const innerParams = c && typeof c.params === 'object' && c.params !== null ? c.params : {};
+    if (!tool) return { idx, tool, ok: false, error: 'missing "tool" field', skipped: true };
+    if (tool === 'parallel_calls') return { idx, tool, ok: false, error: 'parallel_calls cannot be nested', skipped: true };
+    if (!PARALLEL_SAFE_TOOLS.has(tool)) return { idx, tool, ok: false, error: `tool "${tool}" not allowed inside parallel_calls (read-only allowlist only)`, skipped: true };
+    return { idx, tool, params: innerParams };
+  });
+}
+
+async function assembleParallelResult(state, pending, staged) {
+  const { planned, serverResults, clientPlan, callsLength } = pending;
+  const results = new Array(callsLength);
+  for (const p of planned) {
+    if (p.skipped) results[p.idx] = { tool: p.tool, ok: false, error: p.error };
+  }
+  for (const idxStr of Object.keys(serverResults || {})) {
+    const idx = Number(idxStr);
+    const val = serverResults[idxStr];
+    const p = planned.find(x => x.idx === idx);
+    if (val && val.__error) results[idx] = { tool: p && p.tool, ok: false, error: val.__error };
+    else if (val && val.error) results[idx] = { tool: p && p.tool, ok: false, error: val.error };
+    else results[idx] = { tool: p && p.tool, ok: true, value: val };
+  }
+  for (const cp of (clientPlan || [])) {
+    const sub = staged.slice(cp.reqStart, cp.reqStart + cp.reqCount);
+    try {
+      const val = await runToolWithStagedResults(cp.toolName, cp.params, state.context, sub);
+      if (val && val.error) results[cp.idx] = { tool: cp.toolName, ok: false, error: val.error };
+      else results[cp.idx] = { tool: cp.toolName, ok: true, value: val };
+    } catch (e) {
+      results[cp.idx] = { tool: cp.toolName, ok: false, error: e && e.message ? e.message : String(e) };
+    }
+  }
+  const okCount = results.filter(r => r && r.ok).length;
+  return { results, summary: { total: results.length, ok: okCount, errors: results.length - okCount } };
+}
+
+async function startParallelCalls(state, params, thought, deps, onProgress) {
+  const callsInput = Array.isArray(params && params.calls) ? params.calls : [];
+  if (callsInput.length === 0) {
+    return finishToolExecution(state, 'parallel_calls', params, thought, { error: 'parallel_calls: "calls" must be a non-empty array' }, deps, onProgress);
+  }
+  if (callsInput.length > 8) {
+    return finishToolExecution(state, 'parallel_calls', params, thought, { error: `parallel_calls: max 8 calls per batch, got ${callsInput.length}` }, deps, onProgress);
+  }
+  const planned = buildParallelPlan(callsInput);
+  const serverResults = {};
+  const clientPlan = [];
+  const allRequests = [];
+  for (const p of planned) {
+    if (p.skipped) continue;
+    if (CLIENT_READ_TOOLS.has(p.tool)) {
+      const { requests } = await collectToolClientRequests(p.tool, p.params, state.context);
+      clientPlan.push({ idx: p.idx, toolName: p.tool, params: p.params, reqStart: allRequests.length, reqCount: requests.length });
+      for (const r of requests) allRequests.push(r);
+    } else {
+      try { serverResults[p.idx] = await executeAgentTool(p.tool, p.params, state.context, null); }
+      catch (e) { serverResults[p.idx] = { __error: e && e.message ? e.message : String(e) }; }
+    }
+  }
+  const pendingSpec = { planned, serverResults, clientPlan, callsLength: callsInput.length };
+  if (allRequests.length === 0) {
+    const toolResult = await assembleParallelResult(state, pendingSpec, []);
+    return finishToolExecution(state, 'parallel_calls', params, thought, toolResult, deps, onProgress);
+  }
+  state.pending = { kind: 'parallel', params, thought, requests: allRequests, ...pendingSpec };
+  state.status = 'awaiting_client';
+  return { state, control: 'await_client', payload: { thought, requests: allRequests } };
+}
+
+async function finishToolExecution(state, toolName, params, thought, toolResult, deps, onProgress) {
+  if (toolResult && toolResult._preflight && toolResult._preflight.conflict) {
+    state.results.push({ type: 'preflight_conflict', tool: toolName, ...toolResult._preflight });
+    state.messages.push(makeUserMessage(toolResult._message));
+    onProgress('preflightConflict', { tool: toolName, ...toolResult._preflight });
+    return { state, control: 'continue', payload: { thought } };
+  }
+
+  let actions = null;
+  if (toolResult && Array.isArray(toolResult.actions) && toolResult.actions.length > 0) {
+    actions = toolResult.actions.map((a, idx) => {
+      let enriched = a;
+      if (!a.explanation) {
+        const parts = [a.type];
+        if (a.sheet) parts.push(`on ${a.sheet}`);
+        if (a.target) parts.push(a.target);
+        else if (a.cells) parts.push(`${Object.keys(a.cells).length} cells`);
+        else if (a.name) parts.push(`"${a.name}"`);
+        enriched = { ...a, explanation: parts.join(' ').slice(0, 50) };
+      }
+      if (idx === 0 && toolResult._preflight) enriched = { ...enriched, _preflight: toolResult._preflight };
+      return enriched;
+    });
+  }
+
+  if (toolName === 'execute_python') {
+    state.codeLog.push({ type: 'python', code: params.code, result: toolResult });
+    onProgress('codeLog', { code: params.code, result: toolResult });
+  }
+
+  state.results.push({ type: 'tool', tool: toolName, params, result: toolResult });
+  state.consecutiveErrors = 0;
+  state.lastErrorMessage = '';
+
+  const trForMsg = (toolResult && typeof toolResult === 'object' && Array.isArray(toolResult.actions))
+    ? { ...toolResult, actions: undefined, _actionCount: toolResult.actions.length }
+    : toolResult;
+  state.messages.push(makeUserMessage(formatToolResultForMessages(trForMsg, toolName)));
+  onProgress('toolResult', { iteration: state.iteration, tool: toolName, result: toolResult });
+
+  const criticOn = (state.config.postWriteCriticEnabled === true) ||
+    (state.config.postWriteCriticEnabled !== false && AGENT_POSTWRITE_CRITIC);
+  if (criticOn && POSTWRITE_CRITIC_TOOLS.has(toolName) && actions) {
+    try {
+      const critique = await runPostWriteCritic(toolName, actions);
+      if (critique && Array.isArray(critique.issues) && critique.issues.length > 0) {
+        const formatted = critique.issues.slice(0, 6).map((i, idx) =>
+          `${idx + 1}. [${i.severity || 'note'}] ${i.message || '(no message)'}${i.suggestion ? ` — fix: ${i.suggestion}` : ''}`
+        ).join('\n');
+        state.messages.push(makeUserMessage(`POST-WRITE CRITIC (fast pass, ${critique.issues.length} issue${critique.issues.length === 1 ? '' : 's'}):\n${formatted}\n\nAddress the high-severity issues in your next step before continuing the build.`));
+        onProgress('postWriteCritic', { iteration: state.iteration, tool: toolName, issues: critique.issues });
+      }
+    } catch (_) { /* critic is best-effort */ }
+  }
+
+  state.recentToolTrail.push({ iteration: state.iteration, toolName, signature: buildToolStagnationSignature(toolName, params) });
+  if (state.recentToolTrail.length > STAGNATION_MAX_TRAIL) {
+    state.recentToolTrail.splice(0, state.recentToolTrail.length - STAGNATION_MAX_TRAIL);
+  }
+  if (process.env.AGENT_BULK_NUDGE !== 'false') {
+    const nudge = bulkNudgeFor(state.recentToolTrail.slice(-2).map(e => e.toolName));
+    if (nudge) state.messages.push(makeUserMessage(nudge));
+  }
+
+  const stagnation = detectToolStagnation(state.recentToolTrail);
+  if (stagnation) {
+    state.status = 'aborted';
+    state.abortReason = formatToolStagnationReason(stagnation);
+    state.results.push({ type: 'error', error: state.abortReason, stagnation: true, pattern: stagnation.pattern, tools: stagnation.entries.map(e => e.toolName) });
+    onProgress('iterationError', { iteration: state.iteration, error: state.abortReason, stagnation: true, pattern: stagnation.pattern });
+    return { state, control: 'aborted', payload: { reason: state.abortReason } };
+  }
+
+  autoCompactMessages(state);
+
+  if (actions) return { state, control: 'emit_actions', payload: { thought, actions } };
+  return { state, control: 'continue', payload: { thought } };
+}
+
+async function resumePendingTool(state, clientResult, deps, onProgress) {
+  const pending = state.pending;
+
+  if (pending.kind === 'question') {
+    const raw = clientResult && clientResult.response !== undefined ? clientResult.response : clientResult;
+    const normalized = normalizeQuestionResponsePayload(raw);
+    state.messages.push({ role: 'user', content: `User response: ${JSON.stringify(normalized)}` });
+    state.results.push({ type: 'ask_user', question: pending.question, response: normalized });
+    state.pending = null;
+    state.status = 'running';
+    onProgress('agentResumed', { question: pending.question, response: normalized, iteration: state.iteration });
+    return { state, control: 'continue', payload: {} };
+  }
+
+  const staged = normalizeClientResults(clientResult);
+  const { toolName, params, thought } = pending;
+  let toolResult;
+  if (pending.kind === 'parallel') {
+    toolResult = await assembleParallelResult(state, pending, staged);
+  } else {
+    toolResult = await runToolWithStagedResults(toolName, params, state.context, staged);
+  }
+  state.pending = null;
+  state.status = 'running';
+  return finishToolExecution(state, toolName || 'parallel_calls', params, thought, toolResult, deps, onProgress);
+}
+
+// Advance the agent by exactly ONE iteration. Stateless across HTTP requests:
+// pass the prior `state` back in, plus `clientResult` when resuming an
+// await_client / paused control. Returns { state, control, payload }.
+async function runAgentStep(state, clientResult, deps = {}) {
+  const onProgress = (t, d) => { try { (deps.onProgress || (() => {}))(t, d || {}); } catch (_) {} };
+
+  if (state.status === 'completed') return { state, control: 'done', payload: { summary: state.summary } };
+  if (state.status === 'aborted') return { state, control: 'aborted', payload: { reason: state.abortReason } };
+
+  if (state.pending) {
+    if (!clientResult) {
+      return { state, control: state.pending.kind === 'question' ? 'paused' : 'await_client', payload: state.pending.kind === 'question' ? { question: state.pending.question } : { requests: state.pending.requests || [] } };
+    }
+    return resumePendingTool(state, clientResult, deps, onProgress);
+  }
+
+  if (Array.isArray(deps.steerMessages) && deps.steerMessages.length > 0) {
+    for (const item of deps.steerMessages) {
+      if (!item || !item.text) continue;
+      const isInterrupt = item.kind === 'interrupt';
+      const wrapped = isInterrupt
+        ? `<user-interrupt iteration="${state.iteration}">\nThe user issued a mid-execution DIRECTIVE. Reassess immediately: drop in-progress steps that conflict with it. Acknowledge briefly in your next "thought" and act on the new directive.\n\nDirective: ${item.text}\n</user-interrupt>`
+        : `<user-addendum iteration="${state.iteration}">\nAdditional info from the user (continue current work, integrate this into the ongoing task):\n${item.text}\n</user-addendum>`;
+      state.messages.push(makeUserMessage(wrapped));
+      state.recentToolTrail.length = 0;
+      onProgress('agentSteered', { iteration: state.iteration, kind: item.kind, text: item.text });
+    }
+  }
+
+  state.iteration++;
+  if (state.iteration > state.config.maxIterations) {
+    state.status = 'aborted';
+    state.abortReason = 'Reached max iterations';
+    return terminalControl(state);
+  }
+  onProgress('iterationStart', { iteration: state.iteration, maxIterations: state.config.maxIterations });
+
+  try {
+    const { llmResult } = await callStepLLM(state, deps);
+
+    const parseFailed = !!(llmResult && llmResult.raw && llmResult.jsonError);
+    if (parseFailed) {
+      state.parseFailureStreak++;
+      if (AGENT_FORCE_THINKING_AFTER_ERROR) state.forceThinkingNext = true;
+      onProgress('iterationError', { iteration: state.iteration, error: `LLM JSON parse failed: ${llmResult.jsonError}` });
+      state.messages.push(makeUserMessage(`Your previous response was not valid JSON (${llmResult.jsonError}). Reply with ONLY a single JSON object {"thought","tool","params"} — no extra text, no trailing characters. Continue the task from where you left off.`));
+      return { state, control: 'continue', payload: {} };
+    }
+    state.parseFailureStreak = 0;
+    state.forceThinkingNext = false;
+
+    const thought = llmResult.thought || llmResult.reasoning || '';
+    const toolName = llmResult.tool || llmResult.action || '';
+    const params = llmResult.params || llmResult.parameters || llmResult.arguments || {};
+    onProgress('thought', { iteration: state.iteration, thought: String(thought).slice(0, 300), tool: toolName });
+    state.messages.push({ role: 'assistant', content: JSON.stringify({ thought, tool: toolName, params }) });
+
+    if (!toolName || toolName === 'noop' || toolName === 'none') {
+      state.messages.push(makeUserMessage('No tool was called. If task is complete, call tool "done" with a summary. Otherwise continue with the next tool.'));
+      return { state, control: 'continue', payload: { thought } };
+    }
+
+    if (toolName === 'web_search' || toolName === 'web_fetch') {
+      state.webSearchCount++;
+      if (state.webSearchCount > state.config.maxWebSearch) {
+        const blockMsg = `Maximum web search attempts (${state.config.maxWebSearch}) reached. Use the sourced information already gathered, label any remaining uncertain inputs as assumptions, and continue the model. Do NOT search again.`;
+        state.messages.push(makeUserMessage(blockMsg));
+        state.results.push({ type: 'error', error: blockMsg });
+        onProgress('iterationError', { iteration: state.iteration, error: blockMsg });
+        return { state, control: 'continue', payload: { thought } };
+      }
+    }
+
+    if (toolName === 'done') {
+      state.status = 'completed';
+      state.summary = params.summary || 'Task completed';
+      state.results.push({ type: 'done', summary: state.summary });
+      state.messages.push(makeUserMessage('Task completed successfully.'));
+      onProgress('agentDone', { summary: state.summary, iteration: state.iteration });
+      return { state, control: 'done', payload: { summary: state.summary } };
+    }
+
+    if (toolName === 'todo_write') {
+      const todos = Array.isArray(params.todos) ? params.todos : [];
+      state.results.push({ type: 'todo_write', todos });
+      onProgress('todoWrite', { todos });
+      state.messages.push(makeUserMessage(todos.length > 0
+        ? `Task list updated: ${todos.map(t => `[${t.status}] ${t.content}`).join(', ')}`
+        : 'Task list updated.'));
+      return { state, control: 'continue', payload: { thought } };
+    }
+
+    if (toolName === 'ask_user' || toolName === 'ask_user_question') {
+      return handleAskUser(state, toolName, params, thought, onProgress);
+    }
+
+    if (toolName === 'context_snip') {
+      const snipResult = snipContext(state.messages, params.from_id, params.to_id, params.summary);
+      state.messages.push(makeUserMessage(`Context snipped: ${params.summary}`));
+      state.results.push({ type: 'context_snip', ...snipResult });
+      onProgress('contextSnip', snipResult);
+      return { state, control: 'continue', payload: { thought } };
+    }
+
+    if (toolName === 'retrieve_snipped') {
+      const retrieved = retrieveSnipped(params.from_id, params.search, params.max_chars);
+      state.messages.push(makeUserMessage(`Retrieved snipped context: ${JSON.stringify((retrieved.results || []).map(r => r.summary))}`));
+      state.results.push({ type: 'retrieve_snipped', ...retrieved });
+      onProgress('retrieveSnipped', retrieved);
+      return { state, control: 'continue', payload: { thought } };
+    }
+
+    if (toolName === 'read_skill') {
+      const skillName = String((params && params.name) || '').trim();
+      if (skillName && state.loadedSkillNames.includes(skillName)) {
+        const dup = `Skill "${skillName}" is already loaded in context. Do not call read_skill again. Proceed with workbook/data/build tools.`;
+        state.results.push({ type: 'read_skill_duplicate', name: skillName });
+        onProgress('iterationError', { iteration: state.iteration, error: dup });
+        state.messages.push(makeUserMessage(dup));
+        return { state, control: 'continue', payload: { thought } };
+      }
+    }
+
+    if (toolName === 'parallel_calls') {
+      return startParallelCalls(state, params, thought, deps, onProgress);
+    }
+
+    if (CLIENT_CAPABLE_TOOLS.has(toolName)) {
+      const { requests, dryResult } = await collectToolClientRequests(toolName, params, state.context);
+      if (requests.length > 0) {
+        state.pending = { kind: 'single', toolName, params, thought, requests };
+        state.status = 'awaiting_client';
+        return { state, control: 'await_client', payload: { thought, requests } };
+      }
+      if (toolName === 'read_skill') markSkillLoaded(state, params);
+      return finishToolExecution(state, toolName, params, thought, dryResult, deps, onProgress);
+    }
+
+    const toolResult = await executeAgentTool(toolName, params, state.context, null);
+    if (toolName === 'read_skill') markSkillLoaded(state, params);
+    return finishToolExecution(state, toolName, params, thought, toolResult, deps, onProgress);
+
+  } catch (error) {
+    return handleStepError(state, error, onProgress);
+  }
+}
+
 module.exports = {
   runAgentLoop,
+  initAgentRun,
+  runAgentStep,
   TOOL_DEFINITIONS,
   AGENT_SYSTEM_PROMPT,
   getSystemPrompt,
