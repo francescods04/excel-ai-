@@ -150,7 +150,7 @@ const STYLE_PRESETS = Object.freeze({
     cellStyles: { fontColor: '#0000FF', backgroundColor: '#E6F2FF', numberFormat: '#,##0' }
   },
   input_eur: {
-    cellStyles: { fontColor: '#0000FF', backgroundColor: '#E6F2FF', numberFormat: '#,##0.0 EUR' }
+    cellStyles: { fontColor: '#0000FF', backgroundColor: '#E6F2FF', numberFormat: '#,##0.0" €"' }
   },
   input_usd: {
     cellStyles: { fontColor: '#0000FF', backgroundColor: '#E6F2FF', numberFormat: '$#,##0.0' }
@@ -166,7 +166,7 @@ const STYLE_PRESETS = Object.freeze({
     cellStyles: { fontColor: '#000000', backgroundColor: '#FFFFFF', numberFormat: '#,##0' }
   },
   formula_eur: {
-    cellStyles: { fontColor: '#000000', backgroundColor: '#FFFFFF', numberFormat: '#,##0.0 EUR' }
+    cellStyles: { fontColor: '#000000', backgroundColor: '#FFFFFF', numberFormat: '#,##0.0" €"' }
   },
   formula_usd: {
     cellStyles: { fontColor: '#000000', backgroundColor: '#FFFFFF', numberFormat: '$#,##0.0' }
@@ -179,7 +179,7 @@ const STYLE_PRESETS = Object.freeze({
     cellStyles: { bold: true, fontColor: '#000000', backgroundColor: '#F2F2F2', numberFormat: '0.0%' }
   },
   output_eur: {
-    cellStyles: { bold: true, fontColor: '#000000', backgroundColor: '#F2F2F2', numberFormat: '#,##0.0 EUR' }
+    cellStyles: { bold: true, fontColor: '#000000', backgroundColor: '#F2F2F2', numberFormat: '#,##0.0" €"' }
   },
   output_usd: {
     cellStyles: { bold: true, fontColor: '#000000', backgroundColor: '#F2F2F2', numberFormat: '$#,##0.0' }
@@ -363,7 +363,9 @@ function retrieveSnipped(fromId, search, maxChars = 4000) {
 
 /* ---------- Load System Prompt from file (variant-aware) ---------- */
 const PROMPT_VARIANTS = {
-  default: 'system-prompt-ib-grade.md',
+  default: 'system-prompt-har.md',
+  har: 'system-prompt-har.md',
+  legacy: 'system-prompt-ib-grade.md',
   fast: 'system-prompt-ib-fast.md',
   analyst: 'system-prompt-analyst.md',
   copilot: 'system-prompt-copilot.md'
@@ -391,55 +393,16 @@ const { updateInstructions, getInstructionsForPrompt } = require('../utils/instr
 const DEFAULT_PROMPT_VARIANT = process.env.AGENT_PROMPT_VARIANT || 'default';
 let AGENT_SYSTEM_PROMPT = loadPromptVariant(DEFAULT_PROMPT_VARIANT);
 
-/* Common output format suffix appended to ANY variant */
-const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nOUTPUT FORMAT: Respond with a JSON object containing:\n{\n  "thought": "Your reasoning about what to do next",\n  "tool": "tool_name",\n  "params": { ...tool parameters... }\n}\n\nIMPORTANT: Call exactly one tool per response. The only way to do multiple things in one iteration is the parallel_calls tool, which fans out up to 8 INDEPENDENT read-only calls (reads, OpenBB fetches, bundles) in parallel. Use parallel_calls whenever you would otherwise emit multiple consecutive read-only tool calls — it cuts those N iterations down to 1. Mutations and writes still run sequentially, one per iteration.\n\nEXCEL AGENT WORKFLOW:\n- For complex workbook work, inspect the workbook first, build_workbook_graph for multi-sheet dependency context, create a brief task list, then execute in small visible chunks.\n- Prefer set_cell_range for each logical section instead of many single-cell writes.\n- **BATCH RULE (critical for speed):** when you are about to write to 2+ different sheets or 2+ different sections, you MUST use bulk_set_cell_ranges with all of them in a single call instead of consecutive set_cell_range calls. Same rule for formatting: 2+ formats → bulk_set_format. Issuing N consecutive single-write tools when bulk_* would have worked is the #1 source of slow runs.
-- **SPEED RULE (aggressive):** aim to finish ANY task in ≤3 non-read iterations after the initial inspection. Count your intended writes before starting — if you count more than 3 distinct write sections, consolidate them into bulk_set_cell_ranges. A financial model (6 sheets, 120 cells) should ship in 2-3 bulk calls, not 12 individual ones.\n- **ATOMIC WRITE+FORMAT (critical for quality):** every write MUST carry its formatting in the same call via the per-cell \`style_preset\` field — one of: header, subheader, table_header, section, label, input, input_pct, input_int, input_eur, input_usd, formula, formula_pct, formula_int, formula_eur, formula_usd, output, output_pct, output_eur, output_usd, output_multiple, output_per_share, total, subtotal, internal_link, external_link, check_ok, check_warn, check_error, scenario_base, scenario_upside, scenario_downside, currency, percent, multiple, per_share, date, year, assumption. Splitting "first write, then format in a separate pass" is forbidden: in production the separate format pass routinely never lands and the output looks unstyled. Example: \`{ "B5": { "formula": "=SUM(B2:B4)", "style_preset": "total" } }\`. Use cellStyles on top of style_preset only for one-off overrides.\n- **INSTITUTIONAL COLOR CODING (Goldman/JPMorgan standard — MANDATORY):**
-  - Blue font (#0000FF) on light-blue bg (#E6F2FF) = hardcoded INPUTS users can change (use input* presets).
-  - Black font (#000000) on white bg (#FFFFFF) = FORMULAS and calculations (use formula* presets).
-  - Green font (#008000) = cross-sheet INTERNAL LINKS (use internal_link preset).
-  - Red font (#FF0000) = EXTERNAL LINKS to other files (use external_link preset).
-  - Bold on light-grey bg (#F2F2F2) with top border = TOTALS (use total/subtotal preset).
-  - NEVER swap input/formula colors. Blue on anything not an assumption cell is a defect.
-  - Number formats: $#,##0.0 for currency, 0.0% for percentages, 0.0x for multiples, show zeros as "-".
-- **FORMATTING RULE:** use set_format / bulk_set_format ONLY for the things style_preset can't reach: column widths, freeze panes, full-row top/bottom borders. Numbers, colors, bold belong inside style_preset on the write itself. Never hand-write numberFormat arrays in execute_office_js (a 1x1 matrix on a multi-cell range throws and wastes iterations).\n- **VERIFY FORMATTING:** at the END of the build (not after every sheet), call read_format_summary ONCE on the most important block per sheet to confirm styling landed. If something's off, issue ONE targeted bulk_set_format repair; do NOT loop re-reading. Plain get_cell_ranges does NOT see colors or notes — read_format_summary is the only way.\n- **VERIFY DATA (anti-loop):** when a formula looks wrong, read the BLOCK (e.g. \`A1:F60\`) with get_cell_ranges or get_range_as_csv — not individual cells one at a time. After at MOST 2 verify reads on a section, either fix in one bulk write or call done. Do not keep re-reading the same area.\n- After important writes, verify touched ranges or formulas before calling done.\n- Report only changes you actually made and checked, with sheet names and ranges.\n- Use allow_overwrite:false when exploring a new range. Use allow_overwrite:true only when the user asked to replace or the target sheet was just created by you.\n\nWHEN THE TASK IS COMPLETE: You MUST call the tool "done" with a summary. Do NOT keep calling other tools after the work is finished. Calling "done" ends the session.\n\nPYTHON RULES:\n- execute_python is ONLY for mathematical calculations on data provided as variables in the code string.\n- execute_python does NOT have access to the Excel workbook file system. Do NOT use openpyxl, xlrd, or any file paths like /tmp/current.xlsx, /files/input/workbook.xlsx, etc.\n- To read or write Excel, always use the dedicated Excel tools (set_cell_range, create_sheet, execute_excel_formula, etc.).\n\nDATA RULES:\n- For public-company valuation work, use available finance tools first (OpenBB/Yahoo, treasury/macro tools when relevant), then visible workbook data.\n- Do not invent live market data. If a value is from training memory or a heuristic, label it as an assumption in the workbook.\n- Annotate assumption INPUT cells and key outputs with notes: use the per-cell \"note\" field in set_cell_range / bulk_set_cell_ranges, or bulk_set_notes for many at once. Notes apply as native Excel comments (with an Assumption_Notes sheet fallback) and never block your data writes — add them generously for any externally sourced or assumed value.\n- Search/fetch the web only when the user asks for current source material or when a required data point is unavailable from the provided finance tools.\n\nASK_USER_QUESTION RULES (CRITICAL):\n- The tool ask_user_question is an EMERGENCY BREAK. Use it ONLY when a truly critical piece of information is missing AND cannot be inferred from the workbook context or the user's original request.\n- NEVER ask the user for confirmation before proceeding (e.g. "Should I proceed?", "Continue?", "Go ahead?"). Just DO the work.\n- NEVER ask which sheet to use — the active sheet is provided in the context. If unspecified, default to the active sheet.\n- NEVER ask for a ticker/company name if the user already mentioned it in the original request.\n- NEVER ask for data that is already visible in the workbook context preview. Reference those cells directly.\n- If you are unsure about a minor assumption, make a reasonable default choice and proceed. Do NOT pause the flow.
+/* Common output format suffix appended to ANY variant.
+ *
+ * KEEP THIS SLIM. The HAR-based system prompt is self-contained and authoritative.
+ * Suffix only carries deployment-specific operational reminders, NOT redundant
+ * prescriptions (no "BATCH RULE", no "ATOMIC FORMAT", no "SPEED RULE" — those
+ * are anti-patterns we learned from logs and the HAR analysis).
+ */
+const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nDEPLOYMENT REMINDERS (this Excel add-in only):\n\n- **End with done.** When the task is complete, call \`done\` with a summary. Do NOT keep calling tools after the work is finished.\n- **Python is sandboxed.** \`execute_python\` is for math on data you pass in as variables. It does NOT have filesystem access — no openpyxl, no /tmp/*.xlsx paths. To read/write the workbook, use the Excel tools.\n- **Live data first.** For market/regulatory/news facts that could have changed, verify with finance tools or \`web_search\` before writing assumptions. Training memory is for stable methodology only.\n- **Skills.** \`<available_skills>\` lists loadable instructions. Before a complex build (DCF, LBO, comps, 3-statement, audit), call \`read_skill\` for the relevant one. Max 2 per task.\n- **Citation hint.** When referencing cells in chat, use the citation link format from the prompt: \`[A1:D1](<citation:Sheet!A1:D1>)\`.\n- **Industry add-ins.** If the user mentions Bloomberg/FactSet/CapIQ/Refinitiv, prefer the native formula syntax (BDP/BDH, FDS/FDSH, CIQ/CIQH, TR) per the Custom Function Integrations section of the prompt. On #VALUE! fallback, switch to web_search.\n- **Cannot do.** VBA macros, file downloads, scheduled automations, =TABLE() data tables. Build sensitivity with direct per-cell formulas instead.`;
 
-CITATION RULES:
-- Every action explanation MUST include a citation in the format: [A1:D1](<citation:SheetName!A1:D1>)
-- Citations help the user trust and verify every change.
-
-BULK WRITE RULES:
-- Prefer autoFill and copyFrom over writing cells one-by-one in loops.
-- Example: write formula to C2, then autoFill C2:C100 instead of 99 separate set_cell_range calls.
-- For bulk formulas, use execute_office_js with calculationMode=manual.
-
-INDUSTRY ADD-IN FORMULAS (use when user mentions Bloomberg, CapIQ, Refinitiv):
-- Bloomberg BDH: =BDH("AAPL US Equity","PX_LAST","20240101","20241231")
-- Bloomberg BDP: =BDP("AAPL US Equity","PX_LAST")
-- CapIQ CIQ: =CIQ("AAPL","IQ_TOTAL_REV")
-- Refinitiv TR: =TR("AAPL.O","TR.Revenue")
-
-LIVE DATA POLICY:
-- API/tool calls are cheap compared with wrong spreadsheet analysis. When a requested fact, market input, company figure, regulation, management detail, pricing, filing, rate, benchmark, or news item could have changed, verify it with external tools before writing assumptions or formulas.
-- Prefer structured finance tools for standardized market and statement data, and use web_search/web_fetch to cross-check, find source documents, current news, investor pages, filings, and any data point the finance tools do not clearly cover.
-- Use training memory only for stable concepts, formulas, and modeling methodology. Do not use it as the source for current facts.
-- If sources disagree, prefer official filings, company investor relations, central-bank/government/statistical sources, exchange data, or major data providers, and note the chosen source in the workbook when possible.
-
-SKILLS RULES:
-- <available_skills> are listed at the top of this prompt.
-- BEFORE starting a complex task (DCF, LBO, comps, 3-statement, audit), call read_skill to load the relevant skill instructions.
-- NEVER load more than 2 skills per task.
-- After loading a skill, follow its structure and formulas exactly.
-
-LIMITATIONS — What You Cannot Do:
-- You cannot execute VBA macros.
-- You cannot download files from the internet to the user's disk.
-- You cannot access external APIs or websites except through the provided tools.
-- You cannot create PivotTables or Power Query connections (not yet supported).`;
-
-const ACTIVE_AGENT_SYSTEM_PROMPT_SUFFIX = AGENT_SYSTEM_PROMPT_SUFFIX.replace(
-  '- Search/fetch the web only when the user asks for current source material or when a required data point is unavailable from the provided finance tools.',
-  '- Search/fetch the web whenever current source material can improve accuracy, especially for mutable market, company, regulatory, pricing, filing, rate, benchmark, or news inputs.'
-);
+const ACTIVE_AGENT_SYSTEM_PROMPT_SUFFIX = AGENT_SYSTEM_PROMPT_SUFFIX;
 
 AGENT_SYSTEM_PROMPT += ACTIVE_AGENT_SYSTEM_PROMPT_SUFFIX;
 
@@ -711,7 +674,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'set_cell_range',
-      description: `Write cells using a map of A1 addresses to {value, formula, note, cellStyles, borderStyles, style_preset}. Supports copyToRange for pattern fill. Supports allow_overwrite for overwrite protection. This is the PRIMARY write tool.\n\nFor MULTIPLE sheets / sections in one shot, prefer bulk_set_cell_ranges (1 iteration vs N).\n\n**style_preset** — ATOMIC IB-grade formatting in one token. Use this on EVERY cell instead of splitting "write" and "format" into two iterations. Available presets: header, subheader, table_header, section, label, input, input_pct, input_int, input_eur, input_usd, formula, formula_pct, formula_int, formula_eur, formula_usd, output, output_pct, output_eur, output_usd, output_multiple, output_per_share, total, subtotal, internal_link, external_link, check_ok, check_warn, check_error, scenario_base, scenario_upside, scenario_downside, currency, percent, multiple, per_share, date, year, assumption. You can still add cellStyles on top; they override the preset.\n\nExample (write + format atomic):\n{\n  "sheet": "DCF",\n  "cells": {\n    "A1": { "value": "Revenue Build",            "style_preset": "header" },\n    "A2": { "value": "Base revenue",               "style_preset": "label" },\n    "B2": { "value": 100,                          "style_preset": "input" },\n    "B3": { "value": 0.05,                         "style_preset": "input_pct" },\n    "B4": { "formula": "=B2*(1+B3)",               "style_preset": "formula" },\n    "B5": { "formula": "=SUM(B2:B4)",              "style_preset": "total" }\n  },\n  "copyToRange": "B4:F4",\n  "allow_overwrite": false\n}`,
+      description: `Write cells using a map of A1 addresses to {value, formula, note}. Supports copyToRange for pattern fill and allow_overwrite for overwrite protection. This is the PRIMARY write tool.\n\n**Workflow (preferred):** one logical section per call. Write values/formulas first, verify the returned formula_results, then run formatting in a final bulk_set_format pass. This is faster, more debuggable, and matches the institutional Excel patterns in the system prompt.\n\n**copyToRange** — set the pattern in the first row/col, then copyToRange fills the rest preserving relative/absolute refs. One call instead of N.\n\nExample (values + formulas, no inline formatting):\n{\n  "sheet": "DCF",\n  "cells": {\n    "A1": { "value": "Revenue Build" },\n    "A2": { "value": "Base revenue" },\n    "B2": { "value": 100 },\n    "B3": { "value": 0.05 },\n    "B4": { "formula": "=B2*(1+B3)" },\n    "B5": { "formula": "=SUM(B2:B4)" }\n  },\n  "copyToRange": "B4:F4",\n  "allow_overwrite": false\n}\n\n**Optional** cellStyles / borderStyles / style_preset per cell are still supported for back-compat. Use sparingly: a malformed inline format on a single cell can poison the whole batch with an opaque error. Prefer a separate bulk_set_format pass once data is verified.`,
       // Schema sourced from server/tools/schemas.js (single source of truth, also used by registry.js)
       parameters: SHARED_SCHEMAS.SET_CELL_RANGE
     }
@@ -720,7 +683,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'bulk_set_cell_ranges',
-      description: `Write MANY independent ranges (across the same or different sheets) in ONE iteration. Each entry has the same shape as a set_cell_range call. Use this when you would otherwise issue N consecutive set_cell_range calls — typical pattern when populating multiple sections of a model (Assumptions + Sources&Uses + Debt Schedule + ...). Saves N-1 LLM round-trips. Hard cap 16 writes per call.\n\nEach cell spec supports the same style_preset tag as set_cell_range (header/input/formula/total/percent/date/...). USE IT — atomic write+format is much cheaper than write-then-format.\n\nExample (3 sheets, fully formatted in 1 iteration):\n{\n  "writes": [\n    { "sheet": "Assumptions", "cells": {\n        "A1": { "value": "Driver",            "style_preset": "header" },\n        "B1": { "value": "Value",             "style_preset": "header" },\n        "A2": { "value": "Revenue growth %",  "style_preset": "label" },\n        "B2": { "value": 0.08,                 "style_preset": "input_pct" }\n    } },\n    { "sheet": "Sources & Uses", "cells": {\n        "A1": { "value": "Sources",            "style_preset": "header" },\n        "A2": { "value": "Equity",             "style_preset": "label" },\n        "B2": { "value": 100,                   "style_preset": "input" },\n        "A3": { "value": "Total Sources",      "style_preset": "label" },\n        "B3": { "formula": "=SUM(B2:B2)",      "style_preset": "total" }\n    } },\n    { "sheet": "Debt Schedule", "cells": {\n        "A1": { "value": "Year",               "style_preset": "year" }\n    }, "copyToRange": "A2:A6" }\n  ]\n}\n\nEach write may include copyToRange and allow_overwrite, identical to set_cell_range semantics. Failures on individual writes do NOT abort the batch; they surface under "errors" in the result.`,
+      description: `Write MANY independent ranges (same or different sheets) in ONE iteration. Each entry has the same shape as set_cell_range. Use when sections are tightly coupled (e.g., Assumptions feeding a Driver sheet) and you would otherwise need 2-3 sequential calls. Hard cap 16 entries.\n\n**When NOT to bulk:** if sections are independent and the user benefits from seeing them appear incrementally, prefer separate set_cell_range calls per section — visible progress beats a 1-call payload that completes in silence.\n\n**Formatting:** as with set_cell_range, prefer to write values/formulas here, then apply formatting in a separate bulk_set_format pass after the data is verified. style_preset/cellStyles per cell are accepted for back-compat but discouraged.\n\nExample (3 coupled sections, no inline formatting):\n{\n  "writes": [\n    { "sheet": "Assumptions", "cells": {\n        "A1": { "value": "Driver" }, "B1": { "value": "Value" },\n        "A2": { "value": "Revenue growth %" }, "B2": { "value": 0.08 }\n    } },\n    { "sheet": "Sources & Uses", "cells": {\n        "A1": { "value": "Sources" },\n        "A2": { "value": "Equity" }, "B2": { "value": 100 },\n        "A3": { "value": "Total Sources" }, "B3": { "formula": "=SUM(B2:B2)" }\n    } },\n    { "sheet": "Debt Schedule", "cells": {\n        "A1": { "value": "Year" }\n    }, "copyToRange": "A2:A6" }\n  ]\n}\n\nEach write may include copyToRange and allow_overwrite, identical to set_cell_range. Failures on individual writes do NOT abort the batch; they surface under "errors" in the result.`,
       parameters: {
         type: 'object',
         required: ['writes'],
