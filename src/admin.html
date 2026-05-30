@@ -8,156 +8,113 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
   <style>
+    :root { --bg:#0b0e11; --surface:rgba(255,255,255,0.02); --border:rgba(255,255,255,0.06); --text:#c8ccd0; --muted:rgba(255,255,255,0.35); --amber:#f0a040; --green:#26c97d; --red:#f87171; --blue:#3388aa; }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: 'DM Sans', system-ui, sans-serif; background: #0b0e11; color: #c8ccd0;
-      min-height: 100vh; padding: 28px;
-    }
-    body::before {
-      content: ''; position: fixed; inset: 0; z-index: 0; pointer-events: none;
-      background-image:
-        linear-gradient(rgba(255,255,255,0.012) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255,255,255,0.012) 1px, transparent 1px);
-      background-size: 24px 24px;
-    }
+    body { font-family:'DM Sans',system-ui,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; padding:24px; }
+    body::before { content:''; position:fixed; inset:0; z-index:0; pointer-events:none;
+      background-image: linear-gradient(rgba(255,255,255,0.012) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.012) 1px, transparent 1px); background-size:24px 24px; }
 
-    header { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; margin-bottom: 28px; }
-    header h1 {
-      font-family: 'JetBrains Mono', monospace; font-size: 16px; font-weight: 500;
-      color: #f0a040; letter-spacing: 1px;
-    }
-    header h1 span { color: rgba(240,160,64,0.35); margin: 0 4px; }
-    .refresh-btn {
-      padding: 6px 16px; background: transparent; border: 1px solid rgba(255,255,255,0.08);
-      color: rgba(255,255,255,0.45); font-size: 11px; border-radius: 4px; cursor: pointer;
-      font-family: 'JetBrains Mono', monospace; letter-spacing: 0.5px; transition: all 0.2s;
-    }
-    .refresh-btn:hover { border-color: rgba(255,255,255,0.2); color: rgba(255,255,255,0.7); }
+    /* Login */
+    #loginPanel { display:none; position:fixed; inset:0; z-index:9999; background:var(--bg); flex-direction:column; align-items:center; justify-content:center; gap:16px; }
+    .login-card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:40px 36px; width:100%; max-width:360px; text-align:center; }
+    .login-card .logo { font-family:'JetBrains Mono',monospace; font-size:18px; color:var(--amber); letter-spacing:1px; margin-bottom:6px; }
+    .login-card .subtitle { color:var(--muted); font-size:12px; margin-bottom:24px; }
+    .login-card input { width:100%; padding:10px 14px; background:rgba(255,255,255,0.03); border:1px solid var(--border); border-radius:8px; color:#e8ecf0; font-size:13px; margin-bottom:10px; outline:none; transition:border-color .2s; }
+    .login-card input:focus { border-color:rgba(255,255,255,0.18); }
+    .login-card button { width:100%; padding:10px; background:var(--amber); border:none; border-radius:8px; color:#0b0e11; font-weight:600; font-size:13px; cursor:pointer; margin-top:6px; transition:opacity .2s; }
+    .login-card button:hover { opacity:.9; }
+    .login-error { color:var(--red); font-size:12px; margin-top:10px; min-height:18px; }
 
-    .kpis { position: relative; z-index: 1; display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
-    .kpi {
-      background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);
-      border-radius: 8px; padding: 18px 20px;
-    }
-    .kpi .label {
-      font-size: 9px; font-weight: 600; color: rgba(255,255,255,0.25);
-      text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 8px;
-    }
-    .kpi .value {
-      font-family: 'JetBrains Mono', monospace; font-size: 28px; font-weight: 600;
-      color: #e8ecf0;
-    }
-    .kpi .value.amber { color: #f0a040; }
-    .kpi .value.red { color: #f87171; }
-    .kpi .value.green { color: #26c97d; }
-    .kpi .subvalue {
-      margin-top: 6px; font-size: 10px; color: rgba(255,255,255,0.25);
-      font-family: 'JetBrains Mono', monospace;
-    }
+    /* Header */
+    header { position:relative; z-index:1; display:flex; align-items:center; justify-content:space-between; margin-bottom:20px; }
+    header .brand { font-family:'JetBrains Mono',monospace; font-size:15px; color:var(--amber); letter-spacing:1px; }
+    header .brand span { color:rgba(240,160,64,0.35); margin:0 3px; }
+    .status-dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--green); margin-right:6px; animation:pulse 2s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+    .refresh-btn { padding:5px 14px; background:transparent; border:1px solid var(--border); color:var(--muted); font-size:11px; border-radius:6px; cursor:pointer; font-family:'JetBrains Mono',monospace; letter-spacing:.5px; transition:all .2s; }
+    .refresh-btn:hover { border-color:rgba(255,255,255,0.2); color:rgba(255,255,255,.7); }
 
-    .charts { position: relative; z-index: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 24px; }
-    .chart-box {
-      background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);
-      border-radius: 8px; padding: 20px; height: 280px;
-    }
-    .chart-box canvas { max-height: 220px; }
-    .chart-box h3 {
-      font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 500;
-      color: rgba(255,255,255,0.25); text-transform: uppercase; letter-spacing: 1px;
-      margin-bottom: 16px;
-    }
+    /* KPIs */
+    .kpis { position:relative; z-index:1; display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-bottom:16px; }
+    .kpi { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:14px 16px; }
+    .kpi .label { font-size:9px; font-weight:600; color:rgba(255,255,255,0.22); text-transform:uppercase; letter-spacing:1.5px; margin-bottom:6px; }
+    .kpi .value { font-family:'JetBrains Mono',monospace; font-size:22px; font-weight:600; color:#e8ecf0; }
+    .kpi .value.amber { color:var(--amber); }
+    .kpi .value.red { color:var(--red); }
+    .kpi .value.green { color:var(--green); }
+    .kpi .subvalue { margin-top:4px; font-size:10px; color:rgba(255,255,255,0.22); font-family:'JetBrains Mono',monospace; }
 
-    .table-box {
-      position: relative; z-index: 1;
-      background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05);
-      border-radius: 8px; padding: 20px;
-    }
-    .table-box h3 {
-      font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 500;
-      color: rgba(255,255,255,0.25); text-transform: uppercase; letter-spacing: 1px;
-      margin-bottom: 12px;
-    }
-    table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: 'JetBrains Mono', monospace; }
-    th {
-      text-align: left; padding: 8px 12px; font-size: 9px; font-weight: 500;
-      color: rgba(255,255,255,0.2); text-transform: uppercase; letter-spacing: 1px;
-      border-bottom: 1px solid rgba(255,255,255,0.05);
-    }
-    td {
-      padding: 9px 12px; color: rgba(255,255,255,0.55);
-      border-bottom: 1px solid rgba(255,255,255,0.03);
-    }
-    tr:hover td { color: rgba(255,255,255,0.75); }
-    tbody tr { cursor: pointer; }
-    .status-completed { color: #26c97d; }
-    .status-failed { color: #f87171; }
-    .muted { color: rgba(255,255,255,0.2); }
-    .stack { display: grid; gap: 12px; margin-top: 24px; position: relative; z-index: 1; }
-    .panel-grid {
-      display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.9fr); gap: 12px;
-      align-items: start;
-    }
-    .panel-header {
-      display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px;
-    }
-    .filters {
-      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-    }
-    .filters input, .filters select {
-      padding: 7px 10px; background: rgba(255,255,255,0.025); border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 6px; color: rgba(255,255,255,0.72); font-size: 11px; min-height: 34px;
-      font-family: 'JetBrains Mono', monospace;
-    }
-    .filters input::placeholder { color: rgba(255,255,255,0.25); }
-    .table-scroll { overflow: auto; max-height: 420px; }
-    .trace-row.selected td {
-      background: rgba(240,160,64,0.08); color: rgba(255,255,255,0.9);
-    }
-    .trace-detail {
-      min-height: 420px; display: flex; flex-direction: column;
-    }
-    .trace-meta {
-      font-family: 'JetBrains Mono', monospace; font-size: 10px; color: rgba(255,255,255,0.3);
-      margin-bottom: 12px; line-height: 1.6;
-      white-space: pre-wrap;
-    }
-    .trace-json {
-      flex: 1; overflow: auto; background: rgba(5,8,12,0.72); border: 1px solid rgba(255,255,255,0.05);
-      border-radius: 8px; padding: 14px; color: #cdd8e3; font-size: 11px; line-height: 1.5;
-      font-family: 'JetBrains Mono', monospace;
-      white-space: pre-wrap; word-break: break-word;
-    }
-    .trace-empty {
-      color: rgba(255,255,255,0.25); font-family: 'JetBrains Mono', monospace; font-size: 11px;
-    }
-    .chip {
-      display: inline-flex; align-items: center; border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 999px; padding: 2px 8px; font-size: 10px; color: rgba(255,255,255,0.45);
-      font-family: 'JetBrains Mono', monospace;
-    }
-    .preview-cell {
-      max-width: 320px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    }
+    /* Charts */
+    .charts { position:relative; z-index:1; display:grid; grid-template-columns:1.4fr .6fr; gap:10px; margin-bottom:16px; }
+    .chart-box { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:16px; height:260px; display:flex; flex-direction:column; }
+    .chart-box h3 { font-family:'JetBrains Mono',monospace; font-size:9px; font-weight:500; color:rgba(255,255,255,0.22); text-transform:uppercase; letter-spacing:1px; margin-bottom:10px; }
+    .chart-box canvas { flex:1; min-height:0; }
 
-    @media (max-width: 900px) {
-      .kpis { grid-template-columns: repeat(2, 1fr); }
-      .charts { grid-template-columns: 1fr; }
-      .panel-grid { grid-template-columns: 1fr; }
+    /* Tables */
+    .table-box { position:relative; z-index:1; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:10px; }
+    .table-box h3 { font-family:'JetBrains Mono',monospace; font-size:9px; font-weight:500; color:rgba(255,255,255,0.22); text-transform:uppercase; letter-spacing:1px; margin-bottom:10px; }
+    table { width:100%; border-collapse:collapse; font-size:11px; font-family:'JetBrains Mono',monospace; }
+    th { text-align:left; padding:7px 10px; font-size:9px; font-weight:500; color:rgba(255,255,255,0.22); text-transform:uppercase; letter-spacing:1px; border-bottom:1px solid rgba(255,255,255,0.05); cursor:pointer; user-select:none; }
+    th:hover { color:rgba(255,255,255,0.45); }
+    th.sort-asc::after { content:' ▲'; }
+    th.sort-desc::after { content:' ▼'; }
+    td { padding:8px 10px; color:rgba(255,255,255,0.6); border-bottom:1px solid rgba(255,255,255,0.03); }
+    tbody tr { cursor:pointer; transition:background .15s; }
+    tbody tr:hover { background:rgba(255,255,255,0.025); }
+    tbody tr:hover td { color:rgba(255,255,255,0.85); }
+    .muted { color:rgba(255,255,255,0.25); }
+    .table-scroll { overflow:auto; max-height:340px; }
+
+    /* Badges */
+    .badge { display:inline-flex; align-items:center; border-radius:4px; padding:1px 7px; font-size:10px; font-family:'JetBrains Mono',monospace; }
+    .badge-completed { background:rgba(38,201,125,0.1); color:var(--green); border:1px solid rgba(38,201,125,0.15); }
+    .badge-failed { background:rgba(248,113,113,0.1); color:var(--red); border:1px solid rgba(248,113,113,0.15); }
+    .badge-planning { background:rgba(51,136,170,0.1); color:var(--blue); border:1px solid rgba(51,136,170,0.15); }
+    .badge-admin { background:rgba(240,160,64,0.1); color:var(--amber); border:1px solid rgba(240,160,64,0.15); }
+    .badge-free { background:rgba(255,255,255,0.04); color:var(--muted); border:1px solid rgba(255,255,255,0.08); }
+
+    .chip { display:inline-flex; align-items:center; border:1px solid rgba(255,255,255,0.08); border-radius:999px; padding:2px 8px; font-size:10px; color:rgba(255,255,255,0.45); font-family:'JetBrains Mono',monospace; }
+
+    /* Panels */
+    .panel-grid { display:grid; grid-template-columns:minmax(0,1.4fr) minmax(300px,0.9fr); gap:10px; align-items:start; }
+    .panel-header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
+    .filters { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+    .filters input, .filters select { padding:6px 9px; background:rgba(255,255,255,0.025); border:1px solid rgba(255,255,255,0.08); border-radius:6px; color:rgba(255,255,255,0.72); font-size:11px; min-height:30px; font-family:'JetBrains Mono',monospace; }
+    .filters input::placeholder { color:rgba(255,255,255,0.25); }
+    .trace-detail { min-height:320px; display:flex; flex-direction:column; }
+    .trace-meta { font-family:'JetBrains Mono',monospace; font-size:10px; color:rgba(255,255,255,0.3); margin-bottom:10px; line-height:1.6; white-space:pre-wrap; }
+    .trace-json { flex:1; overflow:auto; background:rgba(5,8,12,0.72); border:1px solid rgba(255,255,255,0.05); border-radius:6px; padding:12px; color:#cdd8e3; font-size:11px; line-height:1.5; font-family:'JetBrains Mono',monospace; white-space:pre-wrap; word-break:break-word; }
+    .trace-empty { color:rgba(255,255,255,0.25); font-family:'JetBrains Mono',monospace; font-size:11px; }
+    .trace-row.selected td { background:rgba(240,160,64,0.06); color:rgba(255,255,255,0.9); }
+    .preview-cell { max-width:280px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+    @media (max-width: 1000px) {
+      .kpis { grid-template-columns:repeat(2,1fr); }
+      .charts { grid-template-columns:1fr; }
+      .panel-grid { grid-template-columns:1fr; }
     }
   </style>
 </head>
 <body>
-<div id="loginPanel" style="display:none;position:fixed;inset:0;z-index:9999;background:#0b0e11;flex-direction:column;align-items:center;justify-content:center;font-family:'DM Sans',system-ui,sans-serif;gap:14px;">
-  <div style="font-family:'JetBrains Mono',monospace;font-size:20px;color:#f0a040;margin-bottom:4px;">excel<span style="color:rgba(240,160,64,0.35)">·</span>ai<span style="color:rgba(240,160,64,0.35)">/</span>admin</div>
-  <div style="color:rgba(255,255,255,0.35);font-size:13px;margin-bottom:12px;">Sign in to access the admin dashboard</div>
-  <input type="email" id="loginEmail" placeholder="Email" style="padding:10px 14px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:6px;color:#e8ecf0;font-size:13px;min-width:260px;font-family:'DM Sans',system-ui,sans-serif;outline:none;">
-  <input type="password" id="loginPassword" placeholder="Password" style="padding:10px 14px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:6px;color:#e8ecf0;font-size:13px;min-width:260px;font-family:'DM Sans',system-ui,sans-serif;outline:none;">
-  <button onclick="doLogin()" style="padding:10px 20px;background:#f0a040;border:none;border-radius:6px;color:#0b0e11;font-weight:600;font-size:13px;cursor:pointer;font-family:'DM Sans',system-ui,sans-serif;letter-spacing:0.5px;min-width:260px;">Sign In</button>
-  <div id="loginError" style="color:#f87171;font-size:12px;min-height:18px;"></div>
+
+<div id="loginPanel">
+  <div class="login-card">
+    <div class="logo">excel<span>·</span>ai<span>/</span>admin</div>
+    <div class="subtitle">Sign in to access the admin dashboard</div>
+    <input type="email" id="loginEmail" placeholder="Email" value="demo@excelai.test">
+    <input type="password" id="loginPassword" placeholder="Password" value="Demo1234!">
+    <button onclick="doLogin()">Sign In</button>
+    <div class="login-error" id="loginError"></div>
+  </div>
 </div>
-<div id="appPanel">
+
+<div id="appPanel" style="display:none">
   <header>
-    <h1>excel<span>·</span>ai<span>/</span>admin</h1>
+    <div style="display:flex;align-items:center;gap:10px">
+      <div class="brand">excel<span>·</span>ai<span>/</span>admin</div>
+      <span class="status-dot" id="connDot"></span>
+      <span style="font-size:10px;color:rgba(255,255,255,0.25);font-family:'JetBrains Mono',monospace" id="connLabel">live</span>
+    </div>
     <button class="refresh-btn" onclick="loadAll()">⟳ Refresh</button>
   </header>
 
@@ -194,14 +151,18 @@
   </div>
 
   <div class="table-box">
-    <h3>Recent turns</h3>
-    <table>
-      <thead><tr><th>User</th><th>Status</th><th>Tasks</th><th>Actions</th><th>Latency</th><th>Created</th></tr></thead>
-      <tbody id="recentTurns"></tbody>
-    </table>
+    <div class="panel-header">
+      <h3>Recent turns</h3>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>User</th><th>Status</th><th>Tasks</th><th>Actions</th><th>Latency</th><th>Created</th></tr></thead>
+        <tbody id="recentTurns"></tbody>
+      </table>
+    </div>
   </div>
 
-  <div class="table-box" style="margin-top:24px">
+  <div class="table-box">
     <div class="panel-header">
       <h3>Users</h3>
       <div class="filters">
@@ -209,109 +170,110 @@
       </div>
     </div>
     <div class="table-scroll">
-      <table>
-        <thead><tr><th>User</th><th>Plan</th><th>Turns</th><th>Today</th><th>Tokens In</th><th>Tokens Out</th><th>Avg Latency</th><th>Errors</th><th>Est. Cost</th><th>Joined</th></tr></thead>
+      <table id="usersTableRoot">
+        <thead><tr><th onclick="sortUsers('email')">User</th><th onclick="sortUsers('plan')">Plan</th><th onclick="sortUsers('totalTurns')">Turns</th><th onclick="sortUsers('turnsToday')">Today</th><th onclick="sortUsers('tokensIn')">Tokens In</th><th onclick="sortUsers('tokensOut')">Tokens Out</th><th onclick="sortUsers('avgLatencyMs')">Avg Latency</th><th onclick="sortUsers('errorTurns')">Errors</th><th onclick="sortUsers('estimatedCost')">Est. Cost</th><th onclick="sortUsers('createdAt')">Joined</th></tr></thead>
         <tbody id="usersTable"></tbody>
       </table>
     </div>
   </div>
 
-  <div class="stack">
-    <div class="panel-grid">
-      <div class="table-box">
-        <div class="panel-header">
-          <h3>Recent LLM traces</h3>
-          <div class="filters">
-            <input type="date" id="traceSince">
-            <select id="traceEvent">
-              <option value="">all events</option>
-              <option value="llm.request">llm.request</option>
-              <option value="llm.response">llm.response</option>
-              <option value="llm.error">llm.error</option>
-              <option value="llm.fallback">llm.fallback</option>
-            </select>
-            <select id="traceRole">
-              <option value="">all roles</option>
-              <option value="planner">planner</option>
-              <option value="triage">triage</option>
-              <option value="architect">architect</option>
-              <option value="builder_hard">builder_hard</option>
-              <option value="builder_analytical">builder_analytical</option>
-              <option value="builder_structural">builder_structural</option>
-              <option value="critic">critic</option>
-              <option value="refiner">refiner</option>
-              <option value="narrator">narrator</option>
-              <option value="schema_infer">schema_infer</option>
-              <option value="verifier">verifier</option>
-            </select>
-            <select id="traceAttempt">
-              <option value="">all attempts</option>
-              <option value="primary">primary</option>
-              <option value="fallback">fallback</option>
-            </select>
-            <input type="text" id="traceTurn" placeholder="turn id">
-            <button class="refresh-btn" onclick="loadTraceViews()">Apply</button>
-          </div>
-        </div>
-        <div class="table-scroll">
-          <table>
-            <thead><tr><th>Time</th><th>Event</th><th>Role</th><th>Attempt</th><th>Label</th><th>Turn</th><th>Latency</th><th>Preview</th></tr></thead>
-            <tbody id="recentTraces"></tbody>
-          </table>
+  <div class="panel-grid">
+    <div class="table-box">
+      <div class="panel-header">
+        <h3>Recent LLM traces</h3>
+        <div class="filters">
+          <input type="date" id="traceSince">
+          <select id="traceEvent">
+            <option value="">all events</option>
+            <option value="llm.request">llm.request</option>
+            <option value="llm.response">llm.response</option>
+            <option value="llm.error">llm.error</option>
+            <option value="llm.fallback">llm.fallback</option>
+          </select>
+          <select id="traceRole">
+            <option value="">all roles</option>
+            <option value="planner">planner</option>
+            <option value="triage">triage</option>
+            <option value="architect">architect</option>
+            <option value="builder_hard">builder_hard</option>
+            <option value="builder_analytical">builder_analytical</option>
+            <option value="builder_structural">builder_structural</option>
+            <option value="critic">critic</option>
+            <option value="refiner">refiner</option>
+            <option value="narrator">narrator</option>
+            <option value="schema_infer">schema_infer</option>
+            <option value="verifier">verifier</option>
+          </select>
+          <select id="traceAttempt">
+            <option value="">all attempts</option>
+            <option value="primary">primary</option>
+            <option value="fallback">fallback</option>
+          </select>
+          <input type="text" id="traceTurn" placeholder="turn id">
+          <button class="refresh-btn" onclick="loadTraceViews()">Apply</button>
         </div>
       </div>
-
-      <div class="table-box trace-detail">
-        <div class="panel-header">
-          <h3>Trace detail</h3>
-          <span class="chip" id="traceDetailChip">select a trace</span>
-        </div>
-        <div class="trace-meta" id="traceMeta">No trace selected.</div>
-        <pre class="trace-json" id="traceDetail">Click a row to inspect sanitized prompt / response payloads.</pre>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Time</th><th>Event</th><th>Role</th><th>Attempt</th><th>Label</th><th>Turn</th><th>Latency</th><th>Preview</th></tr></thead>
+          <tbody id="recentTraces"></tbody>
+        </table>
       </div>
     </div>
 
-    <div class="panel-grid">
-      <div class="table-box">
-        <h3>LLM routing by role</h3>
-        <div class="table-scroll">
-          <table>
-            <thead><tr><th>Role</th><th>Requests</th><th>Responses</th><th>Errors</th><th>Avg latency</th></tr></thead>
-            <tbody id="llmRoleSummary"></tbody>
-          </table>
-        </div>
+    <div class="table-box trace-detail">
+      <div class="panel-header">
+        <h3>Trace detail</h3>
+        <span class="chip" id="traceDetailChip">select a trace</span>
       </div>
+      <div class="trace-meta" id="traceMeta">No trace selected.</div>
+      <pre class="trace-json" id="traceDetail">Click a row to inspect sanitized prompt / response payloads.</pre>
+    </div>
+  </div>
 
-      <div class="table-box">
-        <h3>Agent loop outcome reasons</h3>
-        <div class="table-scroll">
-          <table>
-            <thead><tr><th>Reason</th><th>Count</th><th>Escalated</th><th>Avg iter</th></tr></thead>
-            <tbody id="runtimeReasonSummary"></tbody>
-          </table>
-        </div>
+  <div class="panel-grid">
+    <div class="table-box">
+      <h3>LLM routing by role</h3>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Role</th><th>Requests</th><th>Responses</th><th>Errors</th><th>Avg latency</th></tr></thead>
+          <tbody id="llmRoleSummary"></tbody>
+        </table>
       </div>
     </div>
 
     <div class="table-box">
-      <div class="panel-header">
-        <h3>Recent agent loop outcomes</h3>
-        <span class="chip" id="runtimeOutcomesChip">scanning saved turns</span>
-      </div>
+      <h3>Agent loop outcome reasons</h3>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Time</th><th>Status</th><th>Reason</th><th>Iter</th><th>Escalated</th><th>Turn</th></tr></thead>
-          <tbody id="recentRuntimeOutcomes"></tbody>
+          <thead><tr><th>Reason</th><th>Count</th><th>Escalated</th><th>Avg iter</th></tr></thead>
+          <tbody id="runtimeReasonSummary"></tbody>
         </table>
       </div>
     </div>
   </div>
+
+  <div class="table-box">
+    <div class="panel-header">
+      <h3>Recent agent loop outcomes</h3>
+      <span class="chip" id="runtimeOutcomesChip">scanning saved turns</span>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Time</th><th>Status</th><th>Reason</th><th>Iter</th><th>Escalated</th><th>Turn</th></tr></thead>
+        <tbody id="recentRuntimeOutcomes"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
 
 <script>
 const BASE = '/api/admin';
 let h = {};
 let selectedTraceId = null;
 let supabaseClient = null;
+let usersData = [];
+let usersSort = { col: 'totalTurns', dir: 'desc' };
 
 function getStoredToken() {
   const custom = localStorage.getItem('excelai_access_token');
@@ -319,10 +281,7 @@ function getStoredToken() {
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i);
     if (key && key.includes('supabase') && key.includes('auth-token')) {
-      try {
-        const data = JSON.parse(localStorage.getItem(key));
-        return data?.access_token || null;
-      } catch (_) {}
+      try { const data = JSON.parse(localStorage.getItem(key)); return data?.access_token || null; } catch (_) {}
     }
   }
   return null;
@@ -332,45 +291,23 @@ function showLoginPanel() {
   document.getElementById('loginPanel').style.display = 'flex';
   document.getElementById('appPanel').style.display = 'none';
 }
-
 function showApp() {
   document.getElementById('loginPanel').style.display = 'none';
   document.getElementById('appPanel').style.display = 'block';
 }
-
-function showLoginError(msg) {
-  const el = document.getElementById('loginError');
-  if (el) el.textContent = msg || '';
-}
+function showLoginError(msg) { document.getElementById('loginError').textContent = msg || ''; }
 
 async function initAuth() {
   try {
-    const configRes = await fetch('/api/config');
-    const config = await configRes.json();
-    if (!config.supabaseUrl || !config.supabaseAnonKey) {
-      showLoginError('Server config unavailable');
-      return;
-    }
+    const config = await (await fetch('/api/config')).json();
+    if (!config.supabaseUrl || !config.supabaseAnonKey) { showLoginError('Server config unavailable'); return; }
     const { createClient } = window.supabase || {};
-    if (!createClient) {
-      showLoginError('Auth client not loaded');
-      return;
-    }
-    supabaseClient = createClient(config.supabaseUrl, config.supabaseAnonKey, {
-      auth: { autoRefreshToken: true, persistSession: true, detectSessionInUrl: true }
-    });
-  } catch (e) {
-    showLoginError('Failed to load auth config');
-    return;
-  }
-
+    if (!createClient) { showLoginError('Auth client not loaded'); return; }
+    supabaseClient = createClient(config.supabaseUrl, config.supabaseAnonKey, { auth: { autoRefreshToken: true, persistSession: true } });
+  } catch (e) { showLoginError('Failed to load auth config'); return; }
   const tok = getStoredToken();
-  if (tok) {
-    h = { Authorization: `Bearer ${tok}` };
-    tryAdminAccess();
-  } else {
-    showLoginPanel();
-  }
+  if (tok) { h = { Authorization: `Bearer ${tok}` }; tryAdminAccess(); }
+  else showLoginPanel();
 }
 
 async function tryAdminAccess() {
@@ -380,49 +317,35 @@ async function tryAdminAccess() {
       if (r.status === 401 || r.status === 403) {
         showLoginError('Session expired. Please sign in again.');
         localStorage.removeItem('excelai_access_token');
-        showLoginPanel();
-        return;
+        showLoginPanel(); return;
       }
       throw new Error('Server error ' + r.status);
     }
-    showApp();
-    loadAll();
-  } catch (e) {
-    showLoginError('Unable to reach admin API');
-    showLoginPanel();
-  }
+    showApp(); loadAll();
+  } catch (e) { showLoginError('Unable to reach admin API'); showLoginPanel(); }
 }
 
 async function doLogin() {
   const email = document.getElementById('loginEmail').value.trim();
   const password = document.getElementById('loginPassword').value;
-  if (!email || !password) {
-    showLoginError('Email and password required');
-    return;
-  }
+  if (!email || !password) { showLoginError('Email and password required'); return; }
   showLoginError('');
   try {
     const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
-    if (error || !data.session) {
-      showLoginError(error?.message || 'Login failed');
-      return;
-    }
+    if (error || !data.session) { showLoginError(error?.message || 'Login failed'); return; }
     const token = data.session.access_token;
     localStorage.setItem('excelai_access_token', token);
     h = { Authorization: `Bearer ${token}` };
-    showApp();
-    loadAll();
-  } catch (e) {
-    showLoginError(e.message || 'Login error');
-  }
+    showApp(); loadAll();
+  } catch (e) { showLoginError(e.message || 'Login error'); }
 }
 
 document.getElementById('traceSince').value = new Date().toISOString().slice(0, 10);
 
 function showToast(msg, type = 'error') {
-  const color = type === 'error' ? '#f87171' : '#f0a040';
+  const color = type === 'error' ? 'var(--red)' : 'var(--amber)';
   const el = document.createElement('div');
-  el.style.cssText = `position:fixed;bottom:20px;right:20px;z-index:99999;background:rgba(15,18,22,0.96);border:1px solid ${color};color:${color};padding:10px 16px;border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:11px;max-width:320px;word-break:break-word;box-shadow:0 4px 12px rgba(0,0,0,0.4);`;
+  el.style.cssText = `position:fixed;bottom:20px;right:20px;z-index:99999;background:rgba(15,18,22,0.98);border:1px solid ${color};color:${color};padding:10px 16px;border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:11px;max-width:340px;word-break:break-word;box-shadow:0 4px 16px rgba(0,0,0,0.5);`;
   el.textContent = msg;
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 5000);
@@ -431,20 +354,23 @@ function showToast(msg, type = 'error') {
 async function safeFetch(url, opts = {}) {
   try {
     const r = await fetch(url, opts);
-    if (!r.ok) {
-      const payload = await r.json().catch(() => ({}));
-      throw new Error(payload.error || `HTTP ${r.status}`);
-    }
+    if (!r.ok) { const payload = await r.json().catch(() => ({})); throw new Error(payload.error || `HTTP ${r.status}`); }
     return r.json();
-  } catch (e) {
-    showToast(e.message);
-    return null;
-  }
+  } catch (e) { showToast(e.message); return null; }
+}
+
+function setConn(ok) {
+  const dot = document.getElementById('connDot');
+  const lbl = document.getElementById('connLabel');
+  if (!dot) return;
+  dot.style.background = ok ? 'var(--green)' : 'var(--red)';
+  lbl.textContent = ok ? 'live' : 'disconnected';
 }
 
 async function loadStats() {
   const d = await safeFetch(`${BASE}/stats`, { headers: h });
-  if (!d) return;
+  if (!d) { setConn(false); return; }
+  setConn(true);
   document.getElementById('totalUsers').textContent = d.totalUsers ?? 0;
   document.getElementById('turnsToday').textContent = d.turnsToday ?? 0;
   document.getElementById('errors24h').textContent = d.errors24h ?? 0;
@@ -465,18 +391,18 @@ async function loadCharts() {
       datasets: [{
         label: 'completed', data: data.completed || [],
         backgroundColor: chartColors.completed, borderRadius: 2, borderSkipped: false,
-        barPercentage: 0.6, maxBarThickness: 24,
+        barPercentage: 0.6, maxBarThickness: 20,
       }, {
         label: 'failed', data: data.failed || [],
         backgroundColor: chartColors.failed, borderRadius: 2, borderSkipped: false,
-        barPercentage: 0.6, maxBarThickness: 24,
+        barPercentage: 0.6, maxBarThickness: 20,
       }]
     },
     options: {
       responsive: true, maintainAspectRatio: false,
       plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false } },
       scales: {
-        x: { stacked: true, grid: { display: false }, ticks: { color: chartColors.tick, font: { size: 9, family: 'JetBrains Mono' } } },
+        x: { stacked: true, grid: { display: false }, ticks: { color: chartColors.tick, font: { size: 9, family: 'JetBrains Mono' }, maxRotation: 45, minRotation: 45 } },
         y: { stacked: true, grid: { color: chartColors.grid }, ticks: { color: chartColors.tick, font: { size: 9, family: 'JetBrains Mono' } }, beginAtZero: true }
       }
     }
@@ -487,7 +413,7 @@ async function loadCharts() {
   new Chart(document.getElementById('eventsChart'), {
     type: 'doughnut',
     data: {
-      labels: types.map(t => t.type),
+      labels: types.map(t => t.event_type || t.type || 'unknown'),
       datasets: [{ data: types.map(t => t.count), backgroundColor: ['#26c97d','#3388aa','#f0a040','#f87171','#607088','#3a4050'], borderWidth: 0 }]
     },
     options: {
@@ -497,23 +423,34 @@ async function loadCharts() {
   });
 }
 
+function statusBadge(status) {
+  const s = String(status || '');
+  if (s === 'completed') return '<span class="badge badge-completed">completed</span>';
+  if (s === 'error' || s === 'failed') return '<span class="badge badge-failed">failed</span>';
+  if (s === 'planning') return '<span class="badge badge-planning">planning</span>';
+  return `<span class="badge badge-free">${esc(s)}</span>`;
+}
+
+function planBadge(plan) {
+  const p = String(plan || '');
+  if (p === 'admin') return '<span class="badge badge-admin">admin</span>';
+  return '<span class="badge badge-free">free</span>';
+}
+
 async function loadRecentTurns() {
   const turns = await safeFetch(`${BASE}/recent-turns`, { headers: h });
   if (!turns) return;
   document.getElementById('recentTurns').innerHTML = turns.map(t => `
     <tr data-turn-id="${esc(t.id || '')}">
       <td>${esc(t.userEmail?.split('@')[0] || t.userId?.slice(0,6) || '—')}</td>
-      <td class="status-${esc(t.status)}">${esc(t.status)}</td>
+      <td>${statusBadge(t.status)}</td>
       <td>${t.taskCount || 0}</td>
       <td>${t.actionCount || 0}</td>
       <td class="${!t.totalLatencyMs ? 'muted' : ''}">${t.totalLatencyMs ? (t.totalLatencyMs/1000).toFixed(1)+'s' : '—'}</td>
       <td class="muted">${esc(t.createdAt?.slice(0,16) || '—')}</td>
     </tr>`).join('');
   Array.from(document.querySelectorAll('#recentTurns tr[data-turn-id]')).forEach(row => {
-    row.addEventListener('click', () => {
-      document.getElementById('traceTurn').value = row.dataset.turnId || '';
-      loadTraceViews();
-    });
+    row.addEventListener('click', () => { document.getElementById('traceTurn').value = row.dataset.turnId || ''; loadTraceViews(); });
   });
 }
 
@@ -543,30 +480,14 @@ function getRuntimeQuery(limit = 30) {
   return params.toString();
 }
 
-function fmtLatency(ms) {
-  if (!ms) return '—';
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
+function fmtLatency(ms) { if (!ms) return '—'; if (ms < 1000) return `${ms}ms`; return `${(ms/1000).toFixed(1)}s`; }
+function fmtTokens(a,b) { const t=(a||0)+(b||0); return t?t.toLocaleString():'—'; }
+function esc(v) { return String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
-function fmtTokens(promptTokens, completionTokens) {
-  const total = (promptTokens || 0) + (completionTokens || 0);
-  return total ? total.toLocaleString() : '—';
-}
-
-function esc(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function setTraceDetailEmpty(message = 'Click a row to inspect sanitized prompt / response payloads.') {
+function setTraceDetailEmpty(msg='Click a row to inspect sanitized prompt / response payloads.') {
   document.getElementById('traceDetailChip').textContent = 'select a trace';
   document.getElementById('traceMeta').textContent = 'No trace selected.';
-  document.getElementById('traceDetail').textContent = message;
+  document.getElementById('traceDetail').textContent = msg;
 }
 
 async function loadTraceSummary() {
@@ -585,46 +506,25 @@ async function loadTraceSummary() {
 
 function renderRoleSummary(byRole) {
   const tbody = document.getElementById('llmRoleSummary');
-  const rows = Object.entries(byRole || {})
-    .sort((left, right) => (right[1].responses || 0) - (left[1].responses || 0));
-  if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="muted">No LLM traces for the active filters.</td></tr>';
-    return;
-  }
-  tbody.innerHTML = rows.map(([role, bucket]) => `
-    <tr>
-      <td>${esc(role)}</td>
-      <td>${(bucket.requests || 0).toLocaleString()}</td>
-      <td>${(bucket.responses || 0).toLocaleString()}</td>
-      <td>${(bucket.errors || 0).toLocaleString()}</td>
-      <td>${fmtLatency(bucket.avgLatencyMs || 0)}</td>
-    </tr>
+  const rows = Object.entries(byRole || {}).sort((l,r)=>(r[1].responses||0)-(l[1].responses||0));
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="5" class="muted">No LLM traces for the active filters.</td></tr>'; return; }
+  tbody.innerHTML = rows.map(([role,bucket])=>`
+    <tr><td>${esc(role)}</td><td>${(bucket.requests||0).toLocaleString()}</td><td>${(bucket.responses||0).toLocaleString()}</td><td>${(bucket.errors||0).toLocaleString()}</td><td>${fmtLatency(bucket.avgLatencyMs||0)}</td></tr>
   `).join('');
 }
 
 async function loadTraceDetail(traceId) {
   selectedTraceId = traceId;
-  const r = await fetch(`${BASE}/llm-traces/${encodeURIComponent(traceId)}`, { headers: h });
-  if (!r.ok) {
-    setTraceDetailEmpty('Trace detail unavailable.');
-    return;
-  }
-  const d = await r.json();
+  const d = await safeFetch(`${BASE}/llm-traces/${encodeURIComponent(traceId)}`, { headers: h });
+  if (!d) { setTraceDetailEmpty('Trace detail unavailable.'); return; }
   document.getElementById('traceDetailChip').textContent = traceId;
   const first = d.records?.[0] || {};
   document.getElementById('traceMeta').textContent = [
-    `records: ${d.count || 0}`,
-    `turn: ${first.turnId || '—'}`,
-    `phase: ${first.phase || '—'}`,
-    `workflow: ${first.workflow || '—'}`,
-    `label: ${first.label || '—'}`,
-    `role: ${first.role || '—'}`,
-    `attempt: ${first.attempt || '—'}`
+    `records: ${d.count||0}`,`turn: ${first.turnId||'—'}`,`phase: ${first.phase||'—'}`,`workflow: ${first.workflow||'—'}`,
+    `label: ${first.label||'—'}`,`role: ${first.role||'—'}`,`attempt: ${first.attempt||'—'}`
   ].join('\n');
-  document.getElementById('traceDetail').textContent = JSON.stringify(d.records || [], null, 2);
-  document.querySelectorAll('.trace-row').forEach(row => {
-    row.classList.toggle('selected', row.dataset.traceId === traceId);
-  });
+  document.getElementById('traceDetail').textContent = JSON.stringify(d.records||[],null,2);
+  document.querySelectorAll('.trace-row').forEach(row=>row.classList.toggle('selected',row.dataset.traceId===traceId));
 }
 
 async function loadRecentTraces() {
@@ -632,59 +532,39 @@ async function loadRecentTraces() {
   const traces = await safeFetch(`${BASE}/llm-traces?${q}`, { headers: h });
   if (!traces) return;
   const tbody = document.getElementById('recentTraces');
-  tbody.innerHTML = traces.map(t => `
+  tbody.innerHTML = traces.map(t=>`
     <tr class="trace-row" data-trace-id="${esc(t.traceId)}">
-      <td class="muted">${esc(t.ts?.slice(11,19) || '—')}</td>
+      <td class="muted">${esc(t.ts?.slice(11,19)||'—')}</td>
       <td>${esc(t.eventType)}</td>
-      <td>${esc(t.role || '—')}</td>
-      <td>${esc(t.attempt || '—')}</td>
-      <td>${esc(t.label || '—')}</td>
-      <td class="muted">${esc(t.turnId ? t.turnId.slice(0,18) : '—')}</td>
+      <td>${esc(t.role||'—')}</td>
+      <td>${esc(t.attempt||'—')}</td>
+      <td>${esc(t.label||'—')}</td>
+      <td class="muted">${esc(t.turnId?t.turnId.slice(0,18):'—')}</td>
       <td>${fmtLatency(t.latencyMs)}</td>
-      <td class="preview-cell">${esc(t.preview || `${t.messageCount} msgs / ${t.messageChars}c / tokens ${fmtTokens(t.promptTokens, t.completionTokens)}`)}</td>
+      <td class="preview-cell">${esc(t.preview||`${t.messageCount} msgs / ${t.messageChars}c / tokens ${fmtTokens(t.promptTokens,t.completionTokens)}`)}</td>
     </tr>`).join('');
-
-  if (!traces.length) {
-    setTraceDetailEmpty('No matching traces for the active filters.');
-    return;
-  }
-
-  Array.from(tbody.querySelectorAll('.trace-row')).forEach(row => {
-    row.addEventListener('click', () => loadTraceDetail(row.dataset.traceId));
-  });
-
-  const stillVisible = traces.some(t => t.traceId === selectedTraceId);
-  await loadTraceDetail(stillVisible ? selectedTraceId : traces[0].traceId);
+  if (!traces.length) { setTraceDetailEmpty('No matching traces for the active filters.'); return; }
+  Array.from(tbody.querySelectorAll('.trace-row')).forEach(row=>row.addEventListener('click',()=>loadTraceDetail(row.dataset.traceId)));
+  const stillVisible = traces.some(t=>t.traceId===selectedTraceId);
+  await loadTraceDetail(stillVisible?selectedTraceId:traces[0].traceId);
 }
 
-async function loadTraceViews() {
-  await Promise.all([loadTraceSummary(), loadRecentTraces(), loadRuntimeSummary(), loadRecentRuntimeOutcomes()]);
-}
+async function loadTraceViews() { await Promise.all([loadTraceSummary(), loadRecentTraces(), loadRuntimeSummary(), loadRecentRuntimeOutcomes()]); }
 
 async function loadRuntimeSummary() {
   const q = getRuntimeQuery(60);
   const d = await safeFetch(`${BASE}/runtime-outcomes/summary?${q}`, { headers: h });
   if (!d) return;
   renderRuntimeReasonSummary(d);
-  document.getElementById('runtimeOutcomesChip').textContent =
-    `${(d.count || 0).toLocaleString()} loops · escalated ${(d.escalated || 0).toLocaleString()} · avg iter ${d.avgIterations || 0}`;
+  document.getElementById('runtimeOutcomesChip').textContent = `${(d.count||0).toLocaleString()} loops · escalated ${(d.escalated||0).toLocaleString()} · avg iter ${d.avgIterations||0}`;
 }
 
 function renderRuntimeReasonSummary(summary) {
   const tbody = document.getElementById('runtimeReasonSummary');
-  const rows = Object.entries(summary.byReasonCategory || {})
-    .sort((left, right) => (right[1].count || 0) - (left[1].count || 0));
-  if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="muted">No agent loop outcomes in the active window.</td></tr>';
-    return;
-  }
-  tbody.innerHTML = rows.map(([reason, bucket]) => `
-    <tr>
-      <td>${esc(reason)}</td>
-      <td>${(bucket.count || 0).toLocaleString()}</td>
-      <td>${(bucket.escalated || 0).toLocaleString()}</td>
-      <td>${bucket.avgIterations || 0}</td>
-    </tr>
+  const rows = Object.entries(summary.byReasonCategory||{}).sort((l,r)=>(r[1].count||0)-(l[1].count||0));
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="4" class="muted">No agent loop outcomes in the active window.</td></tr>'; return; }
+  tbody.innerHTML = rows.map(([reason,bucket])=>`
+    <tr><td>${esc(reason)}</td><td>${(bucket.count||0).toLocaleString()}</td><td>${(bucket.escalated||0).toLocaleString()}</td><td>${bucket.avgIterations||0}</td></tr>
   `).join('');
 }
 
@@ -693,44 +573,39 @@ async function loadRecentRuntimeOutcomes() {
   const records = await safeFetch(`${BASE}/runtime-outcomes?${q}`, { headers: h });
   if (!records) return;
   const tbody = document.getElementById('recentRuntimeOutcomes');
-  if (!records.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="muted">No agent loop outcomes for the active filters.</td></tr>';
-    return;
-  }
-  tbody.innerHTML = records.map(record => `
-    <tr data-runtime-turn-id="${esc(record.turnId || '')}">
-      <td class="muted">${esc(record.ts?.slice(11,19) || record.updatedAt?.slice(11,19) || '—')}</td>
-      <td>${esc(record.status || '—')}</td>
-      <td>${esc(record.reasonDetail || record.reasonCategory || '—')}</td>
-      <td>${record.iteration ?? '—'}</td>
-      <td>${record.escalated ? 'yes' : 'no'}</td>
-      <td class="muted">${esc(record.turnId ? record.turnId.slice(0,18) : '—')}</td>
-    </tr>
-  `).join('');
-  Array.from(tbody.querySelectorAll('tr[data-runtime-turn-id]')).forEach(row => {
-    row.addEventListener('click', () => {
-      document.getElementById('traceTurn').value = row.dataset.runtimeTurnId || '';
-      loadTraceViews();
-    });
-  });
+  if (!records.length) { tbody.innerHTML = '<tr><td colspan="6" class="muted">No agent loop outcomes for the active filters.</td></tr>'; return; }
+  tbody.innerHTML = records.map(record=>`
+    <tr data-runtime-turn-id="${esc(record.turnId||'')}">
+      <td class="muted">${esc(record.ts?.slice(11,19)||record.updatedAt?.slice(11,19)||'—')}</td>
+      <td>${esc(record.status||'—')}</td>
+      <td>${esc(record.reasonDetail||record.reasonCategory||'—')}</td>
+      <td>${record.iteration??'—'}</td>
+      <td>${record.escalated?'yes':'no'}</td>
+      <td class="muted">${esc(record.turnId?record.turnId.slice(0,18):'—')}</td>
+    </tr>`).join('');
+  Array.from(tbody.querySelectorAll('tr[data-runtime-turn-id]')).forEach(row=>row.addEventListener('click',()=>{
+    document.getElementById('traceTurn').value = row.dataset.runtimeTurnId||''; loadTraceViews();
+  }));
 }
 
 async function loadCosts() {
   const d = await safeFetch(`${BASE}/costs`, { headers: h });
   if (!d) return;
-  const fmt = (n) => n ? `$${n.toFixed(2)}` : '$0.00';
-  document.getElementById('cost24h').textContent = fmt(d['24h']?.totalCost);
-  document.getElementById('cost24hSub').textContent = `${d['24h']?.turns || 0} turns`;
-  document.getElementById('cost7d').textContent = fmt(d['7d']?.totalCost);
-  document.getElementById('cost7dSub').textContent = `${d['7d']?.turns || 0} turns`;
-  document.getElementById('cost30d').textContent = fmt(d['30d']?.totalCost);
-  document.getElementById('cost30dSub').textContent = `${d['30d']?.turns || 0} turns`;
+  const fmtCost = (n) => {
+    if (n === undefined || n === null) return '—';
+    if (n === 0) return '<span style="color:rgba(255,255,255,0.25)">$0.00</span>';
+    return `$${n.toFixed(2)}`;
+  };
+  document.getElementById('cost24h').innerHTML = fmtCost(d['24h']?.totalCost);
+  document.getElementById('cost24hSub').textContent = `${d['24h']?.turns||0} turns`;
+  document.getElementById('cost7d').innerHTML = fmtCost(d['7d']?.totalCost);
+  document.getElementById('cost7dSub').textContent = `${d['7d']?.turns||0} turns`;
+  document.getElementById('cost30d').innerHTML = fmtCost(d['30d']?.totalCost);
+  document.getElementById('cost30dSub').textContent = `${d['30d']?.turns||0} turns`;
   const avg = (d['24h']?.totalCost && d['24h']?.turns) ? (d['24h'].totalCost / d['24h'].turns) : 0;
   document.getElementById('avgCostPerTurn').textContent = avg ? `$${avg.toFixed(3)}` : '—';
   document.getElementById('avgCostSub').textContent = 'last 24h';
 }
-
-let usersData = [];
 
 async function loadUsers() {
   const data = await safeFetch(`${BASE}/users`, { headers: h });
@@ -739,53 +614,45 @@ async function loadUsers() {
   renderUsers();
 }
 
+function sortUsers(col) {
+  if (usersSort.col === col) usersSort.dir = usersSort.dir === 'asc' ? 'desc' : 'asc';
+  else { usersSort.col = col; usersSort.dir = 'desc'; }
+  document.querySelectorAll('#usersTableRoot th').forEach(th => { th.classList.remove('sort-asc','sort-desc'); });
+  const th = document.querySelector(`#usersTableRoot th[onclick="sortUsers('${col}')"]`);
+  if (th) th.classList.add(usersSort.dir==='asc'?'sort-asc':'sort-desc');
+  usersData.sort((a,b)=>{
+    const av = a[col] ?? 0; const bv = b[col] ?? 0;
+    if (typeof av === 'number' && typeof bv === 'number') return usersSort.dir==='asc'?av-bv:bv-av;
+    return usersSort.dir==='asc'?String(av).localeCompare(String(bv)):String(bv).localeCompare(String(av));
+  });
+  renderUsers();
+}
+
 function renderUsers() {
   const filter = document.getElementById('userFilter').value.trim().toLowerCase();
   const tbody = document.getElementById('usersTable');
-  const rows = usersData.filter(u =>
-    !filter ||
-    (u.email || '').toLowerCase().includes(filter) ||
-    (u.id || '').toLowerCase().includes(filter)
-  );
-  if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="10" class="muted">No users match.</td></tr>';
-    return;
-  }
-  tbody.innerHTML = rows.map(u => `
+  const rows = usersData.filter(u => !filter || (u.email||'').toLowerCase().includes(filter) || (u.id||'').toLowerCase().includes(filter));
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="10" class="muted">No users match.</td></tr>'; return; }
+  tbody.innerHTML = rows.map(u=>`
     <tr data-user-id="${esc(u.id)}">
-      <td>${esc(u.email || u.id.slice(0,8))}</td>
-      <td><span class="chip">${esc(u.plan)}</span></td>
+      <td>${esc(u.email||u.id.slice(0,8))}</td>
+      <td>${planBadge(u.plan)}</td>
       <td>${u.totalTurns}</td>
       <td>${u.turnsToday}</td>
-      <td class="muted">${(u.tokensIn || 0).toLocaleString()}</td>
-      <td class="muted">${(u.tokensOut || 0).toLocaleString()}</td>
+      <td class="muted">${(u.tokensIn||0).toLocaleString()}</td>
+      <td class="muted">${(u.tokensOut||0).toLocaleString()}</td>
       <td>${fmtLatency(u.avgLatencyMs)}</td>
-      <td class="${u.errorTurns ? 'status-failed' : 'muted'}">${u.errorTurns}</td>
-      <td>$${u.estimatedCost.toFixed(2)}</td>
-      <td class="muted">${esc(u.createdAt?.slice(0,10) || '—')}</td>
-    </tr>
-  `).join('');
-  Array.from(tbody.querySelectorAll('tr[data-user-id]')).forEach(row => {
-    row.addEventListener('click', () => {
-      const uid = row.dataset.userId;
-      document.getElementById('traceTurn').value = '';
-      // Optional: filter traces by user via turnId list — not supported directly by trace API,
-      // but we could load recent turns for this user. For now just highlight.
-    });
-  });
+      <td class="${u.errorTurns?'status-failed':'muted'}">${u.errorTurns}</td>
+      <td>${u.estimatedCost ? '$'+u.estimatedCost.toFixed(2) : '<span class="muted">—</span>'}</td>
+      <td class="muted">${esc(u.createdAt?.slice(0,10)||'—')}</td>
+    </tr>`).join('');
 }
 
 function loadAll() {
-  loadStats();
-  loadCharts();
-  loadRecentTurns();
-  loadCosts();
-  loadUsers();
-  loadTraceViews();
+  loadStats(); loadCharts(); loadRecentTurns(); loadCosts(); loadUsers(); loadTraceViews();
 }
 
 initAuth();
 </script>
-</div>
 </body>
 </html>

@@ -475,7 +475,18 @@ app.get('/api/admin/users', authenticate, async (req, res) => {
       statsByUser[uid].costSum += estimateCost(t.model || 'unknown', t.tokens_in || 0, t.tokens_out || 0);
     }
 
-    const enriched = users.map(u => {
+    // Fallback: if auth.users is empty, synthesize from distinct turn user_ids
+    let userList = users;
+    if (!userList.length && Object.keys(statsByUser).length > 0) {
+      userList = Object.keys(statsByUser).map(uid => ({
+        id: uid,
+        email: `${uid.slice(0, 8)}@unknown`,
+        app_metadata: { plan: 'free' },
+        created_at: null,
+      }));
+    }
+
+    const enriched = userList.map(u => {
       const s = statsByUser[u.id] || { totalTurns: 0, turnsToday: 0, tokensIn: 0, tokensOut: 0, latencyMsSum: 0, latencyMsCount: 0, errorTurns: 0, costSum: 0 };
       const avgLatencyMs = s.latencyMsCount > 0 ? Math.round(s.latencyMsSum / s.latencyMsCount) : 0;
       return {
