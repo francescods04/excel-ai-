@@ -245,15 +245,23 @@ app.get('/api/admin/stats', authenticate, async (req, res) => {
   try {
     const supabase = require('./supabase/client').getSupabase();
 
-    const [{ count: totalUsersAuth }, { count: turnsToday }, { count: errors24h }, { data: llmCalls }, { data: activeUsers }] = await Promise.all([
-      supabase.from('auth.users').select('*', { count: 'exact', head: true }),
+    // Use auth admin API to get real user count (auth.users table is not queryable from client)
+    let totalUsersAuth = 0;
+    try {
+      const { data: listData } = await supabase.auth.admin.listUsers({ page: 1, perPage: 1 });
+      totalUsersAuth = listData?.total || 0;
+    } catch (_) {
+      // Fallback: count distinct user_ids from turns
+    }
+
+    const [{ count: turnsToday }, { count: errors24h }, { data: llmCalls }, { data: activeUsers }] = await Promise.all([
       supabase.from('turns').select('*', { count: 'exact', head: true }).gte('created_at', new Date().toISOString().slice(0, 10)),
       supabase.from('events').select('*', { count: 'exact', head: true }).eq('event_type', 'turn.failed').gte('ts', new Date(Date.now() - 86400000).toISOString()),
       supabase.from('events').select('tokens_in, tokens_out').eq('event_type', 'llm.response').gte('ts', new Date(Date.now() - 86400000).toISOString()),
       supabase.from('events').select('user_id').gte('ts', new Date(Date.now() - 30 * 86400000).toISOString()).neq('user_id', null),
     ]);
 
-    // Fallback: if auth.users is empty, count distinct user_ids from recent events
+    // Fallback: if auth admin API didn't work, count distinct user_ids from recent events
     const distinctUserIds = new Set((activeUsers || []).map(e => e.user_id));
     const totalUsers = totalUsersAuth || distinctUserIds.size;
 
@@ -317,16 +325,34 @@ app.get('/api/admin/recent-turns', authenticate, async (req, res) => {
   if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
   try {
     const supabase = require('./supabase/client').getSupabase();
-    const { data: turns } = await supabase
+    // Query turns without the user join (avoids FK dependency issues)
+    const { data: turns, error: turnsError } = await supabase
       .from('turns')
-      .select('id, user_id, status, task_count, action_count, total_latency_ms, created_at, user:user_id(email)')
+      .select('id, user_id, status, task_count, action_count, total_latency_ms, created_at')
       .order('created_at', { ascending: false })
       .limit(50);
+    if (turnsError) throw turnsError;
+
+    // Fetch user emails separately for the user_ids we found
+    const userIds = [...new Set((turns || []).map(t => t.user_id).filter(Boolean))];
+    let emailMap = {};
+    if (userIds.length > 0) {
+      try {
+        const { data: users } = await supabase.auth.admin.listUsers({ page: 1, perPage: 1000 });
+        if (users?.users) {
+          for (const u of users.users) {
+            emailMap[u.id] = u.email;
+          }
+        }
+      } catch (_) {
+        // If auth admin list fails, fallback to empty emails
+      }
+    }
 
     res.json((turns || []).map(t => ({
       id: t.id,
       userId: t.user_id,
-      userEmail: t.user?.email,
+      userEmail: emailMap[t.user_id] || null,
       status: t.status,
       taskCount: t.task_count,
       actionCount: t.action_count,
@@ -454,11 +480,23 @@ app.get('/api/admin/users', authenticate, async (req, res) => {
       .limit(50000);
 
     // Pull actual token / latency / cost data from events telemetry (turns often lack these fields)
+    // Order by ts DESC so we get the most recent events first
     const { data: eventStats } = await supabase
       .from('events')
       .select('user_id, session_id, event_type, tokens_in, tokens_out, model, latency_ms')
       .eq('event_type', 'llm.response')
       .gte('ts', new Date(Date.now() - 30 * 86400000).toISOString())
+      .order('ts', { ascending: false })
+      .limit(50000);
+
+    // Also query events that have a direct user_id (most reliable)
+    const { data: eventStatsByUser } = await supabase
+      .from('events')
+      .select('user_id, tokens_in, tokens_out, model, latency_ms')
+      .eq('event_type', 'llm.response')
+      .not('user_id', 'is', null)
+      .gte('ts', new Date(Date.now() - 30 * 86400000).toISOString())
+      .order('ts', { ascending: false })
       .limit(50000);
 
     // Build a map of turnId → user_id from turns so we can resolve legacy events that lack user_id
@@ -485,9 +523,26 @@ app.get('/api/admin/users', authenticate, async (req, res) => {
     }
 
     const { estimateCost } = require('./utils/pricing');
+    // Process events with session_id resolution
     for (const e of (eventStats || [])) {
       let uid = e.user_id;
       if (!uid && e.session_id && turnUserMap[e.session_id]) uid = turnUserMap[e.session_id];
+      if (!uid) continue;
+      if (!statsByUser[uid]) {
+        statsByUser[uid] = { totalTurns: 0, turnsToday: 0, tokensIn: 0, tokensOut: 0, latencyMsSum: 0, latencyMsCount: 0, errorTurns: 0, costSum: 0 };
+      }
+      const s = statsByUser[uid];
+      s.tokensIn += e.tokens_in || 0;
+      s.tokensOut += e.tokens_out || 0;
+      if (e.latency_ms) {
+        s.latencyMsSum += e.latency_ms;
+        s.latencyMsCount += 1;
+      }
+      s.costSum += estimateCost(e.model || 'unknown', e.tokens_in || 0, e.tokens_out || 0);
+    }
+    // Also process events that have a direct user_id (most reliable attribution)
+    for (const e of (eventStatsByUser || [])) {
+      const uid = e.user_id;
       if (!uid) continue;
       if (!statsByUser[uid]) {
         statsByUser[uid] = { totalTurns: 0, turnsToday: 0, tokensIn: 0, tokensOut: 0, latencyMsSum: 0, latencyMsCount: 0, errorTurns: 0, costSum: 0 };
@@ -555,15 +610,18 @@ app.get('/api/admin/costs', authenticate, async (req, res) => {
       // Use events (actual telemetry) instead of turns (which often lack token data)
       const { data: rows } = await supabase
         .from('events')
-        .select('model, tokens_in, tokens_out')
+        .select('model, tokens_in, tokens_out, session_id')
         .eq('event_type', 'llm.response')
         .gte('ts', w.since);
       const usage = (rows || []).map(r => ({ model: r.model || 'unknown', tokens_in: r.tokens_in || 0, tokens_out: r.tokens_out || 0 }));
       const cost = estimateCostBatch(usage);
+      // Count distinct turns from session_id (which stores the turn ID)
+      const distinctTurnIds = new Set((rows || []).map(r => r.session_id).filter(Boolean));
       result[w.key] = {
         totalCost: Number(cost.totalCost.toFixed(4)),
         byModel: Object.fromEntries(Object.entries(cost.byModel).map(([k, v]) => [k, Number(v.toFixed(4))])),
         calls: usage.length,
+        turns: distinctTurnIds.size,
       };
     }
 
