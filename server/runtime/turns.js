@@ -1194,17 +1194,22 @@ function isSafeTask(task) {
 }
 
 function shouldAutoApprovePlan(plan, strategy) {
-  if (process.env.AUTO_APPROVE_ALL === 'true') return true;
-  if (!plan || !Array.isArray(plan.tasks) || plan.tasks.length === 0) return false;
-  // Agent-loop plans are 4 synthetic placeholder tasks — per-action gates apply inside the loop.
-  if (strategy?.mode === 'agent_loop') return true;
-  // Structured plan: auto-approve if no task explicitly demands approval and every task is safe by registry.
-  return plan.tasks.every(task => {
-    if (task.requiresApproval === true) return false;
-    const meta = registry.meta(task.tool);
-    if (meta?.requiresApproval === 'always') return false;
-    return isSafeTask(task);
-  });
+  // Per user feedback (2026-05-30): never gate execution on plan approval —
+  // it interrupts momentum on multi-minute institutional builds and adds no
+  // protection since writes are auto-undoable. Approval gating used to live
+  // here; now it's force-disabled. Override with REQUIRE_PLAN_APPROVAL=true
+  // if you ever need to re-enable per-task safety review.
+  if (process.env.REQUIRE_PLAN_APPROVAL === 'true') {
+    if (!plan || !Array.isArray(plan.tasks) || plan.tasks.length === 0) return false;
+    if (strategy?.mode === 'agent_loop') return true;
+    return plan.tasks.every(task => {
+      if (task.requiresApproval === true) return false;
+      const meta = registry.meta(task.tool);
+      if (meta?.requiresApproval === 'always') return false;
+      return isSafeTask(task);
+    });
+  }
+  return true;
 }
 
 function buildLayoutFromResults(results) {
@@ -1367,7 +1372,8 @@ async function planTurn(turnId) {
     let strategy;
     const triageEnabled = process.env.DISABLE_TRIAGE !== 'true';
     if (triageEnabled && !turn.strategy) {
-      appendLog(turnId, 'Triage AI: classifico complessità del task...', 'info');
+      const triageModelLabel = process.env.DEEPSEEK_FALLBACK_MODEL || 'deepseek-v4-flash';
+      appendLog(turnId, `Triage AI (${triageModelLabel}, thinking=off): classifico complessità del task...`, 'info');
       const triage = await triageObjective({
         objective: turn.objective,
         context: turn.context || {},
@@ -1420,14 +1426,33 @@ async function planTurn(turnId) {
           triage
         };
       } else if (triage.mode === 'single_deep_plan') {
-        strategy = {
-          mode: 'planned_dag',
-          label: 'Deep planned DAG (triage)',
-          reason: triage.reasoning,
-          promptVariant: 'default',
-          allowEscalation: false,
-          triage
-        };
+        // The legacy deep planner runs as a single ~120s+ LLM call followed
+        // by a background DAG executor — same 300s death problem we fixed
+        // for architect. Until it's also stepwise, route single_deep_plan
+        // through agent_loop with a generous iteration budget. agent_loop's
+        // stepwise engine survives Vercel and the bulk tools cover anything
+        // the deep planner would have done in fewer iterations.
+        // Set ALLOW_DEEP_PLAN=true to opt back into the legacy path locally.
+        if (process.env.ALLOW_DEEP_PLAN === 'true') {
+          strategy = {
+            mode: 'planned_dag',
+            label: 'Deep planned DAG (triage)',
+            reason: triage.reasoning,
+            promptVariant: 'default',
+            allowEscalation: false,
+            triage
+          };
+        } else {
+          appendLog(turnId, 'Triage: single_deep_plan → agent_loop fallback (deep planner non sicuro su serverless).', 'info');
+          strategy = chooseTurnStrategy(turn.objective, turn.context, turn.parentTurnId);
+          strategy.mode = 'agent_loop';
+          strategy.label = `Agent loop (deep-plan fallback)`;
+          strategy.reason = `agent_loop fallback for single_deep_plan: ${triage.reasoning}`;
+          strategy.promptVariant = strategy.promptVariant || 'default';
+          strategy.maxIterations = Math.max(strategy.maxIterations || 60, triage.estimated_iterations * 2);
+          strategy.allowEscalation = false;
+          strategy.triage = triage;
+        }
       } else {
         // single_agent: use existing chooser but let triage override max iterations
         strategy = chooseTurnStrategy(turn.objective, turn.context, turn.parentTurnId);

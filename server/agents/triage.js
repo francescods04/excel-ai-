@@ -31,10 +31,20 @@ Given a user objective and the current workbook state, decide:
    that can be built concurrently without conceptual conflicts. False for tightly coupled work
    or simple linear edits.
 
+   STRONG BIAS toward parallelizable=true for multi-sheet financial models. Multi-sheet does
+   NOT mean sequential. Typical financial builds (DCF, LBO, 3-statement, business plans, P&L
+   + cash flow + balance sheet, comps, M&A models) follow a fan-out shape: ONE setup wave
+   (assumptions / drivers / inputs) then EVERY downstream sheet (revenue, COGS, opex, capex,
+   debt, equity, valuation, sensitivity) runs INDEPENDENTLY off those drivers. They are
+   parallel-safe even if they later flow into a final P&L / valuation summary — the summary
+   itself is just one more downstream slice.
+   Only mark parallelizable=false when the whole task is a SINGLE conceptual artifact (one
+   sheet, one waterfall, one schedule) that cannot be cleanly split into independent sections.
+
 3. mode:
    - "single_agent"             — straight agent_loop, fast, small max_iter (use for trivial/moderate)
-   - "architect_then_parallel"  — generate blueprint first, then spawn parallel workers per slice (use for complex/institutional with parallelizable=true)
-   - "single_deep_plan"         — sequential structured DAG planner (complex/institutional NOT parallelizable, or when ordering is strictly required)
+   - "architect_then_parallel"  — generate blueprint first, then spawn parallel workers per slice (DEFAULT for any complex / institutional build with multiple sheets — preferred whenever the work can be sliced)
+   - "single_deep_plan"         — last-resort sequential structured DAG planner. Pick this ONLY if the work truly cannot be sliced. Avoid for any multi-sheet financial model.
 
 4. estimated_iterations: integer 3-80, rough budget for the chosen mode.
 

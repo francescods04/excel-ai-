@@ -1725,22 +1725,33 @@ function normalizeAndValidatePlan(result) {
     const withDepth = applyAnalystDepthDefaults(normalized, result.objective || '');
 
     if (taskMap.has(withDepth.id)) {
-      throw new Error(`Planner ha restituito task duplicato: ${withDepth.id}`);
+      // Duplicate IDs from the LLM: drop the dup instead of aborting the whole plan.
+      logger.warn(`[Planner] Task duplicato scartato: id=${withDepth.id} tool=${withDepth.tool}`);
+      return null;
     }
     if (!withDepth.tool || !KNOWN_TOOLS.has(withDepth.tool)) {
-      throw new Error(`Tool non valido nel piano: ${withDepth.tool || '(mancante)'}`);
+      // Skip tasks with unknown / hallucinated tool names (e.g. "research.web")
+      // instead of aborting the whole plan. The other tasks usually still
+      // form a coherent build.
+      logger.warn(`[Planner] Tool sconosciuto scartato: id=${withDepth.id} tool=${withDepth.tool || '(mancante)'}`);
+      return null;
     }
 
     taskMap.set(withDepth.id, withDepth);
     return withDepth;
-  });
+  }).filter(Boolean);
 
   for (const task of normalizedTasks) {
-    for (const dep of task.deps) {
+    // Drop deps that point at tasks we just skipped (unknown tool / duplicate).
+    // Aborting the whole plan because of one phantom dep is too aggressive —
+    // most plans recover fine with the dangling dep removed.
+    task.deps = task.deps.filter(dep => {
       if (!taskMap.has(dep)) {
-        throw new Error(`Dipendenza sconosciuta nel task ${task.id}: ${dep}`);
+        logger.warn(`[Planner] Dipendenza droppata in ${task.id}: ${dep} (task non esiste — probabilmente saltato per tool sconosciuto).`);
+        return false;
       }
-    }
+      return true;
+    });
 
     if (task.tool === 'excel.applyFormat') {
       if (task.params.planRef && !task.params.fromResult) {

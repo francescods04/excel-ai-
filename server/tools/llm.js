@@ -163,9 +163,14 @@ function readBooleanEnv(name, defaultValue) {
   return defaultValue;
 }
 
+// Bench validated (2026-05-29): flash + no-thinking beat flash + full-thinking
+// across quality (72 vs 60), wall-clock (183s vs 448s) and tokens (13.3M vs
+// 20.1M). Default all roles to thinking-off — re-enable per-role via env if
+// you need it back (PLANNER_THINKING_ENABLED, TRIAGE_THINKING_ENABLED,
+// ARCHITECT_THINKING_ENABLED).
 const PLANNER_THINKING_DEFAULT = readBooleanEnv('PLANNER_THINKING_ENABLED', false);
 const TRIAGE_THINKING_DEFAULT = readBooleanEnv('TRIAGE_THINKING_ENABLED', false);
-const ARCHITECT_THINKING_DEFAULT = readBooleanEnv('ARCHITECT_THINKING_ENABLED', true);
+const ARCHITECT_THINKING_DEFAULT = readBooleanEnv('ARCHITECT_THINKING_ENABLED', false);
 
 /* ---------- Role-based routing ---------- */
 const ROLE_CONFIG = {
