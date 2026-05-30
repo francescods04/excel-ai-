@@ -1396,8 +1396,19 @@ async function planTurn(turnId) {
       // architect run instead of forcing agent_loop. Set
       // ARCHITECT_PARALLEL_STEPWISE=false (or FORCE_AGENT_LOOP=true) to keep
       // forcing agent_loop everywhere — the previous safe default.
-      const FORCE_AGENT_LOOP = process.env.FORCE_AGENT_LOOP === 'true';
-      const ARCHITECT_STEPWISE_ON = process.env.ARCHITECT_PARALLEL_STEPWISE !== 'false';
+      // 2026-05-30: architect_parallel stepwise default OFF after a prod run
+      // exposed an SSE-vs-instance affinity bug. Inside each slice we still
+      // run runAgentLoop server-driven, which uses an in-memory pendingRequests
+      // map for requestClientTool. On Vercel /respond can land on any instance,
+      // so when a slice's RPC lands somewhere other than where it is awaiting,
+      // the wave stalls until WAVE_WALL_TIMEOUT_MS and cascade-fails everything
+      // downstream. agent_loop stepwise has no such map — every iteration is a
+      // pure /step round-trip — so it is instance-safe by construction.
+      // Re-enable architect_parallel with ARCHITECT_PARALLEL_STEPWISE=true once
+      // pendingRequests are durable (Supabase-backed) or session affinity is
+      // enforced.
+      const FORCE_AGENT_LOOP = process.env.FORCE_AGENT_LOOP !== 'false';
+      const ARCHITECT_STEPWISE_ON = process.env.ARCHITECT_PARALLEL_STEPWISE === 'true';
       const triageWantsParallel = triage.mode === 'architect_then_parallel' && triage.parallelizable !== false;
       const useArchitectStepwise = !FORCE_AGENT_LOOP && ARCHITECT_STEPWISE_ON && triageWantsParallel;
 
