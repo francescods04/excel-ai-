@@ -3,7 +3,8 @@ const {
   LIMITS,
   assertPlanWithinLimits,
   assertActionBatchWithinLimits,
-  allSettledLimit
+  allSettledLimit,
+  estimateActionBatchCells
 } = require('../../server/runtime/safetyLimits');
 const { chooseTurnStrategy, resolvePlannerModelOverride } = require('../../server/runtime/turns');
 const {
@@ -59,6 +60,16 @@ async function main() {
       value: index
     }));
     assert.throws(() => assertActionBatchWithinLimits(actions, { id: 't9' }), /troppe azioni Excel/);
+  });
+
+  await test('action safety rejects excessive write cell volume', () => {
+    const cells = {};
+    for (let i = 0; i < LIMITS.maxActionCellsPerBatch + 1; i++) {
+      cells[`A${i + 1}`] = { value: i };
+    }
+    const actions = [{ type: 'setCellRange', sheet: 'Sheet1', cells }];
+    assert.strictEqual(estimateActionBatchCells(actions), LIMITS.maxActionCellsPerBatch + 1);
+    assert.throws(() => assertActionBatchWithinLimits(actions, { id: 't10' }), /troppe celle Excel/);
   });
 
   await test('turn router prefers fast agent loop for local workbook continuation', () => {

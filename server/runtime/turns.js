@@ -2003,6 +2003,15 @@ async function executeAgentLoopTurn(turnId) {
     if (eventType === 'actions') {
       const actions = Array.isArray(data.actions) ? clone(data.actions) : [];
       if (actions.length === 0) return;
+      try {
+        assertActionBatchWithinLimits(actions, { id: task.id, tool: data.tool || task.tool });
+      } catch (err) {
+        appendLog(turnId, `[loop ${data.iteration || '?'}] Batch Excel bloccato: ${err.message}`, 'error', {
+          taskId: task.id,
+          itemId
+        });
+        throw err;
+      }
       batchIndex += 1;
       collectedActions.push(...actions);
       emitAgentLoopTodos(turnId, 'apply');
@@ -2710,6 +2719,12 @@ function makeArchitectStepProgress(turnId) {
         // batch applier all keep working with no client changes.
         const actions = Array.isArray(inn.actions) ? inn.actions : [];
         if (actions.length > 0) {
+          try {
+            assertActionBatchWithinLimits(actions, { id: data.sliceId, tool: 'architect.slice' });
+          } catch (err) {
+            appendLog(turnId, `[slice ${data.sliceId}] Batch Excel bloccato: ${err.message}`, 'error');
+            throw err;
+          }
           const itemId = (turn && turn.architectSliceItems && turn.architectSliceItems[data.sliceId]) || `slice-${data.sliceId}`;
           if (!Array.isArray(turn.agentCollectedActions)) turn.agentCollectedActions = [];
           turn.agentCollectedActions.push(...actions);
@@ -2898,6 +2913,7 @@ async function stepTurn(turnId, clientResult, clientSeq) {
 
   if (control === 'emit_actions') {
     const actions = Array.isArray(payload.actions) ? payload.actions : [];
+    assertActionBatchWithinLimits(actions, task);
     if (!Array.isArray(turn.agentCollectedActions)) turn.agentCollectedActions = [];
     turn.agentCollectedActions.push(...actions);
     turn.actionCount = (turn.actionCount || 0) + actions.length;

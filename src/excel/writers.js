@@ -23,10 +23,11 @@ function enqueueActions(actions, excelActionQueue, showActionsPreview, hideActio
   if (!batch || batch.actions.length === 0) return;
   batch.onBatchComplete = onBatchComplete || batch.onBatchComplete || null;
   excelActionQueue.push(batch);
-  processQueue(excelActionQueue, showActionsPreview, hideActionsPreview, executeActions);
+  scheduleQueueProcessing(excelActionQueue, showActionsPreview, hideActionsPreview, executeActions);
 }
 
 let isExecutingQueue = false;
+let queueProcessTimer = null;
 const queueIdleResolvers = [];
 
 function resolveQueueIdleIfNeeded(excelActionQueue) {
@@ -63,44 +64,56 @@ async function reportBatchComplete(onBatchComplete, payload) {
   }
 }
 
+function scheduleQueueProcessing(excelActionQueue, showActionsPreview, hideActionsPreview, executeActions) {
+  if (isExecutingQueue || queueProcessTimer) return;
+  queueProcessTimer = setTimeout(() => {
+    queueProcessTimer = null;
+    processQueue(excelActionQueue, showActionsPreview, hideActionsPreview, executeActions);
+  }, QUEUE_DRAIN_WINDOW_MS);
+}
+
 async function processQueue(excelActionQueue, showActionsPreview, hideActionsPreview, executeActions) {
   if (isExecutingQueue) return;
+  if (queueProcessTimer) {
+    clearTimeout(queueProcessTimer);
+    queueProcessTimer = null;
+  }
   isExecutingQueue = true;
   try {
     while (excelActionQueue.length > 0) {
-      const batch = normalizeBatch(excelActionQueue.shift());
-      if (!batch || batch.actions.length === 0) continue;
-      const { actions, meta, onBatchComplete } = batch;
-      let completion = {
-        ok: true,
-        meta,
-        actionCount: actions.length,
-        errorCount: 0,
-        errors: []
-      };
+      const group = takeNextQueueGroup(excelActionQueue);
+      if (!group || group.actions.length === 0) continue;
       try {
-        showActionsPreview(actions);
-        const result = await executeActions(actions);
+        showActionsPreview(group.actions);
+        if (group.batches.length > 1) {
+          addLog(`Coda Excel: drenati ${group.batches.length} eventi in un unico batch (${group.actions.length} azioni, ~${group.cellCount} celle).`);
+        }
+        const result = await executeActions(group.actions);
         const errors = Array.isArray(result?.errors) ? result.errors : [];
         const errorCount = Number(result?.errorCount) || errors.length || 0;
-        completion = {
-          ...completion,
-          actionCount: Number(result?.actionCount) || actions.length,
+        const executionResult = {
+          actionCount: Number(result?.actionCount) || group.actions.length,
           errorCount,
           errors,
           ok: errorCount === 0
         };
+        for (const entry of group.batches) {
+          await reportBatchComplete(entry.batch.onBatchComplete, buildBatchCompletion(entry, executionResult));
+        }
       } catch (err) {
-        completion = {
-          ...completion,
-          ok: false,
-          error: err.message,
-          errorCount: actions.length || 1
-        };
         addLog('Errore azioni Excel: ' + err.message, 'error');
+        for (const entry of group.batches) {
+          await reportBatchComplete(entry.batch.onBatchComplete, {
+            ok: false,
+            meta: entry.batch.meta,
+            actionCount: entry.batch.actions.length,
+            errorCount: entry.batch.actions.length || 1,
+            error: err.message,
+            errors: []
+          });
+        }
       } finally {
         try { hideActionsPreview(); } catch (err) {}
-        await reportBatchComplete(onBatchComplete, completion);
       }
     }
   } finally {
@@ -115,10 +128,18 @@ const MUTATION_TYPES = new Set([
   'setCellValue', 'runFormula', 'fillRange', 'writeRange', 'setCellRange',
   'setCellFormat', 'addConditionalFormat', 'setConditionalFormat'
 ]);
-const MAX_SNAPSHOT_TARGETS = 300;
+const MAX_SNAPSHOT_TARGETS = 120;
 const MAX_SNAPSHOT_CELLS_PER_TARGET = 2000;
+const MAX_SNAPSHOT_BATCH_CELLS = 1200;
 const HEAVY_BATCH_ACTIONS = 12;
 const HEAVY_BATCH_SNAPSHOT_TARGETS = 80;
+const MAX_EXCEL_CHUNK_ACTIONS = 32;
+const MAX_EXCEL_CHUNK_CELLS = 250;
+const MAX_SET_CELL_RANGE_KEYS_PER_CHUNK = 80;
+const QUEUE_DRAIN_WINDOW_MS = 12;
+const MAX_QUEUE_GROUP_ACTIONS = MAX_EXCEL_CHUNK_ACTIONS;
+const MAX_QUEUE_GROUP_CELLS = MAX_EXCEL_CHUNK_CELLS;
+const QUEUE_BATCH_KEY = '__excelQueueBatchKey';
 
 function isMutationAction(action) {
   return action && MUTATION_TYPES.has(action.type);
@@ -206,6 +227,141 @@ function estimateActionCells(action) {
     return Math.max(1, rows * cols);
   }
   return estimateTargetCells(action.target);
+}
+
+function estimateBatchCells(actions = []) {
+  return actions.reduce((sum, action) => {
+    const n = estimateActionCells(action);
+    if (!Number.isFinite(n)) return Infinity;
+    return sum + n;
+  }, 0);
+}
+
+function queueBatchKey(batch, index) {
+  const meta = batch?.meta || {};
+  return String(meta.itemId || meta.taskId || `batch-${Date.now()}-${index}`);
+}
+
+function tagQueuedAction(action, key) {
+  if (!action || typeof action !== 'object') return action;
+  return { ...action, [QUEUE_BATCH_KEY]: key };
+}
+
+function canMergeQueuedBatches(first, next, currentActions, currentCells) {
+  if (!first || !next || !Array.isArray(next.actions) || next.actions.length === 0) return false;
+  if (first.meta?.isUndo || next.meta?.isUndo) return false;
+  if (first.onBatchComplete || next.onBatchComplete) {
+    if (first.onBatchComplete !== next.onBatchComplete) return false;
+    if ((first.meta?.turnId || null) !== (next.meta?.turnId || null)) return false;
+    if ((first.meta?.taskId || null) !== (next.meta?.taskId || null)) return false;
+  }
+
+  const nextCells = estimateBatchCells(next.actions);
+  if (!Number.isFinite(currentCells) || !Number.isFinite(nextCells)) return false;
+  if (currentActions + next.actions.length > MAX_QUEUE_GROUP_ACTIONS) return false;
+  return currentCells + nextCells <= MAX_QUEUE_GROUP_CELLS;
+}
+
+function takeNextQueueGroup(excelActionQueue) {
+  const first = normalizeBatch(excelActionQueue.shift());
+  if (!first || first.actions.length === 0) return null;
+
+  const batches = [];
+  const actions = [];
+  let actionCount = 0;
+  let cellCount = estimateBatchCells(first.actions);
+
+  function append(batch) {
+    const key = queueBatchKey(batch, batches.length);
+    const entry = { batch, key };
+    batches.push(entry);
+    for (const action of batch.actions) actions.push(tagQueuedAction(action, key));
+    actionCount += batch.actions.length;
+  }
+
+  append(first);
+  while (excelActionQueue.length > 0) {
+    const next = normalizeBatch(excelActionQueue[0]);
+    if (!canMergeQueuedBatches(first, next, actionCount, cellCount)) break;
+    excelActionQueue.shift();
+    append(next);
+    cellCount += estimateBatchCells(next.actions);
+  }
+
+  return { batches, actions, cellCount };
+}
+
+function buildBatchCompletion(entry, executionResult) {
+  const errors = Array.isArray(executionResult.errors) ? executionResult.errors : [];
+  const unknownErrors = errors.filter(error => !error?.queueBatchKey);
+  const batchErrors = errors.filter(error => error?.queueBatchKey === entry.key);
+  const scopedErrors = unknownErrors.length > 0 ? [...unknownErrors, ...batchErrors] : batchErrors;
+  const fallbackErrorCount = executionResult.errorCount > 0 && errors.length === 0 ? executionResult.errorCount : 0;
+  const errorCount = scopedErrors.length || fallbackErrorCount;
+  return {
+    ok: errorCount === 0,
+    meta: entry.batch.meta,
+    actionCount: entry.batch.actions.length,
+    errorCount,
+    errors: scopedErrors
+  };
+}
+
+function splitSetCellRangeAction(action) {
+  if (!action || action.type !== 'setCellRange' || !action.cells || typeof action.cells !== 'object') {
+    return [action];
+  }
+
+  const entries = Object.entries(action.cells);
+  if (entries.length <= MAX_SET_CELL_RANGE_KEYS_PER_CHUNK || action.copyToRange) {
+    return [action];
+  }
+
+  const chunks = [];
+  for (let i = 0; i < entries.length; i += MAX_SET_CELL_RANGE_KEYS_PER_CHUNK) {
+    const cells = Object.fromEntries(entries.slice(i, i + MAX_SET_CELL_RANGE_KEYS_PER_CHUNK));
+    chunks.push({
+      ...action,
+      cells,
+      explanation: action.explanation
+        ? `${action.explanation} (${Math.floor(i / MAX_SET_CELL_RANGE_KEYS_PER_CHUNK) + 1})`
+        : undefined
+    });
+  }
+  return chunks;
+}
+
+function splitActionsIntoSafeChunks(actions = []) {
+  const expanded = [];
+  for (const action of actions) {
+    expanded.push(...splitSetCellRangeAction(action));
+  }
+
+  const chunks = [];
+  let current = [];
+  let currentCells = 0;
+
+  function flush() {
+    if (current.length > 0) chunks.push(current);
+    current = [];
+    currentCells = 0;
+  }
+
+  for (const action of expanded) {
+    const actionCells = estimateActionCells(action);
+    const finiteCells = Number.isFinite(actionCells) ? actionCells : MAX_EXCEL_CHUNK_CELLS;
+    const wouldOverflowActions = current.length >= MAX_EXCEL_CHUNK_ACTIONS;
+    const wouldOverflowCells = current.length > 0 && currentCells + finiteCells > MAX_EXCEL_CHUNK_CELLS;
+
+    if (wouldOverflowActions || wouldOverflowCells) flush();
+    current.push(action);
+    currentCells += finiteCells;
+
+    if (!Number.isFinite(actionCells) || finiteCells >= MAX_EXCEL_CHUNK_CELLS) flush();
+  }
+
+  flush();
+  return chunks.length > 0 ? chunks : [actions];
 }
 
 function shouldSkipSnapshotTarget(action, target) {
@@ -364,6 +520,27 @@ const FOCUS_RETRY_DELAY_MS = 600;
 async function executeActions(actions, updateStepsPanel, _attempt = 0) {
   if (!actions || actions.length === 0) return { actionCount: 0, errorCount: 0, errors: [] };
 
+  if (_attempt === 0) {
+    const chunks = splitActionsIntoSafeChunks(actions);
+    if (chunks.length > 1) {
+      addLog(`Batch Excel diviso in ${chunks.length} chunk sicuri (${actions.length} azioni).`, 'warn');
+      const aggregate = {
+        actionCount: actions.length,
+        errorCount: 0,
+        errors: []
+      };
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        addLog(`Chunk Excel ${i + 1}/${chunks.length}: ${chunk.length} azioni, ~${estimateBatchCells(chunk)} celle.`);
+        const result = await executeActions(chunk, updateStepsPanel, 1);
+        const errors = Array.isArray(result?.errors) ? result.errors : [];
+        aggregate.errorCount += Number(result?.errorCount) || errors.length || 0;
+        aggregate.errors.push(...errors);
+      }
+      return aggregate;
+    }
+  }
+
   let focusLost = false;
   const result = await Excel.run(async (context) => {
     const actionErrors = [];
@@ -404,12 +581,15 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
     // 1. Capture pre-mutation snapshot for undo
     const snapshotPlan = extractSnapshotTargets(actions);
     const mutationTargets = snapshotPlan.targets;
+    const estimatedBatchCells = estimateBatchCells(actions);
     if (snapshotPlan.skipped > 0) {
       addLog(`Snapshot undo parziale: ${snapshotPlan.skipped} target troppo grandi saltati per proteggere Excel.`, 'warn');
     }
     let snapshot = null;
     if (mutationTargets.length > MAX_SNAPSHOT_TARGETS) {
       addLog(`Snapshot undo saltato: ${mutationTargets.length} target superano il limite sicuro (${MAX_SNAPSHOT_TARGETS}).`, 'warn');
+    } else if (estimatedBatchCells > MAX_SNAPSHOT_BATCH_CELLS) {
+      addLog(`Snapshot undo saltato: batch troppo grande (~${estimatedBatchCells} celle, limite ${MAX_SNAPSHOT_BATCH_CELLS}).`, 'warn');
     } else if (mutationTargets.length > 0) {
       snapshot = await captureSnapshot(context, mutationTargets);
     }
@@ -512,7 +692,8 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
           type: action.type,
           sheet: action.sheet || action.sheetName || null,
           target: targetHint,
-          message: detail
+          message: detail,
+          queueBatchKey: action[QUEUE_BATCH_KEY] || null
         });
       }
     }
