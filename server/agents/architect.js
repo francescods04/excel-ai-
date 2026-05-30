@@ -286,6 +286,7 @@ function validateBlueprint(raw) {
  */
 function buildSliceWorkerPrompt(slice, blueprint) {
   const scope = slice.scope;
+  const hasUpstream = scope.may_read_from.length > 0;
   return `<slice-context>
 You are a focused worker building ONE slice of a larger blueprint. Other workers are building other slices in parallel.
 
@@ -296,7 +297,7 @@ YOUR EXCLUSIVE SCOPE (write here, nowhere else):
 - ranges owned: ${scope.ranges_owned.length ? scope.ranges_owned.join(', ') : '(full sheets above)'}
 
 READ-ONLY references (data from completed slices you may reference, e.g. via formulas):
-${scope.may_read_from.length ? scope.may_read_from.map(r => '- ' + r).join('\n') : '(none)'}
+${hasUpstream ? scope.may_read_from.map(r => '- ' + r).join('\n') : '(none)'}
 
 GLOBAL LAYOUT CONVENTIONS (follow these across the model):
 ${blueprint.global_layout_notes || '(none specified)'}
@@ -306,7 +307,10 @@ ${slice.instructions}
 
 HARD RULES:
 - DO NOT write to sheets or ranges outside your scope. If you need to reference data from another slice, use a formula referencing its known address from may_read_from.
-- DO NOT call ask_user_question. Make reasonable defaults.
+- DO NOT call ask_user_question. Make reasonable defaults.${hasUpstream ? `
+- READ BEFORE YOU WRITE: your first tool call MUST be a read (get_cell_ranges / read_sheet) against the upstream ranges listed above. Do NOT guess upstream layout from the slice instructions — in prod runs, workers that skipped this step wrote formulas pointing to wrong cells and had to redo the slice 4-8 times. Confirm exact addresses, then write your formulas against those exact addresses.` : ''}
+- execute_office_js is BLOCKED for slice workers. Use set_cell_range / bulk_set_cell_ranges for data + formulas, bulk_set_format for formatting, execute_excel_formula for one-off formulas. Hand-written Office.js routinely throws on numberFormat dimension mismatches and silently rolls back fill/font writes.
+- copyToRange is FORMULAS ONLY (relative refs adjust per cell). Never use copyToRange with a text label as the source cell — it paints the label into every destination. For headers/titles, write to one cell and merge if you need it visually wide.
 - When this slice is done, call the "done" tool with a one-line summary.
 </slice-context>`;
 }

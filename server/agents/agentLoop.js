@@ -42,6 +42,13 @@ const AGENT_POSTWRITE_CRITIC_TIMEOUT_MS = Number(process.env.AGENT_POSTWRITE_CRI
 const AGENT_POSTWRITE_CRITIC_MIN_ACTIONS = Number(process.env.AGENT_POSTWRITE_CRITIC_MIN_ACTIONS) || 10;
 const AGENT_AUTO_FORMAT_ON_DONE = process.env.AGENT_AUTO_FORMAT_ON_DONE === 'true';
 const BULK_SET_FORMAT_MAX = Math.max(32, Number(process.env.AGENT_BULK_FORMAT_MAX) || 96);
+
+// When a tool is disabled per-run (e.g. slice workers can't call execute_office_js),
+// surface a redirection hint to the LLM so it picks the structured replacement
+// instead of looping on "the tool isn't responding".
+const TOOL_DISABLED_REDIRECTS = Object.freeze({
+  execute_office_js: 'Use the structured tools: set_cell_range / bulk_set_cell_ranges for data + formulas, bulk_set_format for formatting, create_sheet / rename_sheet / delete_sheet for sheet ops, execute_excel_formula for one-off formulas. execute_office_js is gated off for slice workers because hand-written Office.js routinely throws on numberFormat dimension mismatches and rolls back fill/font writes silently.'
+});
 const POSTWRITE_CRITIC_TOOLS = new Set([
   'set_cell_range',
   'bulk_set_cell_ranges',
@@ -369,14 +376,20 @@ function detectScalarTextFloodFill(cells, copyToRange) {
 
   if (copyToRange) {
     const destCount = rangeAddrCellCount(copyToRange);
-    if (destCount > FLOOD_FILL_CELL_THRESHOLD) {
+    if (destCount > 1) {
+      // The source cell of copyToRange is the FIRST written cell (see
+      // execSetCellRange in writers.js). If that source is a text scalar with
+      // no formula, copyToRange will paint the label across the destination —
+      // the staffing_and_labor "Total" / F3:J6 bug from the 2026-05-30 run.
       const entries = Object.entries(cells);
-      if (entries.length === 1 && isTextScalar(entries[0][1])) {
+      if (entries.length > 0) {
         const [srcAddr, srcSpec] = entries[0];
-        return {
-          ok: false,
-          reason: `set_cell_range rejected: copyToRange "${copyToRange}" (${destCount} cells) with a text-only source cell ("${srcAddr}" = "${String(srcSpec.value).slice(0, 40)}") would replicate that label everywhere. copyToRange is for FORMULAS with relative refs (e.g. "=B2*(1+C$1)" copied across years). For a header, write it to one cell. For a repeated value, use a formula like "=$A$1" so the source is clear.`
-        };
+        if (isTextScalar(srcSpec)) {
+          return {
+            ok: false,
+            reason: `set_cell_range rejected: copyToRange "${copyToRange}" (${destCount} cells) uses "${srcAddr}" as the source, but that cell holds a text label ("${String(srcSpec.value).slice(0, 40)}"). Excel would paint the label across every destination cell. copyToRange is for FORMULAS with relative refs (e.g. "=B2*(1+C$1)"). To fill a section with computed values, put the formula in "${srcAddr}" first; for a repeated label, write it once and use a formula like "=$${srcAddr.replace(/(\\d+)/, '$$$1')}" in destinations.`
+          };
+        }
       }
     }
   }
@@ -3800,7 +3813,8 @@ function initAgentRun(objective, context, options = {}) {
       postWriteCriticEnabled: options.postWriteCriticEnabled,
       autoFormatOnDone: options.autoFormatOnDone === true ||
         (options.autoFormatOnDone !== false && AGENT_AUTO_FORMAT_ON_DONE),
-      maxWebSearch: Number(process.env.AGENT_MAX_WEB_SEARCH) || 20
+      maxWebSearch: Number(process.env.AGENT_MAX_WEB_SEARCH) || 20,
+      disabledTools: Array.isArray(options.disabledTools) ? options.disabledTools.filter(t => typeof t === 'string') : []
     }
   };
 }
@@ -4246,6 +4260,15 @@ async function runAgentStep(state, clientResult, deps = {}) {
 
     if (!toolName || toolName === 'noop' || toolName === 'none') {
       state.messages.push(makeUserMessage('No tool was called. If task is complete, call tool "done" with a summary. Otherwise continue with the next tool.'));
+      return { state, control: 'continue', payload: { thought } };
+    }
+
+    if (Array.isArray(state.config.disabledTools) && state.config.disabledTools.includes(toolName)) {
+      const redirect = TOOL_DISABLED_REDIRECTS[toolName] || 'Use the structured tools instead.';
+      const blockMsg = `Tool "${toolName}" is disabled in this run. ${redirect}`;
+      state.messages.push(makeUserMessage(blockMsg));
+      state.results.push({ type: 'error', error: blockMsg, blocked: true, tool: toolName });
+      onProgress('iterationError', { iteration: state.iteration, error: blockMsg });
       return { state, control: 'continue', payload: { thought } };
     }
 

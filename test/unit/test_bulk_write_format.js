@@ -9,7 +9,7 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
       {
         writes: [
           { sheet: 'Assumptions',     cells: { A1: { value: 'Driver' }, B1: { value: 'Value' } } },
-          { sheet: 'Sources & Uses',  cells: { A1: { value: 'Sources' } }, copyToRange: 'A1:A5' },
+          { sheet: 'Sources & Uses',  cells: { A2: { formula: '=B2*(1+C2)' } }, copyToRange: 'A2:A5' },
           { sheet: 'Debt Schedule',   cells: { A1: { value: 'Year' } }, allow_overwrite: false }
         ]
       },
@@ -23,7 +23,7 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     assert.strictEqual(r.cellsTotal, 4);
     assert.strictEqual(r.actions[0].type, 'setCellRange');
     assert.strictEqual(r.actions[0].sheet, 'Assumptions');
-    assert.strictEqual(r.actions[1].copyToRange, 'A1:A5');
+    assert.strictEqual(r.actions[1].copyToRange, 'A2:A5');
     assert.strictEqual(r.actions[2].allow_overwrite, false);
     console.log('OK bulk_set_cell_ranges fans out N writes across sheets in 1 iteration');
   }
@@ -319,6 +319,44 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     assert.strictEqual(ok.styledCellCount, 1);
     assert.strictEqual(ok.styledCells[0].fontColor, '#0000FF');
     console.log('OK read_format_summary requires a client and passes through visual format data');
+  }
+
+  // 16) copyToRange rejected when its source cell holds a text label, even with siblings
+  {
+    const r = await executeAgentTool(
+      'set_cell_range',
+      {
+        sheet: 'Staffing',
+        cells: {
+          F3: { value: 'Total' },
+          A1: { value: 'Headcount' },
+          B3: { formula: '=B2+1' }
+        },
+        copyToRange: 'F3:J6'
+      },
+      { messages: [], iteration: 0 },
+      null
+    );
+    assert.match(r.error, /set_cell_range rejected: copyToRange "F3:J6"/);
+    assert.match(r.error, /text label \("Total"\)/);
+    console.log('OK set_cell_range rejects copyToRange with a text-only source even with sibling cells');
+  }
+
+  // 17) copyToRange with a formula source is still accepted
+  {
+    const r = await executeAgentTool(
+      'set_cell_range',
+      {
+        sheet: 'Staffing',
+        cells: { F3: { formula: '=SUM(B3:E3)' }, A1: { value: 'Header' } },
+        copyToRange: 'F3:J6'
+      },
+      { messages: [], iteration: 0 },
+      null
+    );
+    assert.strictEqual(r.actions.length, 1);
+    assert.strictEqual(r.actions[0].copyToRange, 'F3:J6');
+    console.log('OK set_cell_range still accepts copyToRange when source has a formula');
   }
 
   console.log('\nbulk write + format tests completed.');

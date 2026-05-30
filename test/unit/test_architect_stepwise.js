@@ -6,7 +6,7 @@ const {
   advanceArchitectRun,
   collectAwaitingClientBatch
 } = require('../../server/agents/architectStepwise');
-const { validateBlueprint } = require('../../server/agents/architect');
+const { validateBlueprint, buildSliceWorkerPrompt } = require('../../server/agents/architect');
 
 function blueprint(rawSlices) {
   return validateBlueprint({
@@ -192,10 +192,30 @@ async function testActionsTakePriorityOverReads() {
   console.log('OK architect stepwise applies writes before serving parallel read requests');
 }
 
+async function testSliceWorkerPromptForcesReadBeforeWriteAndBansOfficeJs() {
+  const bp = blueprint([
+    { id: 'a',  title: 'A', deps: [], scope: { sheets_owned: ['A'], may_read_from: [] }, instructions: 'Build A', estimated_iters: 4 },
+    { id: 'b',  title: 'B', deps: ['a'], scope: { sheets_owned: ['B'], may_read_from: ['A!A1:D20'] }, instructions: 'Build B referencing A', estimated_iters: 4 }
+  ]);
+  const sliceA = bp.slices.find(s => s.id === 'a');
+  const sliceB = bp.slices.find(s => s.id === 'b');
+
+  const promptA = buildSliceWorkerPrompt(sliceA, bp);
+  const promptB = buildSliceWorkerPrompt(sliceB, bp);
+
+  assert.ok(!/READ BEFORE YOU WRITE/.test(promptA), 'root slice with no upstream skips the read-first directive');
+  assert.ok(/READ BEFORE YOU WRITE/.test(promptB), 'downstream slice gets the read-first directive');
+  assert.ok(/execute_office_js is BLOCKED/.test(promptA), 'every slice is told execute_office_js is blocked');
+  assert.ok(/execute_office_js is BLOCKED/.test(promptB), 'every slice is told execute_office_js is blocked');
+  assert.ok(/copyToRange is FORMULAS ONLY/.test(promptA), 'every slice gets the copyToRange-text-flood guard');
+  console.log('OK slice worker prompt enforces read-before-write on dependents and bans execute_office_js');
+}
+
 (async function main() {
   await testParallelRootsThenFinal();
   await testMultiSliceClientReadBatch();
   await testActionsTakePriorityOverReads();
+  await testSliceWorkerPromptForcesReadBeforeWriteAndBansOfficeJs();
   console.log('\narchitect stepwise tests completed.');
 })().catch(err => {
   console.error('FAIL:', err && err.stack ? err.stack : err);

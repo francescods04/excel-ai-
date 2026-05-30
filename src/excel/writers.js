@@ -1082,15 +1082,26 @@ function collectNotes(action, out) {
 // Apply notes as native Excel comments, one at a time with its own sync so a single
 // bad comment is logged and skipped rather than aborting the batch. Anything that
 // still fails is written to an Assumption_Notes sheet so the annotation is never lost.
+function isAssumptionNotesFallbackEnabled() {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.localStorage?.getItem('excelAi.assumptionNotesFallback') === 'true'
+      || window.EXCEL_AI_ASSUMPTION_NOTES_FALLBACK === true;
+  } catch (_) { return false; }
+}
+
 async function applyNotes(context, notes) {
   let applied = 0;
   const failed = [];
 
   // If native comments are unavailable or the note batch is large, skip the
-  // per-note sync loop and persist annotations in one fallback write.
+  // per-note sync loop. The fallback sheet (Assumption_Notes) is opt-in via
+  // localStorage excelAi.assumptionNotesFallback=true. Default OFF — users on
+  // Excel for Mac were getting a polluted workbook with a 3-column dump sheet
+  // because every batch of 13-17 notes routed to the fallback.
   if (_nativeCommentsUnsupported || notes.length > MAX_NATIVE_NOTE_ATTEMPTS_PER_BATCH) {
     if (!_nativeCommentsUnsupported && notes.length > MAX_NATIVE_NOTE_ATTEMPTS_PER_BATCH) {
-      addLog(`Note: ${notes.length} annotazioni scritte su ${ASSUMPTION_NOTES_SHEET} per evitare freeze da commenti nativi.`, 'warn');
+      addLog(`Note: batch ${notes.length} > soglia ${MAX_NATIVE_NOTE_ATTEMPTS_PER_BATCH}, salto le note (commenti nativi non affidabili in batch grandi).`, 'warn');
     }
     failed.push(...notes);
   } else {
@@ -1125,7 +1136,7 @@ async function applyNotes(context, notes) {
     }
   }
   let fallback = 0;
-  if (failed.length > 0) {
+  if (failed.length > 0 && isAssumptionNotesFallbackEnabled()) {
     try {
       fallback = await writeNotesFallback(context, failed);
     } catch (err) {

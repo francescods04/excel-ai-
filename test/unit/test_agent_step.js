@@ -231,6 +231,30 @@ function assertSerializable(state, label) {
     console.log('OK set_cell_range preflight conflict (via client) → continue');
   }
 
+  /* 13) disabledTools blocks execute_office_js for slice workers with a redirect */
+  {
+    const state = initAgentRun('slice worker run', CTX, {
+      promptVariant: 'fast',
+      disabledTools: ['execute_office_js']
+    });
+    const deps = scripted([{
+      thought: 'I will write JS',
+      tool: 'execute_office_js',
+      params: { code: 'context.workbook.worksheets.getActiveWorksheet().getRange("A1").values = [["hi"]];' }
+    }]);
+    const { state: s, control } = await runAgentStep(state, null, deps);
+    assert.strictEqual(control, 'continue', 'blocked tool → continue (no actions, no client roundtrip)');
+    const last = s.results[s.results.length - 1];
+    assert.strictEqual(last.type, 'error', 'an error result is recorded');
+    assert.strictEqual(last.blocked, true);
+    assert.strictEqual(last.tool, 'execute_office_js');
+    // The redirect message goes into messages so the LLM sees it next turn.
+    const lastMsg = s.messages[s.messages.length - 1];
+    assert.match(String(lastMsg.content), /execute_office_js.*disabled/i);
+    assert.match(String(lastMsg.content), /set_cell_range/);
+    console.log('OK disabledTools blocks execute_office_js with redirect message');
+  }
+
   console.log('\nagent step tests completed.');
 })().catch(err => {
   console.error('FAIL:', err && err.stack ? err.stack : err);

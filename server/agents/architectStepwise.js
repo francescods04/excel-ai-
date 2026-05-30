@@ -222,6 +222,11 @@ function initReadySlices(state, {
       modelOverride: sliceTier === 'pro' ? PRO_MODEL : undefined,
       maxIterations: Math.max(6, Math.min(SLICE_HARD_ITER_CAP, Number(slice.estimated_iters || 6) * 2)),
       autoFormatOnDone: false,
+      // Block execute_office_js for slice workers. In prod logs a single bad JS
+      // call would burn 4-6 iters debugging itself (numberFormat 1x1 throws,
+      // ctx redeclaration, "Sheet1 doesn't exist" guesses) instead of using
+      // the structured tools that are already covered by the system prompt.
+      disabledTools: ['execute_office_js'],
       systemPromptAddendum: slicePrompt
     });
     state.sliceAgents[slice.id] = workerState;
