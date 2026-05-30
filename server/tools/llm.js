@@ -489,7 +489,7 @@ async function callLLM({
     const result = response.result;
     const usage = response.meta?.usage || result?._usage || null;
     if (result?._usage) {
-      track({ eventType: 'llm.response', latencyMs: elapsed, tokensIn: result._usage.prompt_tokens, tokensOut: result._usage.completion_tokens, model: primaryModel, success: 1 });
+      track({ eventType: 'llm.response', latencyMs: elapsed, tokensIn: result._usage.prompt_tokens, tokensOut: result._usage.completion_tokens, model: primaryModel, success: 1, userId: traceContext.userId, sessionId: traceContext.turnId });
     }
     logMetric({
       type: 'llm',
@@ -524,7 +524,7 @@ async function callLLM({
     return result;
   } catch (error) {
     const elapsed = Date.now() - start;
-    track({ eventType: 'llm.error', latencyMs: elapsed, model: primaryModel, success: 0, properties: { error: error.message } });
+    track({ eventType: 'llm.error', latencyMs: elapsed, model: primaryModel, success: 0, properties: { error: error.message }, userId: traceContext.userId, sessionId: traceContext.turnId });
     logMetric({
       type: 'llm',
       event: 'error',
@@ -582,7 +582,7 @@ async function callLLM({
       const rescueElapsed = Date.now() - rescueStart;
       const rescueResult = rescueResponse.result;
       const usage = rescueResponse.meta?.usage || rescueResult?._usage || null;
-      track({ eventType: 'llm.response', latencyMs: rescueElapsed, model: OPENROUTER_FALLBACK_MODEL, success: 1 });
+      track({ eventType: 'llm.response', latencyMs: rescueElapsed, model: OPENROUTER_FALLBACK_MODEL, success: 1, userId: traceContext.userId, sessionId: traceContext.turnId });
       logMetric({
         type: 'llm',
         event: 'response',
@@ -626,7 +626,7 @@ async function callLLM({
     const rescueElapsed = Date.now() - rescueStart;
     const rescueResult = rescueResponse.result;
     const usage = rescueResponse.meta?.usage || rescueResult?._usage || null;
-    track({ eventType: 'llm.response', latencyMs: rescueElapsed, model: rescueModel, success: 1 });
+    track({ eventType: 'llm.response', latencyMs: rescueElapsed, model: rescueModel, success: 1, userId: traceContext.userId, sessionId: traceContext.turnId });
     logMetric({
       type: 'llm',
       event: 'response',

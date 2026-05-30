@@ -1,21 +1,30 @@
-// Approximate pricing per 1M tokens (input / output) in USD.
-// Keep these up to date with provider pricing pages.
+// Pricing per 1M tokens (input / output) in USD.
+// Source: DeepSeek official pricing page (2026-05-30)
 //
-// DeepSeek official (2026-05-30):
-//   V4-Flash  input $0.14  output $0.28
-//   V4-Pro    input $1.74  output $3.48
+// DeepSeek V4-Flash:
+//   Cache hit:  $0.0028 / 1M input tokens
+//   Cache miss: $0.14   / 1M input tokens
+//   Output:     $0.28   / 1M output tokens
 //
-// OpenRouter typically adds ~10% markup — adjust if you use OpenRouter billing.
+// DeepSeek V4-Pro:
+//   Cache hit:  $0.003625 / 1M input tokens
+//   Cache miss: $0.435    / 1M input tokens
+//   Output:     $0.87    / 1M output tokens
+//
+// We default to CACHE MISS (full price) for conservative cost estimates.
+// Set USE_CACHE_HIT=true to use the cheaper cached-input rate.
+
+const USE_CACHE_HIT = process.env.PRICING_CACHE_HIT === 'true';
 
 const MODEL_PRICING = {
   // DeepSeek direct
-  'deepseek-v4-pro': { input: 1.74, output: 3.48 },
-  'deepseek-v4-flash': { input: 0.14, output: 0.28 },
-  'deepseek-chat': { input: 0.14, output: 0.28 }, // approximated to flash tier
+  'deepseek-v4-pro': { input: USE_CACHE_HIT ? 0.003625 : 0.435, output: 0.87 },
+  'deepseek-v4-flash': { input: USE_CACHE_HIT ? 0.0028 : 0.14, output: 0.28 },
+  'deepseek-chat': { input: USE_CACHE_HIT ? 0.0028 : 0.14, output: 0.28 },
 
-  // OpenRouter prefixes
-  'deepseek/deepseek-v4-pro': { input: 1.92, output: 3.83 },
-  'deepseek/deepseek-v4-flash': { input: 0.15, output: 0.31 },
+  // OpenRouter prefixes (10% markup on top of direct DeepSeek)
+  'deepseek/deepseek-v4-pro': { input: USE_CACHE_HIT ? 0.004 : 0.48, output: 0.96 },
+  'deepseek/deepseek-v4-flash': { input: USE_CACHE_HIT ? 0.003 : 0.15, output: 0.31 },
   'moonshotai/kimi-k2.6': { input: 2.00, output: 8.00 },
   'openai/gpt-4o-mini': { input: 0.15, output: 0.60 },
 
@@ -34,7 +43,6 @@ const MODEL_PRICING = {
 function getPricing(model = '') {
   const key = String(model).trim();
   if (MODEL_PRICING[key]) return MODEL_PRICING[key];
-  // Try normalized match (lowercase, strip extra spaces)
   const normalized = key.toLowerCase();
   for (const [k, v] of Object.entries(MODEL_PRICING)) {
     if (k.toLowerCase() === normalized) return v;

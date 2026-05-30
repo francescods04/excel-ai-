@@ -456,9 +456,19 @@ app.get('/api/admin/users', authenticate, async (req, res) => {
     // Pull actual token / latency / cost data from events telemetry (turns often lack these fields)
     const { data: eventStats } = await supabase
       .from('events')
-      .select('user_id, event_type, tokens_in, tokens_out, model, latency_ms')
+      .select('user_id, session_id, event_type, tokens_in, tokens_out, model, latency_ms')
+      .eq('event_type', 'llm.response')
       .gte('ts', new Date(Date.now() - 30 * 86400000).toISOString())
       .limit(50000);
+
+    // Build a map of turnId → user_id from turns so we can resolve legacy events that lack user_id
+    const { data: turnLookup } = await supabase
+      .from('turns')
+      .select('id, user_id')
+      .gte('created_at', new Date(Date.now() - 30 * 86400000).toISOString())
+      .limit(50000);
+    const turnUserMap = {};
+    for (const t of (turnLookup || [])) { if (t.id && t.user_id) turnUserMap[t.id] = t.user_id; }
 
     const todayIso = new Date().toISOString().slice(0, 10);
     const statsByUser = {};
@@ -476,7 +486,8 @@ app.get('/api/admin/users', authenticate, async (req, res) => {
 
     const { estimateCost } = require('./utils/pricing');
     for (const e of (eventStats || [])) {
-      const uid = e.user_id;
+      let uid = e.user_id;
+      if (!uid && e.session_id && turnUserMap[e.session_id]) uid = turnUserMap[e.session_id];
       if (!uid) continue;
       if (!statsByUser[uid]) {
         statsByUser[uid] = { totalTurns: 0, turnsToday: 0, tokensIn: 0, tokensOut: 0, latencyMsSum: 0, latencyMsCount: 0, errorTurns: 0, costSum: 0 };
@@ -564,6 +575,23 @@ app.get('/api/admin/costs', authenticate, async (req, res) => {
 
 app.get('/admin', optionalAuth, (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'src', 'admin.html'));
+});
+
+app.get('/api/admin/pricing', authenticate, async (req, res) => {
+  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const { MODEL_PRICING } = require('./utils/pricing');
+    const rows = Object.entries(MODEL_PRICING).map(([model, prices]) => ({
+      model,
+      input: prices.input,
+      output: prices.output,
+      unit: 'per 1M tokens',
+      note: prices.input === 0 && prices.output === 0 ? 'local / free' : null,
+    }));
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 /* ---------- Turn / Item Runtime (Codex-inspired) ---------- */
