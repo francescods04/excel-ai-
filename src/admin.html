@@ -164,6 +164,13 @@
     <div class="kpi"><div class="label">Trace Window</div><div class="value" id="llmWindow">—</div><div class="subvalue">local JSONL trace log</div></div>
   </div>
 
+  <div class="kpis">
+    <div class="kpi"><div class="label">Cost 24h</div><div class="value amber" id="cost24h">—</div><div class="subvalue" id="cost24hSub">—</div></div>
+    <div class="kpi"><div class="label">Cost 7d</div><div class="value" id="cost7d">—</div><div class="subvalue" id="cost7dSub">—</div></div>
+    <div class="kpi"><div class="label">Cost 30d</div><div class="value" id="cost30d">—</div><div class="subvalue" id="cost30dSub">—</div></div>
+    <div class="kpi"><div class="label">Avg Cost / Turn</div><div class="value green" id="avgCostPerTurn">—</div><div class="subvalue" id="avgCostSub">last 24h</div></div>
+  </div>
+
   <div class="charts">
     <div class="chart-box">
       <h3>Turns / day (30d)</h3>
@@ -181,6 +188,21 @@
       <thead><tr><th>User</th><th>Status</th><th>Tasks</th><th>Actions</th><th>Latency</th><th>Created</th></tr></thead>
       <tbody id="recentTurns"></tbody>
     </table>
+  </div>
+
+  <div class="table-box" style="margin-top:24px">
+    <div class="panel-header">
+      <h3>Users</h3>
+      <div class="filters">
+        <input type="text" id="userFilter" placeholder="filter email…" oninput="renderUsers()">
+      </div>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>User</th><th>Plan</th><th>Turns</th><th>Today</th><th>Tokens In</th><th>Tokens Out</th><th>Avg Latency</th><th>Errors</th><th>Est. Cost</th><th>Joined</th></tr></thead>
+        <tbody id="usersTable"></tbody>
+      </table>
+    </div>
   </div>
 
   <div class="stack">
@@ -569,10 +591,71 @@ async function loadRecentRuntimeOutcomes() {
   });
 }
 
+async function loadCosts() {
+  const r = await fetch(`${BASE}/costs`, { headers: h });
+  const d = await r.json();
+  const fmt = (n) => n ? `$${n.toFixed(2)}` : '$0.00';
+  document.getElementById('cost24h').textContent = fmt(d['24h']?.totalCost);
+  document.getElementById('cost24hSub').textContent = `${d['24h']?.turns || 0} turns`;
+  document.getElementById('cost7d').textContent = fmt(d['7d']?.totalCost);
+  document.getElementById('cost7dSub').textContent = `${d['7d']?.turns || 0} turns`;
+  document.getElementById('cost30d').textContent = fmt(d['30d']?.totalCost);
+  document.getElementById('cost30dSub').textContent = `${d['30d']?.turns || 0} turns`;
+  const avg = (d['24h']?.totalCost && d['24h']?.turns) ? (d['24h'].totalCost / d['24h'].turns) : 0;
+  document.getElementById('avgCostPerTurn').textContent = avg ? `$${avg.toFixed(3)}` : '—';
+  document.getElementById('avgCostSub').textContent = 'last 24h';
+}
+
+let usersData = [];
+
+async function loadUsers() {
+  const r = await fetch(`${BASE}/users`, { headers: h });
+  usersData = await r.json();
+  renderUsers();
+}
+
+function renderUsers() {
+  const filter = document.getElementById('userFilter').value.trim().toLowerCase();
+  const tbody = document.getElementById('usersTable');
+  const rows = usersData.filter(u =>
+    !filter ||
+    (u.email || '').toLowerCase().includes(filter) ||
+    (u.id || '').toLowerCase().includes(filter)
+  );
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="10" class="muted">No users match.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(u => `
+    <tr data-user-id="${esc(u.id)}">
+      <td>${esc(u.email || u.id.slice(0,8))}</td>
+      <td><span class="chip">${esc(u.plan)}</span></td>
+      <td>${u.totalTurns}</td>
+      <td>${u.turnsToday}</td>
+      <td class="muted">${(u.tokensIn || 0).toLocaleString()}</td>
+      <td class="muted">${(u.tokensOut || 0).toLocaleString()}</td>
+      <td>${fmtLatency(u.avgLatencyMs)}</td>
+      <td class="${u.errorTurns ? 'status-failed' : 'muted'}">${u.errorTurns}</td>
+      <td>$${u.estimatedCost.toFixed(2)}</td>
+      <td class="muted">${esc(u.createdAt?.slice(0,10) || '—')}</td>
+    </tr>
+  `).join('');
+  Array.from(tbody.querySelectorAll('tr[data-user-id]')).forEach(row => {
+    row.addEventListener('click', () => {
+      const uid = row.dataset.userId;
+      document.getElementById('traceTurn').value = '';
+      // Optional: filter traces by user via turnId list — not supported directly by trace API,
+      // but we could load recent turns for this user. For now just highlight.
+    });
+  });
+}
+
 function loadAll() {
   loadStats();
   loadCharts();
   loadRecentTurns();
+  loadCosts();
+  loadUsers();
   loadTraceViews();
 }
 

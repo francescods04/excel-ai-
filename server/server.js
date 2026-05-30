@@ -422,6 +422,105 @@ app.get('/api/admin/runtime-outcomes', authenticate, async (req, res) => {
   }
 });
 
+app.get('/api/admin/users', authenticate, async (req, res) => {
+  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const supabase = require('./supabase/client').getSupabase();
+    const { data: listData, error: listError } = await supabase.auth.admin.listUsers({ page: 1, perPage: 500 });
+    if (listError) throw listError;
+    const users = listData?.users || [];
+
+    const { data: turnStats } = await supabase
+      .from('turns')
+      .select('user_id, status, tokens_in, tokens_out, total_latency_ms, created_at, model')
+      .order('created_at', { ascending: false })
+      .limit(50000);
+
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const statsByUser = {};
+    for (const t of (turnStats || [])) {
+      const uid = t.user_id;
+      if (!statsByUser[uid]) {
+        statsByUser[uid] = { totalTurns: 0, turnsToday: 0, tokensIn: 0, tokensOut: 0, latencyMsSum: 0, latencyMsCount: 0, errorTurns: 0, costSum: 0 };
+      }
+      const s = statsByUser[uid];
+      s.totalTurns += 1;
+      if (t.created_at && t.created_at.slice(0, 10) === todayIso) s.turnsToday += 1;
+      s.tokensIn += t.tokens_in || 0;
+      s.tokensOut += t.tokens_out || 0;
+      if (t.total_latency_ms) {
+        s.latencyMsSum += t.total_latency_ms;
+        s.latencyMsCount += 1;
+      }
+      if (t.status === 'error' || t.status === 'failed') s.errorTurns += 1;
+    }
+
+    const { estimateCost } = require('./utils/pricing');
+    // Second pass to compute cost per-turn using its own model
+    for (const t of (turnStats || [])) {
+      const uid = t.user_id;
+      if (!statsByUser[uid]) continue;
+      statsByUser[uid].costSum += estimateCost(t.model || 'unknown', t.tokens_in || 0, t.tokens_out || 0);
+    }
+
+    const enriched = users.map(u => {
+      const s = statsByUser[u.id] || { totalTurns: 0, turnsToday: 0, tokensIn: 0, tokensOut: 0, latencyMsSum: 0, latencyMsCount: 0, errorTurns: 0, costSum: 0 };
+      const avgLatencyMs = s.latencyMsCount > 0 ? Math.round(s.latencyMsSum / s.latencyMsCount) : 0;
+      return {
+        id: u.id,
+        email: u.email,
+        plan: u.app_metadata?.plan || 'free',
+        createdAt: u.created_at,
+        totalTurns: s.totalTurns,
+        turnsToday: s.turnsToday,
+        tokensIn: s.tokensIn,
+        tokensOut: s.tokensOut,
+        avgLatencyMs,
+        errorTurns: s.errorTurns,
+        estimatedCost: Number((s.costSum || 0).toFixed(4)),
+      };
+    });
+
+    enriched.sort((a, b) => b.totalTurns - a.totalTurns);
+    res.json(enriched);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/admin/costs', authenticate, async (req, res) => {
+  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const { estimateCostBatch } = require('./utils/pricing');
+    const supabase = require('./supabase/client').getSupabase();
+
+    const windows = [
+      { key: '24h', since: new Date(Date.now() - 86400000).toISOString() },
+      { key: '7d', since: new Date(Date.now() - 7 * 86400000).toISOString() },
+      { key: '30d', since: new Date(Date.now() - 30 * 86400000).toISOString() },
+    ];
+
+    const result = {};
+    for (const w of windows) {
+      const { data: rows } = await supabase
+        .from('turns')
+        .select('model, tokens_in, tokens_out')
+        .gte('created_at', w.since);
+      const usage = (rows || []).map(r => ({ model: r.model || 'unknown', tokens_in: r.tokens_in || 0, tokens_out: r.tokens_out || 0 }));
+      const cost = estimateCostBatch(usage);
+      result[w.key] = {
+        totalCost: Number(cost.totalCost.toFixed(4)),
+        byModel: Object.fromEntries(Object.entries(cost.byModel).map(([k, v]) => [k, Number(v.toFixed(4))])),
+        turns: usage.length,
+      };
+    }
+
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/admin', optionalAuth, (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'src', 'admin.html'));
 });
