@@ -671,14 +671,13 @@ app.post('/api/turn/start', authenticate, quotaCheck, async (req, res) => {
     if (!message) return res.status(400).json({ error: 'Messaggio richiesto' });
 
     // Map user-facing speed mode to a concrete strategy preset.
-    // Validated against bench/runtime_mode_compare.js (2026-05-28):
-    //   fast     : flash, thinking off  -> ~280s, 9 sheets (lighter quality)
-    //   balanced : flash, smart thinking, post-write critic -> 254s, 10 sheets
-    //   pro      : pro,   smart thinking, post-write critic -> 523s, 10 sheets (verbose reasoning)
+    // fast     : flash, thinking off        -> ~183s (bench-validated best quality/speed)
+    // balanced : flash, smart thinking gate, post-write critic async
+    // pro      : flash, smart thinking gate, post-write critic async (same model, longer iteration budget)
     function speedModeStrategyOverlay(mode) {
       const m = String(mode || '').toLowerCase().trim();
-      if (m === 'fast') return { speedMode: 'fast', modelOverride: process.env.AGENT_LOOP_FAST_MODEL || 'deepseek-v4-flash', thinkingDisabled: true, postWriteCritic: false };
-      if (m === 'pro') return { speedMode: 'pro', modelOverride: process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro', thinkingDisabled: false, postWriteCritic: true };
+      if (m === 'fast') return { speedMode: 'fast', modelOverride: 'deepseek-v4-flash', thinkingDisabled: true, postWriteCritic: false };
+      if (m === 'pro') return { speedMode: 'pro', modelOverride: 'deepseek-v4-flash', thinkingDisabled: false, postWriteCritic: true };
       // default + 'balanced'
       return { speedMode: 'balanced', modelOverride: null, thinkingDisabled: null, postWriteCritic: true };
     }
