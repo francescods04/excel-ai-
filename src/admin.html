@@ -215,7 +215,7 @@
       </div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Time</th><th>Event</th><th>Role</th><th>Attempt</th><th>Label</th><th>Turn</th><th>Latency</th><th>Preview</th></tr></thead>
+          <thead><tr><th>Time</th><th>Event</th><th>Preview</th><th>Turn</th><th>Latency</th><th>Tokens</th></tr></thead>
           <tbody id="recentTraces"></tbody>
         </table>
       </div>
@@ -236,7 +236,7 @@
       <h3>LLM routing by role</h3>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Role</th><th>Requests</th><th>Responses</th><th>Errors</th><th>Avg latency</th></tr></thead>
+          <thead><tr><th>Model</th><th>Cost</th></tr></thead>
           <tbody id="llmRoleSummary"></tbody>
         </table>
       </div>
@@ -246,7 +246,7 @@
       <h3>Agent loop outcome reasons</h3>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Reason</th><th>Count</th><th>Escalated</th><th>Avg iter</th></tr></thead>
+          <thead><tr><th>Status</th><th colspan="3">Note</th></tr></thead>
           <tbody id="runtimeReasonSummary"></tbody>
         </table>
       </div>
@@ -492,56 +492,54 @@ function setTraceDetailEmpty(msg='Click a row to inspect sanitized prompt / resp
 
 async function loadTraceSummary() {
   const q = getTraceQuery(40);
-  const d = await safeFetch(`${BASE}/llm-traces/summary?${q}`, { headers: h });
+  const d = await safeFetch(`${BASE}/llm-stats?${q}`, { headers: h });
   if (!d) return;
   document.getElementById('llmRequests').textContent = d.requests ?? 0;
-  document.getElementById('llmResponsesSub').textContent = `responses ${(d.responses ?? 0).toLocaleString()}`;
+  document.getElementById('llmResponsesSub').textContent = `${(d.promptTokens || 0).toLocaleString()} in / ${(d.completionTokens || 0).toLocaleString()} out`;
   document.getElementById('llmErrors').textContent = d.errors ?? 0;
-  document.getElementById('llmFallbacksSub').textContent = `fallbacks ${(d.fallbacks ?? 0).toLocaleString()}`;
+  document.getElementById('llmFallbacksSub').textContent = `cost $${(d.cost || 0).toFixed(2)}`;
   document.getElementById('llmLatency').textContent = fmtLatency(d.avgLatencyMs || 0);
-  document.getElementById('llmTokensSub').textContent = `tokens out ${(d.completionTokens || 0).toLocaleString()}`;
+  document.getElementById('llmTokensSub').textContent = `calls ${(d.count || 0).toLocaleString()}`;
   document.getElementById('llmWindow').textContent = d.count ?? 0;
-  renderRoleSummary(d.byRole || {});
+  renderRoleSummary(d.byModel || {});
 }
 
-function renderRoleSummary(byRole) {
+function renderRoleSummary(byModel) {
   const tbody = document.getElementById('llmRoleSummary');
-  const rows = Object.entries(byRole || {}).sort((l,r)=>(r[1].responses||0)-(l[1].responses||0));
+  const rows = Object.entries(byModel || {}).sort((l,r)=>(r[1])-(l[1]));
   if (!rows.length) { tbody.innerHTML = '<tr><td colspan="5" class="muted">No LLM traces for the active filters.</td></tr>'; return; }
-  tbody.innerHTML = rows.map(([role,bucket])=>`
-    <tr><td>${esc(role)}</td><td>${(bucket.requests||0).toLocaleString()}</td><td>${(bucket.responses||0).toLocaleString()}</td><td>${(bucket.errors||0).toLocaleString()}</td><td>${fmtLatency(bucket.avgLatencyMs||0)}</td></tr>
+  tbody.innerHTML = rows.map(([model,cost])=>`
+    <tr><td>${esc(model)}</td><td colspan="4">$${cost.toFixed(2)}</td></tr>
   `).join('');
 }
 
-async function loadTraceDetail(traceId) {
-  selectedTraceId = traceId;
-  const d = await safeFetch(`${BASE}/llm-traces/${encodeURIComponent(traceId)}`, { headers: h });
-  if (!d) { setTraceDetailEmpty('Trace detail unavailable.'); return; }
-  document.getElementById('traceDetailChip').textContent = traceId;
-  const first = d.records?.[0] || {};
+async function loadTraceDetail(eventId) {
+  selectedTraceId = eventId;
+  const d = await safeFetch(`${BASE}/llm-events?limit=1&turnId=${encodeURIComponent(eventId)}`, { headers: h });
+  if (!d || !d.length) { setTraceDetailEmpty('Trace detail unavailable.'); return; }
+  const record = d[0];
+  document.getElementById('traceDetailChip').textContent = eventId;
   document.getElementById('traceMeta').textContent = [
-    `records: ${d.count||0}`,`turn: ${first.turnId||'—'}`,`phase: ${first.phase||'—'}`,`workflow: ${first.workflow||'—'}`,
-    `label: ${first.label||'—'}`,`role: ${first.role||'—'}`,`attempt: ${first.attempt||'—'}`
+    `id: ${record.traceId||'—'}`,`turn: ${record.turnId||'—'}`,`model: ${record.model||'—'}`,
+    `latency: ${fmtLatency(record.latencyMs)}`,`tokens: ${fmtTokens(record.promptTokens,record.completionTokens)}`
   ].join('\n');
-  document.getElementById('traceDetail').textContent = JSON.stringify(d.records||[],null,2);
-  document.querySelectorAll('.trace-row').forEach(row=>row.classList.toggle('selected',row.dataset.traceId===traceId));
+  document.getElementById('traceDetail').textContent = JSON.stringify(record,null,2);
+  document.querySelectorAll('.trace-row').forEach(row=>row.classList.toggle('selected',row.dataset.traceId===eventId));
 }
 
 async function loadRecentTraces() {
   const q = getTraceQuery(40);
-  const traces = await safeFetch(`${BASE}/llm-traces?${q}`, { headers: h });
+  const traces = await safeFetch(`${BASE}/llm-events?${q}`, { headers: h });
   if (!traces) return;
   const tbody = document.getElementById('recentTraces');
   tbody.innerHTML = traces.map(t=>`
     <tr class="trace-row" data-trace-id="${esc(t.traceId)}">
       <td class="muted">${esc(t.ts?.slice(11,19)||'—')}</td>
       <td>${esc(t.eventType)}</td>
-      <td>${esc(t.role||'—')}</td>
-      <td>${esc(t.attempt||'—')}</td>
-      <td>${esc(t.label||'—')}</td>
+      <td>${esc(t.preview||'—')}</td>
       <td class="muted">${esc(t.turnId?t.turnId.slice(0,18):'—')}</td>
       <td>${fmtLatency(t.latencyMs)}</td>
-      <td class="preview-cell">${esc(t.preview||`${t.messageCount} msgs / ${t.messageChars}c / tokens ${fmtTokens(t.promptTokens,t.completionTokens)}`)}</td>
+      <td>${fmtTokens(t.promptTokens,t.completionTokens)}</td>
     </tr>`).join('');
   if (!traces.length) { setTraceDetailEmpty('No matching traces for the active filters.'); return; }
   Array.from(tbody.querySelectorAll('.trace-row')).forEach(row=>row.addEventListener('click',()=>loadTraceDetail(row.dataset.traceId)));
@@ -549,43 +547,16 @@ async function loadRecentTraces() {
   await loadTraceDetail(stillVisible?selectedTraceId:traces[0].traceId);
 }
 
-async function loadTraceViews() { await Promise.all([loadTraceSummary(), loadRecentTraces(), loadRuntimeSummary(), loadRecentRuntimeOutcomes()]); }
+async function loadTraceViews() { await Promise.all([loadTraceSummary(), loadRecentTraces()]); }
 
+// Runtime outcomes are not tracked in DB yet — hide panels
 async function loadRuntimeSummary() {
-  const q = getRuntimeQuery(60);
-  const d = await safeFetch(`${BASE}/runtime-outcomes/summary?${q}`, { headers: h });
-  if (!d) return;
-  renderRuntimeReasonSummary(d);
-  document.getElementById('runtimeOutcomesChip').textContent = `${(d.count||0).toLocaleString()} loops · escalated ${(d.escalated||0).toLocaleString()} · avg iter ${d.avgIterations||0}`;
-}
-
-function renderRuntimeReasonSummary(summary) {
-  const tbody = document.getElementById('runtimeReasonSummary');
-  const rows = Object.entries(summary.byReasonCategory||{}).sort((l,r)=>(r[1].count||0)-(l[1].count||0));
-  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="4" class="muted">No agent loop outcomes in the active window.</td></tr>'; return; }
-  tbody.innerHTML = rows.map(([reason,bucket])=>`
-    <tr><td>${esc(reason)}</td><td>${(bucket.count||0).toLocaleString()}</td><td>${(bucket.escalated||0).toLocaleString()}</td><td>${bucket.avgIterations||0}</td></tr>
-  `).join('');
+  document.getElementById('runtimeReasonSummary').innerHTML = '<tr><td colspan="4" class="muted">Not tracked in DB yet.</td></tr>';
 }
 
 async function loadRecentRuntimeOutcomes() {
-  const q = getRuntimeQuery(30);
-  const records = await safeFetch(`${BASE}/runtime-outcomes?${q}`, { headers: h });
-  if (!records) return;
-  const tbody = document.getElementById('recentRuntimeOutcomes');
-  if (!records.length) { tbody.innerHTML = '<tr><td colspan="6" class="muted">No agent loop outcomes for the active filters.</td></tr>'; return; }
-  tbody.innerHTML = records.map(record=>`
-    <tr data-runtime-turn-id="${esc(record.turnId||'')}">
-      <td class="muted">${esc(record.ts?.slice(11,19)||record.updatedAt?.slice(11,19)||'—')}</td>
-      <td>${esc(record.status||'—')}</td>
-      <td>${esc(record.reasonDetail||record.reasonCategory||'—')}</td>
-      <td>${record.iteration??'—'}</td>
-      <td>${record.escalated?'yes':'no'}</td>
-      <td class="muted">${esc(record.turnId?record.turnId.slice(0,18):'—')}</td>
-    </tr>`).join('');
-  Array.from(tbody.querySelectorAll('tr[data-runtime-turn-id]')).forEach(row=>row.addEventListener('click',()=>{
-    document.getElementById('traceTurn').value = row.dataset.runtimeTurnId||''; loadTraceViews();
-  }));
+  document.getElementById('runtimeOutcomesChip').textContent = 'not tracked in DB';
+  document.getElementById('recentRuntimeOutcomes').innerHTML = '<tr><td colspan="6" class="muted">Agent loop outcomes are stored locally and not available on Vercel.</td></tr>';
 }
 
 async function loadCosts() {

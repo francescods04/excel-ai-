@@ -594,6 +594,75 @@ app.get('/api/admin/pricing', authenticate, async (req, res) => {
   }
 });
 
+app.get('/api/admin/llm-stats', authenticate, async (req, res) => {
+  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const { estimateCostBatch } = require('./utils/pricing');
+    const supabase = require('./supabase/client').getSupabase();
+
+    const sinceMs = parseAdminSince(req.query.since);
+    const turnId = req.query.turnId || undefined;
+    const eventType = req.query.eventType || 'llm.response';
+
+    let query = supabase.from('events').select('event_type, tokens_in, tokens_out, model, latency_ms').eq('event_type', eventType);
+    if (sinceMs) query = query.gte('ts', new Date(sinceMs).toISOString());
+    if (turnId) query = query.eq('session_id', turnId);
+    const { data: rows, error } = await query.limit(50000);
+    if (error) throw error;
+
+    const records = (rows || []).map(r => ({ model: r.model || 'unknown', tokens_in: r.tokens_in || 0, tokens_out: r.tokens_out || 0 }));
+    const cost = estimateCostBatch(records);
+
+    const totalLatencyMs = (rows || []).reduce((s, r) => s + (r.latency_ms || 0), 0);
+    const avgLatencyMs = rows?.length ? Math.round(totalLatencyMs / rows.length) : 0;
+
+    res.json({
+      count: rows?.length || 0,
+      requests: rows?.length || 0,
+      errors: 0, // errors are separate events
+      fallbacks: 0,
+      totalLatencyMs,
+      avgLatencyMs,
+      promptTokens: records.reduce((s, r) => s + r.tokens_in, 0),
+      completionTokens: records.reduce((s, r) => s + r.tokens_out, 0),
+      cost: Number(cost.totalCost.toFixed(4)),
+      byModel: Object.fromEntries(Object.entries(cost.byModel).map(([k, v]) => [k, Number(v.toFixed(4))])),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/admin/llm-events', authenticate, async (req, res) => {
+  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  try {
+    const supabase = require('./supabase/client').getSupabase();
+    const sinceMs = parseAdminSince(req.query.since);
+    const turnId = req.query.turnId || undefined;
+    const limit = parseAdminLimit(req.query.limit, 40, 200);
+
+    let query = supabase.from('events').select('*').in('event_type', ['llm.request', 'llm.response', 'llm.error', 'llm.fallback']);
+    if (sinceMs) query = query.gte('ts', new Date(sinceMs).toISOString());
+    if (turnId) query = query.eq('session_id', turnId);
+    const { data: rows, error } = await query.order('ts', { ascending: false }).limit(limit);
+    if (error) throw error;
+
+    res.json((rows || []).map(r => ({
+      traceId: r.id,
+      ts: r.ts,
+      eventType: r.event_type,
+      turnId: r.session_id,
+      model: r.model,
+      latencyMs: r.latency_ms,
+      promptTokens: r.tokens_in,
+      completionTokens: r.tokens_out,
+      preview: r.properties?.label || r.properties?.role || '',
+    })));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 /* ---------- Turn / Item Runtime (Codex-inspired) ---------- */
 
 app.post('/api/turn/start', authenticate, quotaCheck, async (req, res) => {
