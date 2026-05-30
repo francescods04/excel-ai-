@@ -4118,9 +4118,9 @@ async function runAgentStep(state, clientResult, deps = {}) {
       state.results.push({ type: 'done', summary: state.summary });
       state.messages.push(makeUserMessage('Task completed successfully.'));
       onProgress('agentDone', { summary: state.summary, iteration: state.iteration });
-      if (autoFormatActions && autoFormatActions.length > 0) {
-        onProgress('actions', { tool: 'auto_format_on_done', actions: autoFormatActions });
-      }
+      // NOTE: do NOT call onProgress('actions', ...) for stepwise — in stepwise
+      // the SSE 'actions' channel would double-apply on top of the done payload.
+      // The client picks autoFormatActions up from the /step response below.
       return { state, control: 'done', payload: { summary: state.summary, autoFormatActions } };
     }
 

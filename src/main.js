@@ -878,6 +878,17 @@ async function runStepLoop(turnId) {
         }
         case 'done':
           stepLoopTerminated.add(turnId);
+          // Auto-format pass piggybacked on done: server packs formatting
+          // actions in payload.autoFormatActions when the agent built data
+          // but skipped formatting. Apply them inline before declaring done.
+          if (Array.isArray(payload.autoFormatActions) && payload.autoFormatActions.length > 0) {
+            try {
+              addLog(`Auto-format finale: ${payload.autoFormatActions.length} azioni`);
+              await applyStepActions(payload.autoFormatActions);
+            } catch (fmtErr) {
+              addLog(`Auto-format fallito: ${fmtErr.message}`, 'warn');
+            }
+          }
           addLog('Esecuzione completata (stepwise).');
           return;
         case 'aborted':
