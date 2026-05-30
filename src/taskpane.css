@@ -156,16 +156,16 @@ html, body {
 .pl-layer {
   position: absolute;
   inset: -50px;
-  will-change: transform;
+  will-change: transform, margin;
 }
 
 /* Back grid — slowest parallax */
 .pl-grid-back {
   background-image:
-    linear-gradient(90deg, var(--color-grid) 1px, transparent 1px),
-    linear-gradient(0deg, var(--color-grid) 1px, transparent 1px);
+    linear-gradient(90deg, var(--color-grid) 2px, transparent 2px),
+    linear-gradient(0deg, var(--color-grid) 2px, transparent 2px);
   background-size: 48px 48px;
-  opacity: 0.6;
+  opacity: 0.85;
   transform: translateZ(var(--depth-far));
   animation: gridDrift 30s linear infinite;
 }
@@ -173,10 +173,10 @@ html, body {
 /* Front grid — faster parallax */
 .pl-grid-front {
   background-image:
-    linear-gradient(90deg, var(--color-grid-accent) 1px, transparent 1px),
-    linear-gradient(0deg, var(--color-grid-accent) 1px, transparent 1px);
+    linear-gradient(90deg, var(--color-grid-accent) 2px, transparent 2px),
+    linear-gradient(0deg, var(--color-grid-accent) 2px, transparent 2px);
   background-size: 24px 24px;
-  opacity: 0.4;
+  opacity: 0.7;
   transform: translateZ(var(--depth-mid));
   animation: gridDrift 20s linear infinite reverse;
 }
@@ -186,66 +186,102 @@ html, body {
   100% { background-position: 48px 48px, 48px 48px; }
 }
 
+/* Aurora mesh gradient */
+.pl-aurora {
+  background:
+    radial-gradient(ellipse 80% 50% at 20% 40%, rgba(11, 127, 92, 0.22), transparent),
+    radial-gradient(ellipse 60% 40% at 80% 60%, rgba(31, 111, 139, 0.18), transparent),
+    radial-gradient(ellipse 70% 60% at 50% 20%, rgba(23, 128, 78, 0.12), transparent);
+  opacity: 0.8;
+  transform: translateZ(var(--depth-mid));
+  animation: auroraShift 18s ease-in-out infinite alternate;
+}
+
+@keyframes auroraShift {
+  0% { background-position: 0% 50%, 100% 50%, 50% 0%; transform: translateZ(var(--depth-mid)) scale(1); }
+  50% { background-position: 100% 50%, 0% 50%, 50% 100%; transform: translateZ(var(--depth-mid)) scale(1.08); }
+  100% { background-position: 50% 0%, 50% 100%, 0% 50%; transform: translateZ(var(--depth-mid)) scale(1); }
+}
+
+/* Vignette depth */
+.pl-vignette {
+  background: radial-gradient(ellipse at 50% 50%, transparent 0%, rgba(0,0,0,0.03) 60%, rgba(0,0,0,0.12) 100%);
+  opacity: 0.6;
+  transform: translateZ(0);
+  pointer-events: none;
+}
+
 /* Floating orbs */
 .pl-orb {
   border-radius: 50%;
-  filter: blur(60px);
-  opacity: 0.25;
+  filter: blur(45px);
+  opacity: 0.55;
   animation: orbFloat 12s ease-in-out infinite;
 }
 
 .orb-1 {
-  width: 200px;
-  height: 200px;
-  background: var(--color-primary);
-  top: 10%;
-  left: -10%;
+  width: 280px;
+  height: 280px;
+  background: radial-gradient(circle, rgba(11, 127, 92, 0.8) 0%, rgba(11, 127, 92, 0) 70%);
+  top: 5%;
+  left: -15%;
   animation-delay: 0s;
   animation-duration: 15s;
   transform: translateZ(var(--depth-far));
 }
 
 .orb-2 {
-  width: 160px;
-  height: 160px;
-  background: var(--color-accent);
-  top: 60%;
-  right: -15%;
+  width: 220px;
+  height: 220px;
+  background: radial-gradient(circle, rgba(31, 111, 139, 0.7) 0%, rgba(31, 111, 139, 0) 70%);
+  top: 55%;
+  right: -20%;
   animation-delay: -5s;
   animation-duration: 18s;
   transform: translateZ(var(--depth-mid));
 }
 
 .orb-3 {
-  width: 120px;
-  height: 120px;
-  background: var(--color-success);
-  bottom: 10%;
-  left: 30%;
+  width: 180px;
+  height: 180px;
+  background: radial-gradient(circle, rgba(23, 128, 78, 0.7) 0%, rgba(23, 128, 78, 0) 70%);
+  bottom: 5%;
+  left: 25%;
   animation-delay: -10s;
   animation-duration: 14s;
   transform: translateZ(var(--depth-near));
 }
 
+.orb-4 {
+  width: 160px;
+  height: 160px;
+  background: radial-gradient(circle, rgba(180, 145, 35, 0.5) 0%, rgba(180, 145, 35, 0) 70%);
+  top: 30%;
+  left: 70%;
+  animation-delay: -7s;
+  animation-duration: 20s;
+  transform: translateZ(-20px);
+}
+
 @keyframes orbFloat {
   0%, 100% { transform: translate(0, 0) translateZ(var(--depth-far)); }
-  25% { transform: translate(30px, -20px) translateZ(var(--depth-mid)); }
-  50% { transform: translate(-20px, 30px) translateZ(var(--depth-near)); }
-  75% { transform: translate(20px, 20px) translateZ(var(--depth-mid)); }
+  25% { transform: translate(40px, -30px) translateZ(var(--depth-mid)); }
+  50% { transform: translate(-30px, 40px) translateZ(var(--depth-near)); }
+  75% { transform: translate(30px, 30px) translateZ(var(--depth-mid)); }
 }
 
 /* Dust particles */
 .pl-dust {
-  background-image: radial-gradient(circle, var(--color-primary-glow) 1px, transparent 1px);
-  background-size: 60px 60px;
-  opacity: 0.15;
+  background-image: radial-gradient(circle, var(--color-primary-glow) 1.5px, transparent 1.5px);
+  background-size: 50px 50px;
+  opacity: 0.35;
   transform: translateZ(var(--depth-near));
-  animation: dustShimmer 8s ease-in-out infinite alternate;
+  animation: dustShimmer 6s ease-in-out infinite alternate;
 }
 
 @keyframes dustShimmer {
-  0% { opacity: 0.08; }
-  100% { opacity: 0.22; }
+  0% { opacity: 0.2; }
+  100% { opacity: 0.5; }
 }
 
 /* ── 4. LOGIN OVERLAY ── */
