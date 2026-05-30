@@ -28,6 +28,7 @@ const MUTATION_TOOLS = new Set([
   'execute_excel_formula',
   'set_format',
   'bulk_set_format',
+  'format_workbook',
   'bulk_set_notes',
   'add_chart',
   'suspend_calculation',
@@ -498,7 +499,7 @@ let AGENT_SYSTEM_PROMPT = loadPromptVariant(DEFAULT_PROMPT_VARIANT);
  * prescriptions (no "BATCH RULE", no "ATOMIC FORMAT", no "SPEED RULE" — those
  * are anti-patterns we learned from logs and the HAR analysis).
  */
-const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nDEPLOYMENT REMINDERS (this Excel add-in only):\n\n- **End with done.** When the task is complete, call \`done\` with a summary. Do NOT keep calling tools after the work is finished.\n- **Python is sandboxed.** \`execute_python\` is for math on data you pass in as variables. It does NOT have filesystem access — no openpyxl, no /tmp/*.xlsx paths. To read/write the workbook, use the Excel tools.\n- **Live data first.** For market/regulatory/news facts that could have changed, verify with finance tools or \`web_search\` before writing assumptions. Training memory is for stable methodology only.\n- **Skills.** \`<available_skills>\` lists loadable instructions. Before a complex build (DCF, LBO, comps, 3-statement, audit), call \`read_skill\` for the relevant one. Max 2 per task.\n- **Citation hint.** When referencing cells in chat, use the citation link format from the prompt: \`[A1:D1](<citation:Sheet!A1:D1>)\`.\n- **Industry add-ins.** If the user mentions Bloomberg/FactSet/CapIQ/Refinitiv, prefer the native formula syntax (BDP/BDH, FDS/FDSH, CIQ/CIQH, TR) per the Custom Function Integrations section of the prompt. On #VALUE! fallback, switch to web_search.\n- **Cannot do.** VBA macros, file downloads, scheduled automations, =TABLE() data tables. Build sensitivity with direct per-cell formulas instead.`;
+const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nDEPLOYMENT REMINDERS (this Excel add-in only):\n\n- **End with done.** When the task is complete, call \`done\` with a summary. Do NOT keep calling tools after the work is finished.\n- **Python is sandboxed.** \`execute_python\` is for math on data you pass in as variables. It does NOT have filesystem access — no openpyxl, no /tmp/*.xlsx paths. To read/write the workbook, use the Excel tools.\n- **Live data first.** For market/regulatory/news facts that could have changed, verify with finance tools or \`web_search\` before writing assumptions. Training memory is for stable methodology only.\n- **Skills.** \`<available_skills>\` lists loadable instructions. Before a complex build (DCF, LBO, comps, 3-statement, audit), call \`read_skill\` for the relevant one. Max 2 per task.\n- **Citation hint.** When referencing cells in chat, use the citation link format from the prompt: \`[A1:D1](<citation:Sheet!A1:D1>)\`.\n- **Industry add-ins.** If the user mentions Bloomberg/FactSet/CapIQ/Refinitiv, prefer the native formula syntax (BDP/BDH, FDS/FDSH, CIQ/CIQH, TR) per the Custom Function Integrations section of the prompt. On #VALUE! fallback, switch to web_search.\n- **Whole-workbook formatting.** When the user asks to format "everything"/"tutto"/"all sheets"/"the whole workbook" — call \`format_workbook\` ONCE with no args (defaults to every sheet) instead of looping set_format / bulk_set_format per sheet. It applies the institutional palette deterministically in one call.\n- **Cannot do.** VBA macros, file downloads, scheduled automations, =TABLE() data tables. Build sensitivity with direct per-cell formulas instead.`;
 
 const ACTIVE_AGENT_SYSTEM_PROMPT_SUFFIX = AGENT_SYSTEM_PROMPT_SUFFIX;
 
@@ -866,6 +867,27 @@ const TOOL_DEFINITIONS = [
                 }
               }
             }
+          }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'format_workbook',
+      description: `Apply institutional finance formatting (Goldman/JPMorgan palette) to MULTIPLE sheets in ONE call. This is the FASTEST way to format an entire workbook after data is written — uses the deterministic format planner, no extra LLM round-trips needed.\n\nDefaults to ALL sheets in the workbook when "sheets" is omitted. Pass a list to restrict to specific tabs.\n\nUse this when:\n- User asks to format the whole workbook ("formatta tutto", "format all sheets", "make it pretty")\n- You finished building a multi-sheet model and want one final cleanup pass\n- The current formatting is inconsistent across sheets\n\nDo NOT iterate over sheets calling set_format one-by-one — this single call is cheaper and produces a uniform palette.\n\nExamples:\n  { }                                          // format ALL sheets\n  { "sheets": ["Assumptions", "P&L", "DCF"] }  // format only these 3\n  { "mode": "institutional_finance" }          // explicit mode (default)`,
+      parameters: {
+        type: 'object',
+        properties: {
+          sheets: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Optional list of sheet names to format. Omit to format every sheet in the workbook.'
+          },
+          mode: {
+            type: 'string',
+            description: 'Format mode (default "institutional_finance").'
           }
         }
       }
@@ -1668,22 +1690,70 @@ function buildToolStagnationSignature(toolName, params = {}) {
   return `${toolName}:${JSON.stringify(normalizeStagnationValue(params))}`;
 }
 
+// Best-effort sheet name pulled from a tool-call params object, used by the
+// read-thrash detector to distinguish "5 reads on the same sheet" (real loop)
+// from "5 reads each on a different sheet" (legitimate multi-sheet exploration).
+function extractSheetHint(params) {
+  if (!params || typeof params !== 'object') return null;
+  if (typeof params.sheet === 'string' && params.sheet) return params.sheet;
+  if (typeof params.sheetName === 'string' && params.sheetName) return params.sheetName;
+  if (typeof params.target === 'string' && params.target.includes('!')) {
+    return params.target.split('!')[0].replace(/'/g, '');
+  }
+  if (Array.isArray(params.ranges)) {
+    const first = params.ranges.find(r => typeof r === 'string' && r.includes('!'));
+    if (first) return first.split('!')[0].replace(/'/g, '');
+  }
+  if (Array.isArray(params.calls)) {
+    const sheets = params.calls.map(c => c && extractSheetHint(c.params || c)).filter(Boolean);
+    if (sheets.length > 0) return sheets.join(','); // multi-sheet parallel batch
+  }
+  return null;
+}
+
 function detectToolStagnation(trail, maxRepeat = STAGNATION_MAX_REPEAT, altCycles = STAGNATION_ALT_CYCLES) {
   if (!Array.isArray(trail) || trail.length === 0) return null;
   const last = trail[trail.length - 1];
   if (!last || !STAGNATION_WATCH_TOOLS.has(last.toolName)) return null;
 
-  // Read-thrash: last N entries are ALL pure reads (no write between them).
-  // Different signatures (different ranges) still count — what matters is the
-  // absence of any mutation that could have changed the workbook state the
-  // agent keeps re-reading.
+  // Read-thrash: last N reads with no write between them AND high overlap on
+  // target sheet. "Different sheets each iteration" is legitimate multi-sheet
+  // exploration (e.g. read 9 sheets to plan a formatting pass) — NOT thrash.
+  // We only trip the guard when the agent keeps hammering the SAME area while
+  // being confused that writes didn't land.
   if (trail.length >= READS_WITHOUT_WRITE_LIMIT) {
     const tail = trail.slice(-READS_WITHOUT_WRITE_LIMIT);
     if (tail.every(entry => READ_ONLY_TOOLS_FOR_STAGNATION.has(entry.toolName))) {
-      return {
-        pattern: 'read_thrash',
-        entries: tail
-      };
+      // Count how many entries share the most common sheet hint. If the agent
+      // is exploring distinct sheets, distinct hints will dominate and we
+      // bail. Entries with no hint count toward the "unknown" bucket — if
+      // ALL entries are unknown that's also fine (probably workbook-wide
+      // reads like build_workbook_graph).
+      const sheetCounts = new Map();
+      for (const e of tail) {
+        const key = e.sheetHint || '__unknown__';
+        sheetCounts.set(key, (sheetCounts.get(key) || 0) + 1);
+      }
+      // Pick the most frequent NAMED sheet (ignore __unknown__).
+      let topNamedSheet = null;
+      let topNamedCount = 0;
+      for (const [key, count] of sheetCounts) {
+        if (key !== '__unknown__' && count > topNamedCount) {
+          topNamedSheet = key;
+          topNamedCount = count;
+        }
+      }
+      const distinctNamedSheets = [...sheetCounts.keys()].filter(k => k !== '__unknown__').length;
+      // Thrash only when a NAMED sheet captures ≥80% of the reads AND we have
+      // ≤2 distinct named sheets. All-unknown trails get a separate guard: if
+      // every signature is also identical we already catch that as `repeat`,
+      // otherwise we let the agent explore.
+      if (topNamedSheet && (topNamedCount / tail.length) >= 0.8 && distinctNamedSheets <= 2) {
+        return {
+          pattern: 'read_thrash',
+          entries: tail
+        };
+      }
     }
   }
 
@@ -2346,7 +2416,8 @@ async function runAgentLoop(objective, context, options = {}) {
       recentToolTrail.push({
         iteration,
         toolName,
-        signature: buildToolStagnationSignature(toolName, params)
+        signature: buildToolStagnationSignature(toolName, params),
+        sheetHint: extractSheetHint(params)
       });
       if (recentToolTrail.length > STAGNATION_MAX_TRAIL) {
         recentToolTrail.splice(0, recentToolTrail.length - STAGNATION_MAX_TRAIL);
@@ -3222,6 +3293,36 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
         actions
       };
     }
+    case 'format_workbook': {
+      // One-shot deterministic format pass over many sheets. Defaults to ALL
+      // sheets in the workbook when params.sheets is empty/missing.
+      const explicitSheets = Array.isArray(params && params.sheets) ? params.sheets.filter(s => typeof s === 'string' && s) : [];
+      const fallbackSheets = Array.isArray(context && context.workbookSheets) ? context.workbookSheets : [];
+      const sheets = explicitSheets.length > 0 ? explicitSheets : fallbackSheets;
+      if (sheets.length === 0) {
+        return { error: 'format_workbook: no sheets to format (workbook context empty and no "sheets" arg given).' };
+      }
+      try {
+        const { runFormatAgent } = require('./specialists');
+        const result = await runFormatAgent(
+          { sheets, mode: params.mode || 'institutional_finance' },
+          { results: [] }
+        );
+        const actions = Array.isArray(result && result.actions) ? result.actions : [];
+        if (actions.length === 0) {
+          return { ok: true, sheets, actions: [], note: 'No format actions produced (sheets may be empty).' };
+        }
+        return {
+          ok: true,
+          sheets,
+          mode: params.mode || 'institutional_finance',
+          actionCount: actions.length,
+          actions: actions.map(a => a.explanation ? a : ({ ...a, explanation: `format ${a.sheet || ''}` }))
+        };
+      } catch (err) {
+        return { error: `format_workbook failed: ${err.message || String(err)}` };
+      }
+    }
     case 'bulk_set_notes': {
       const notes = Array.isArray(params && params.notes) ? params.notes : [];
       if (notes.length === 0) return { error: 'bulk_set_notes: "notes" must be a non-empty array' };
@@ -3840,7 +3941,21 @@ function handleStepError(state, error, onProgress) {
 function buildParallelPlan(callsInput) {
   return callsInput.map((c, idx) => {
     const tool = c && typeof c.tool === 'string' ? c.tool : '';
-    const innerParams = c && typeof c.params === 'object' && c.params !== null ? c.params : {};
+    // Accept both shapes the LLM may emit:
+    //   { tool: "get_range_as_csv", params: { sheet, target } }
+    //   { tool: "get_range_as_csv", sheet, target }            // flat — common LLM mistake
+    // Without this dual handling, the flat form silently produced 8 reads of
+    // the active sheet (Sensitivity), confirmed on the 2026-05-30 multi-sheet
+    // format run.
+    let innerParams;
+    if (c && typeof c.params === 'object' && c.params !== null) {
+      innerParams = c.params;
+    } else if (c && typeof c === 'object') {
+      const { tool: _t, ...rest } = c;
+      innerParams = Object.keys(rest).length > 0 ? rest : {};
+    } else {
+      innerParams = {};
+    }
     if (!tool) return { idx, tool, ok: false, error: 'missing "tool" field', skipped: true };
     if (tool === 'parallel_calls') return { idx, tool, ok: false, error: 'parallel_calls cannot be nested', skipped: true };
     if (!PARALLEL_SAFE_TOOLS.has(tool)) return { idx, tool, ok: false, error: `tool "${tool}" not allowed inside parallel_calls (read-only allowlist only)`, skipped: true };
@@ -3971,7 +4086,7 @@ async function finishToolExecution(state, toolName, params, thought, toolResult,
     } catch (_) { /* critic is best-effort */ }
   }
 
-  state.recentToolTrail.push({ iteration: state.iteration, toolName, signature: buildToolStagnationSignature(toolName, params) });
+  state.recentToolTrail.push({ iteration: state.iteration, toolName, signature: buildToolStagnationSignature(toolName, params), sheetHint: extractSheetHint(params) });
   if (state.recentToolTrail.length > STAGNATION_MAX_TRAIL) {
     state.recentToolTrail.splice(0, state.recentToolTrail.length - STAGNATION_MAX_TRAIL);
   }
