@@ -6,6 +6,7 @@
   <title>Excel AI — Admin</title>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=DM+Sans:opsz,wght@9..40,400;9..40,500&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -145,6 +146,15 @@
   </style>
 </head>
 <body>
+<div id="loginPanel" style="display:none;position:fixed;inset:0;z-index:9999;background:#0b0e11;flex-direction:column;align-items:center;justify-content:center;font-family:'DM Sans',system-ui,sans-serif;gap:14px;">
+  <div style="font-family:'JetBrains Mono',monospace;font-size:20px;color:#f0a040;margin-bottom:4px;">excel<span style="color:rgba(240,160,64,0.35)">·</span>ai<span style="color:rgba(240,160,64,0.35)">/</span>admin</div>
+  <div style="color:rgba(255,255,255,0.35);font-size:13px;margin-bottom:12px;">Sign in to access the admin dashboard</div>
+  <input type="email" id="loginEmail" placeholder="Email" style="padding:10px 14px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:6px;color:#e8ecf0;font-size:13px;min-width:260px;font-family:'DM Sans',system-ui,sans-serif;outline:none;">
+  <input type="password" id="loginPassword" placeholder="Password" style="padding:10px 14px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:6px;color:#e8ecf0;font-size:13px;min-width:260px;font-family:'DM Sans',system-ui,sans-serif;outline:none;">
+  <button onclick="doLogin()" style="padding:10px 20px;background:#f0a040;border:none;border-radius:6px;color:#0b0e11;font-weight:600;font-size:13px;cursor:pointer;font-family:'DM Sans',system-ui,sans-serif;letter-spacing:0.5px;min-width:260px;">Sign In</button>
+  <div id="loginError" style="color:#f87171;font-size:12px;min-height:18px;"></div>
+</div>
+<div id="appPanel">
   <header>
     <h1>excel<span>·</span>ai<span>/</span>admin</h1>
     <button class="refresh-btn" onclick="loadAll()">⟳ Refresh</button>
@@ -298,8 +308,11 @@
 
 <script>
 const BASE = '/api/admin';
-function getToken() {
-  // Prova da excelai_access_token (custom) o dal localStorage di Supabase
+let h = {};
+let selectedTraceId = null;
+let supabaseClient = null;
+
+function getStoredToken() {
   const custom = localStorage.getItem('excelai_access_token');
   if (custom) return custom;
   for (let i = 0; i < localStorage.length; i++) {
@@ -313,10 +326,95 @@ function getToken() {
   }
   return null;
 }
-const tok = getToken();
-if (!tok) { document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:monospace;color:#f87171">Access denied — login first in the Excel add-in</div>'; throw new Error('no token'); }
-const h = { Authorization: `Bearer ${tok}` };
-let selectedTraceId = null;
+
+function showLoginPanel() {
+  document.getElementById('loginPanel').style.display = 'flex';
+  document.getElementById('appPanel').style.display = 'none';
+}
+
+function showApp() {
+  document.getElementById('loginPanel').style.display = 'none';
+  document.getElementById('appPanel').style.display = 'block';
+}
+
+function showLoginError(msg) {
+  const el = document.getElementById('loginError');
+  if (el) el.textContent = msg || '';
+}
+
+async function initAuth() {
+  try {
+    const configRes = await fetch('/api/config');
+    const config = await configRes.json();
+    if (!config.supabaseUrl || !config.supabaseAnonKey) {
+      showLoginError('Server config unavailable');
+      return;
+    }
+    const { createClient } = window.supabase || {};
+    if (!createClient) {
+      showLoginError('Auth client not loaded');
+      return;
+    }
+    supabaseClient = createClient(config.supabaseUrl, config.supabaseAnonKey, {
+      auth: { autoRefreshToken: true, persistSession: true, detectSessionInUrl: true }
+    });
+  } catch (e) {
+    showLoginError('Failed to load auth config');
+    return;
+  }
+
+  const tok = getStoredToken();
+  if (tok) {
+    h = { Authorization: `Bearer ${tok}` };
+    tryAdminAccess();
+  } else {
+    showLoginPanel();
+  }
+}
+
+async function tryAdminAccess() {
+  try {
+    const r = await fetch(`${BASE}/stats`, { headers: h });
+    if (!r.ok) {
+      if (r.status === 401 || r.status === 403) {
+        showLoginError('Session expired. Please sign in again.');
+        localStorage.removeItem('excelai_access_token');
+        showLoginPanel();
+        return;
+      }
+      throw new Error('Server error ' + r.status);
+    }
+    showApp();
+    loadAll();
+  } catch (e) {
+    showLoginError('Unable to reach admin API');
+    showLoginPanel();
+  }
+}
+
+async function doLogin() {
+  const email = document.getElementById('loginEmail').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  if (!email || !password) {
+    showLoginError('Email and password required');
+    return;
+  }
+  showLoginError('');
+  try {
+    const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+    if (error || !data.session) {
+      showLoginError(error?.message || 'Login failed');
+      return;
+    }
+    const token = data.session.access_token;
+    localStorage.setItem('excelai_access_token', token);
+    h = { Authorization: `Bearer ${token}` };
+    showApp();
+    loadAll();
+  } catch (e) {
+    showLoginError(e.message || 'Login error');
+  }
+}
 
 document.getElementById('traceSince').value = new Date().toISOString().slice(0, 10);
 
@@ -659,7 +757,8 @@ function loadAll() {
   loadTraceViews();
 }
 
-loadAll();
+initAuth();
 </script>
+</div>
 </body>
 </html>
