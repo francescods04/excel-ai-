@@ -23,7 +23,12 @@ const { LIMITS, assertActionBatchWithinLimits, allSettledLimit } = require('./sa
 const { track } = require('../telemetry/tracker');
 const { triageObjective } = require('../agents/triage');
 const { generateBlueprint } = require('../agents/architect');
-const { runParallelBlueprint } = require('../agents/parallelOrchestrator');
+const {
+  runParallelBlueprint,
+  initBlueprintRun,
+  stepBlueprintWave,
+  computeBlueprintSummary
+} = require('../agents/parallelOrchestrator');
 const { runWithExecutionContext } = require('../utils/executionContext');
 
 const TURNS_DIR = process.env.DATA_DIR
@@ -1379,8 +1384,22 @@ async function planTurn(turnId) {
       // are faster, route every triage tier to agent_loop and just rescale
       // the iteration budget. Set FORCE_AGENT_LOOP=false to restore the old
       // architect/deep-plan paths.
-      const FORCE_AGENT_LOOP = process.env.FORCE_AGENT_LOOP !== 'false';
-      if (FORCE_AGENT_LOOP) {
+      // 2026-05-30 update: architect_parallel now runs WAVE-BY-WAVE under the
+      // stepwise engine, so the 300s serverless cap no longer bites. For
+      // institutional + parallelizable triage results we let the stepwise
+      // architect run instead of forcing agent_loop. Set
+      // ARCHITECT_PARALLEL_STEPWISE=false (or FORCE_AGENT_LOOP=true) to keep
+      // forcing agent_loop everywhere — the previous safe default.
+      const FORCE_AGENT_LOOP = process.env.FORCE_AGENT_LOOP === 'true';
+      const ARCHITECT_STEPWISE_ON = process.env.ARCHITECT_PARALLEL_STEPWISE !== 'false';
+      const triageWantsParallel = triage.mode === 'architect_then_parallel' && triage.parallelizable !== false;
+      const useArchitectStepwise = !FORCE_AGENT_LOOP && ARCHITECT_STEPWISE_ON && triageWantsParallel;
+
+      if (FORCE_AGENT_LOOP || (triage.mode === 'architect_then_parallel' && !useArchitectStepwise)) {
+        // agent_loop fallback. Used when:
+        //  - FORCE_AGENT_LOOP=true (paranoid override), or
+        //  - architect requested but stepwise disabled → the old background
+        //    orchestrator path dies on Vercel, so fall back to agent_loop.
         strategy = chooseTurnStrategy(turn.objective, turn.context, turn.parentTurnId);
         strategy.mode = 'agent_loop';
         strategy.label = `Agent loop (triage: ${triage.complexity})`;
@@ -1390,10 +1409,10 @@ async function planTurn(turnId) {
         strategy.maxIterations = Math.max(strategy.maxIterations || 45, triage.estimated_iterations * 2);
         strategy.allowEscalation = false;
         strategy.triage = triage;
-      } else if (triage.mode === 'architect_then_parallel') {
+      } else if (useArchitectStepwise) {
         strategy = {
           mode: 'architect_parallel',
-          label: 'Architect + parallel workers',
+          label: 'Architect + parallel workers (stepwise)',
           reason: triage.reasoning,
           promptVariant: 'fast',
           maxIterations: triage.estimated_iterations,
@@ -2419,6 +2438,14 @@ function approveTurn(turnId) {
     initStepwiseAgentLoop(turnId, strategy);
     return runningTurn;
   }
+  // Same logic for architect_parallel: the orchestrator's wave loop dies on
+  // serverless after the HTTP response. Drive it wave-by-wave from the client
+  // instead, persisting the slice DAG state between calls.
+  if (strategy.mode === 'architect_parallel' && resolveExecutionEngine(turn) === 'stepwise') {
+    appendLog(turnId, 'Motore stepwise architect attivo: wave-by-wave guidato dal client.', 'info');
+    initStepwiseArchitectParallel(turnId, strategy);
+    return runningTurn;
+  }
 
   void runWithExecutionContext({
     turnId: turn.id,
@@ -2521,6 +2548,224 @@ function initStepwiseAgentLoop(turnId, strategy) {
   return turn;
 }
 
+const ARCHITECT_TASK_ID = 'orchestrator';
+
+/* ---------- Stepwise Architect (wave-by-wave) ---------- */
+
+function initStepwiseArchitectParallel(turnId, strategy) {
+  const turn = _getTurnRef(turnId);
+  if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
+  if (!turn.blueprint) throw new Error('initStepwiseArchitectParallel: blueprint mancante sul turn');
+
+  const orchestratorTask = {
+    id: ARCHITECT_TASK_ID,
+    agent: 'ai',
+    tool: 'orchestrator',
+    description: strategy.label || 'Architect parallel workers'
+  };
+
+  // Pre-register slice items so the UI can show the DAG with pending status.
+  // The actual sliceStarted event below moves them to inProgress when each wave runs.
+  const sliceItemIds = {};
+  for (const slice of turn.blueprint.slices) {
+    const itemId = `slice-${slice.id}`;
+    sliceItemIds[slice.id] = itemId;
+    upsertItem(turnId, {
+      id: itemId,
+      type: 'taskExecution',
+      taskId: slice.id,
+      agent: 'ai',
+      tool: 'orchestrator.slice',
+      description: slice.title,
+      deps: slice.deps || [],
+      status: 'pending'
+    });
+  }
+
+  const maxParallel = Number(process.env.PARALLEL_ORCHESTRATOR_MAX) || 4;
+  appendLog(
+    turnId,
+    `Avvio orchestratore (stepwise): ${turn.blueprint.slices.length} slice in ${turn.blueprint.waves.length} wave (max ${maxParallel} parallele).`
+  );
+
+  turn.architectState = initBlueprintRun(turn.blueprint);
+  turn.architectSliceItems = sliceItemIds;
+  turn.agentStepSeq = 0;
+  turn.agentCollectedActions = [];
+  turn.executionEngine = 'stepwise';
+  saveTurn(turn);
+
+  streaming.sendEvent(turnId, 'stepwiseReady', { turnId, engine: 'architect_parallel' });
+  return turn;
+}
+
+function makeArchitectStepProgress(turnId) {
+  const turn = _getTurnRef(turnId);
+  const sliceItemIds = (turn && turn.architectSliceItems) || {};
+  return (eventType, data = {}) => {
+    if (eventType === 'waveStarted') {
+      appendLog(turnId, `Wave ${data.waveIndex} avviata: ${(data.sliceIds || []).join(', ')}.`, 'info');
+      emitAgentLoopTodos(turnId, 'apply');
+      return;
+    }
+    if (eventType === 'sliceStarted') {
+      const itemId = sliceItemIds[data.sliceId];
+      if (itemId) {
+        const item = upsertItem(turnId, { id: itemId, type: 'taskExecution', taskId: data.sliceId, status: 'inProgress' });
+        emitItemStarted(turnId, item);
+      }
+      appendLog(turnId, `[slice ${data.sliceId}] avviato (${data.title || ''}) — tier=${data.tier || 'flash'}`);
+      return;
+    }
+    if (eventType === 'sliceCompleted') {
+      const itemId = sliceItemIds[data.sliceId];
+      if (itemId) {
+        const item = upsertItem(turnId, { id: itemId, type: 'taskExecution', taskId: data.sliceId, status: 'completed', result: { summary: data.summary } });
+        emitItemCompleted(turnId, item);
+      }
+      appendLog(turnId, `[slice ${data.sliceId}] completato in ${data.elapsedMs}ms — ${(data.summary || '').slice(0, 100)}`);
+      return;
+    }
+    if (eventType === 'sliceFailed') {
+      const itemId = sliceItemIds[data.sliceId];
+      if (itemId) {
+        const item = upsertItem(turnId, { id: itemId, type: 'taskExecution', taskId: data.sliceId, status: 'error', error: data.error || data.status });
+        emitItemCompleted(turnId, item);
+      }
+      appendLog(turnId, `[slice ${data.sliceId}] fallito: ${data.error || data.status}`, 'error');
+      return;
+    }
+    if (eventType === 'sliceSkipped') {
+      const itemId = sliceItemIds[data.sliceId];
+      if (itemId) {
+        const item = upsertItem(turnId, { id: itemId, type: 'taskExecution', taskId: data.sliceId, status: 'error', error: `skipped (${data.reason})` });
+        emitItemCompleted(turnId, item);
+      }
+      appendLog(turnId, `[slice ${data.sliceId}] saltato: ${data.reason}`, 'warn');
+      return;
+    }
+    if (eventType === 'sliceEvent') {
+      const inner = data.event;
+      const inn = data.data || {};
+      if (inner === 'thought') {
+        emitEphemeralLog(turnId, `[slice ${data.sliceId} / loop ${inn.iteration || '?'}] ${inn.tool || 'step'}: ${(inn.thought || '').slice(0, 140)}`);
+      } else if (inner === 'iterationError') {
+        appendLog(turnId, `[slice ${data.sliceId}] iter error: ${inn.error}`, 'warn');
+      } else if (inner === 'actions') {
+        // Forward Excel mutation actions to the client over SSE — same pipeline
+        // used by executeAgentLoopTurn so the action queue / preview / Excel
+        // batch applier all keep working with no client changes.
+        const actions = Array.isArray(inn.actions) ? inn.actions : [];
+        if (actions.length > 0) {
+          const itemId = (turn && turn.architectSliceItems && turn.architectSliceItems[data.sliceId]) || `slice-${data.sliceId}`;
+          if (!Array.isArray(turn.agentCollectedActions)) turn.agentCollectedActions = [];
+          turn.agentCollectedActions.push(...actions);
+          emitTaskActions(turnId, {
+            id: data.sliceId,
+            itemId: `${itemId}-batch-${(turn.agentCollectedActions.length)}`
+          }, actions);
+          emitEphemeralLog(turnId, `[slice ${data.sliceId} / loop ${inn.iteration || '?'}] Invio ${actions.length} azioni Excel`);
+        }
+      }
+      return;
+    }
+    if (eventType === 'blueprintCompleted') {
+      appendLog(turnId, `Orchestratore concluso — succeeded:${data.succeeded} failed:${data.failed} skipped:${data.skipped}`);
+    }
+  };
+}
+
+async function stepArchitectWave(turnId) {
+  let turn = _getTurnRef(turnId);
+  // Multi-instance safety: if our in-memory copy is stale (another serverless
+  // instance ran the previous wave), reload from Supabase so we resume the
+  // blueprint state correctly and don't re-run slices that already succeeded.
+  if (turn && turn.architectState) {
+    try {
+      const fresh = await hydrateTurnFromSupabase(turnId);
+      if (fresh && fresh.architectState) turn = fresh;
+    } catch (_) { /* fall back to in-memory copy */ }
+  }
+  if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
+  if (!turn.architectState) throw new Error(`Turn ${turnId} non è in modalità architect stepwise`);
+
+  if (turn.status === 'completed') {
+    return { control: 'done', payload: { summary: turn.narration?.message }, stepSeq: turn.agentStepSeq || 0 };
+  }
+  if (turn.status === 'error') {
+    return { control: 'aborted', payload: { reason: turn.error }, stepSeq: turn.agentStepSeq || 0 };
+  }
+  // If we've already completed every wave on a previous /step but the client is
+  // polling again, finalize now and return done.
+  if (turn.architectState.status === 'completed') {
+    return finalizeStepwiseArchitectTurn(turnId);
+  }
+
+  const task = { id: ARCHITECT_TASK_ID, agent: 'ai', tool: 'orchestrator', description: turn.strategy?.label || 'Architect parallel' };
+  const runtime = buildRuntimeHelpers(turnId, task);
+  const context = buildTurnExecutionContext(turn);
+  const onEvent = makeArchitectStepProgress(turnId);
+
+  const { state, done, summary } = await stepBlueprintWave(turn.architectState, {
+    context,
+    turnId,
+    onEvent,
+    runtimeHelpers: { requestClientTool: runtime.requestClientTool, requestQuestion: runtime.requestQuestion },
+    pullSteerMessages: () => drainSteerQueue(turnId)
+  });
+
+  turn.architectState = state;
+  turn.agentStepSeq = (turn.agentStepSeq || 0) + 1;
+  await saveTurnDurable(turn);
+
+  if (done) {
+    turn.architectSummary = summary;
+    saveTurn(turn);
+    return finalizeStepwiseArchitectTurn(turnId);
+  }
+
+  // Wave done but more waves remain — tell client to call step again.
+  const result = { control: 'continue', payload: { waveIndex: state.waveIndex }, stepSeq: turn.agentStepSeq };
+  turn.lastStepResult = result;
+  return result;
+}
+
+async function finalizeStepwiseArchitectTurn(turnId) {
+  const turn = _getTurnRef(turnId);
+  if (!turn) return { control: 'aborted', payload: { reason: 'turn missing' }, stepSeq: 0 };
+  const summary = turn.architectSummary || computeBlueprintSummary(turn.architectState || { sliceStates: {}, sliceResults: {} });
+
+  storeTaskResult(turnId, ARCHITECT_TASK_ID, {
+    data: {
+      builder: 'architect-parallel-stepwise',
+      strategy: turn.strategy?.reason,
+      promptVariant: turn.strategy?.promptVariant,
+      summary
+    },
+    actions: Array.isArray(turn.agentCollectedActions) ? turn.agentCollectedActions : []
+  });
+
+  emitAgentLoopTodos(turnId, 'verify');
+  const completedTurn = setTurnStatus(turnId, 'completed');
+  const summaryText = `Architect completato: ${summary.succeeded}/${summary.total} slice ok` +
+    (summary.failed ? `, ${summary.failed} falliti` : '') +
+    (summary.skipped ? `, ${summary.skipped} saltati` : '') + '.';
+  completedTurn.narration = { message: summaryText, suggestions: [] };
+  await saveTurnDurable(completedTurn);
+
+  track({
+    eventType: 'turn.completed',
+    userId: completedTurn.userId || null,
+    properties: { actionCount: (turn.agentCollectedActions || []).length || 0, builder: 'architect-parallel-stepwise' },
+    success: 1
+  });
+
+  appendLog(turnId, summaryText, 'info');
+  emitAgentLoopTodos(turnId, 'done');
+  emitTurnCompleted(completedTurn);
+  return { control: 'done', payload: { summary: summaryText }, stepSeq: turn.agentStepSeq || 0 };
+}
+
 // Decide whether an incoming /step is a stale/retried request that must NOT
 // advance the loop. Returns a result object to return verbatim, or null when
 // the step should proceed normally. Pure (no I/O) so it is unit-testable.
@@ -2557,6 +2802,11 @@ async function stepTurn(turnId, clientResult, clientSeq) {
     if (fresh) turn = fresh;
   }
   if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
+  // Architect stepwise runs wave-by-wave, no per-iteration agentState. It owns
+  // its own step pipeline; the agent_loop step machinery below doesn't apply.
+  if (turn.architectState) {
+    return stepArchitectWave(turnId);
+  }
   if (!turn.agentState) throw new Error(`Turn ${turnId} non è in modalità stepwise`);
 
   if (turn.status === 'completed') {

@@ -174,7 +174,214 @@ async function runParallelBlueprint({
   return summary;
 }
 
+/* =========================================================================
+ * STEPWISE BLUEPRINT ENGINE (serverless-friendly, wave-by-wave)
+ *
+ * runParallelBlueprint (above) runs the WHOLE blueprint inside a single
+ * server invocation. On Vercel that invocation is killed after the HTTP
+ * response, so the orchestrator's background loop dies long before all
+ * waves finish — exactly the 300s cap the user keeps hitting.
+ *
+ * stepBlueprintWave runs ONE wave per call: it launches every slice whose
+ * deps are satisfied in Promise.all, awaits them all, persists the
+ * serializable state back to the caller, and returns. The client driver
+ * then POSTs another /step to advance to the next wave. State is a plain
+ * JSON object so it survives Supabase round-trips between waves.
+ *
+ * Each wave fits comfortably under 300s because:
+ *   - architect caps slice estimated_iters at ~10-15
+ *   - workers default to flash + thinking off (~2-4s/iter)
+ *   - typical wave duration: 30-90s (max-of-parallel-slices)
+ * ========================================================================= */
+
+function initBlueprintRun(blueprint) {
+  if (!blueprint || !Array.isArray(blueprint.slices) || blueprint.slices.length === 0) {
+    throw new Error('initBlueprintRun: blueprint with slices required');
+  }
+  const sliceStates = {};
+  for (const s of blueprint.slices) sliceStates[s.id] = 'pending';
+  return {
+    // We embed the full blueprint so a different serverless instance can
+    // pick the run back up after Supabase hydration — no need to also fetch
+    // the blueprint from the turn separately.
+    blueprint,
+    sliceStates,        // id → 'pending'|'running'|'succeeded'|'failed'|'skipped'
+    sliceResults: {},   // id → { ok, status, summary, iteration, error?, skipped?, reason? }
+    waveIndex: 0,
+    startedAt: null,
+    completedAt: null,
+    status: 'pending'   // 'pending'|'running'|'completed'
+  };
+}
+
+function computeBlueprintSummary(state) {
+  const summary = { total: 0, succeeded: 0, failed: 0, skipped: 0, perSlice: {} };
+  for (const [id, st] of Object.entries(state.sliceStates)) {
+    summary.total++;
+    if (st === 'succeeded') summary.succeeded++;
+    else if (st === 'failed') summary.failed++;
+    else if (st === 'skipped') summary.skipped++;
+    summary.perSlice[id] = { state: st, ...(state.sliceResults[id] || {}) };
+  }
+  return summary;
+}
+
+// Mark every pending slice whose deps failed/skipped as skipped (transitive).
+// Returns true if any slice was newly marked, so the caller can re-run until stable.
+function _cascadeSkips(state, onEvent) {
+  let changed = false;
+  for (const slice of state.blueprint.slices) {
+    if (state.sliceStates[slice.id] !== 'pending') continue;
+    for (const dep of slice.deps || []) {
+      const depSt = state.sliceStates[dep];
+      if (depSt === 'failed' || depSt === 'skipped') {
+        state.sliceStates[slice.id] = 'skipped';
+        state.sliceResults[slice.id] = { ok: false, skipped: true, reason: `dep ${dep} ${depSt}` };
+        onEvent('sliceSkipped', { sliceId: slice.id, reason: `dep ${dep} ${depSt}` });
+        changed = true;
+        break;
+      }
+    }
+  }
+  return changed;
+}
+
+async function stepBlueprintWave(state, {
+  context,
+  turnId,
+  onEvent = () => {},
+  runtimeHelpers = {},
+  runAgentLoopFn = runAgentLoop,
+  maxParallel = DEFAULT_MAX_PARALLEL,
+  pullSteerMessages = null
+} = {}) {
+  if (!state || !state.blueprint) {
+    throw new Error('stepBlueprintWave: state with embedded blueprint required');
+  }
+  if (state.status === 'completed') {
+    return { state, done: true, summary: computeBlueprintSummary(state) };
+  }
+  if (state.status === 'pending') {
+    state.status = 'running';
+    state.startedAt = Date.now();
+  }
+
+  const sliceMap = new Map(state.blueprint.slices.map(s => [s.id, s]));
+
+  // Cascade skips from any deps already known-bad before computing ready set.
+  while (_cascadeSkips(state, onEvent)) { /* stable */ }
+
+  // Ready = pending AND every dep succeeded. (Failed/skipped deps were just
+  // cascaded above so they can't appear here.)
+  const ready = [];
+  for (const slice of state.blueprint.slices) {
+    if (state.sliceStates[slice.id] !== 'pending') continue;
+    const allDepsOk = (slice.deps || []).every(d => state.sliceStates[d] === 'succeeded');
+    if (allDepsOk) ready.push(slice.id);
+  }
+
+  // Nothing ready → either all done, or deadlock.
+  if (ready.length === 0) {
+    const stillOpen = Object.values(state.sliceStates).some(s => s === 'pending' || s === 'running');
+    if (stillOpen) {
+      // Deadlock on validated DAG should be impossible, but be defensive:
+      // mark everything still pending as skipped and finish.
+      for (const id of Object.keys(state.sliceStates)) {
+        if (state.sliceStates[id] === 'pending') {
+          state.sliceStates[id] = 'skipped';
+          state.sliceResults[id] = { ok: false, skipped: true, reason: 'orchestrator_deadlock' };
+          onEvent('sliceSkipped', { sliceId: id, reason: 'orchestrator_deadlock' });
+        }
+      }
+    }
+    state.status = 'completed';
+    state.completedAt = Date.now();
+    const summary = computeBlueprintSummary(state);
+    onEvent('blueprintCompleted', summary);
+    return { state, done: true, summary };
+  }
+
+  // Run the wave. Each slice is a runAgentLoop driven by the parent's
+  // requestClientTool — they share the same HTTP invocation and each await
+  // their own SSE round-trip in parallel.
+  const toLaunch = ready.slice(0, maxParallel);
+  state.waveIndex = (state.waveIndex || 0) + 1;
+  onEvent('waveStarted', { waveIndex: state.waveIndex, sliceIds: toLaunch });
+
+  const promises = toLaunch.map(sliceId => {
+    const slice = sliceMap.get(sliceId);
+    const sliceTier = slice.tier === 'pro' ? 'pro' : 'flash';
+    state.sliceStates[sliceId] = 'running';
+    const startedAt = Date.now();
+    onEvent('sliceStarted', {
+      sliceId,
+      title: slice.title,
+      estimatedIters: slice.estimated_iters,
+      tier: sliceTier
+    });
+    logger.info(`[Orchestrator/stepwise] slice "${sliceId}" started [tier=${sliceTier}, wave=${state.waveIndex}]`);
+
+    const slicePrompt = buildSliceWorkerPrompt(slice, state.blueprint);
+    const sliceObjective = `${slice.title}\n\n${slice.instructions}`;
+    const workerContext = { ...context, _sliceId: sliceId, _sliceScope: slice.scope };
+    const tier = sliceTier;
+    const workerOpts = {
+      turnId,
+      promptVariant: tier === 'pro' ? 'default' : 'fast',
+      modelOverride: tier === 'pro' ? PRO_MODEL : undefined,
+      maxIterations: Math.max(6, Math.min(20, slice.estimated_iters * 2)),
+      systemPromptAddendum: slicePrompt,
+      onEvent: (evt, data) => { onEvent('sliceEvent', { sliceId, event: evt, data }); },
+      requestClientTool: runtimeHelpers.requestClientTool,
+      requestQuestion: runtimeHelpers.requestQuestion,
+      pullSteerMessages
+    };
+
+    return runAgentLoopFn(sliceObjective, workerContext, workerOpts)
+      .then(result => {
+        const ok = result && result.status === 'completed';
+        state.sliceStates[sliceId] = ok ? 'succeeded' : 'failed';
+        state.sliceResults[sliceId] = {
+          ok,
+          status: result?.status,
+          summary: result?.summary,
+          iteration: result?.iteration
+        };
+        onEvent(ok ? 'sliceCompleted' : 'sliceFailed', {
+          sliceId,
+          status: result?.status,
+          summary: result?.summary,
+          iteration: result?.iteration,
+          elapsedMs: Date.now() - startedAt
+        });
+        logger.info(`[Orchestrator/stepwise] slice "${sliceId}" ${ok ? 'completed' : 'failed'}`);
+      })
+      .catch(err => {
+        state.sliceStates[sliceId] = 'failed';
+        state.sliceResults[sliceId] = { ok: false, error: err.message };
+        onEvent('sliceFailed', { sliceId, error: err.message, elapsedMs: Date.now() - startedAt });
+        logger.warn(`[Orchestrator/stepwise] slice "${sliceId}" threw: ${err.message}`);
+      });
+  });
+
+  await Promise.allSettled(promises);
+
+  // Final check: anything still open? If not, mark complete.
+  const stillOpen = Object.values(state.sliceStates).some(s => s === 'pending' || s === 'running');
+  if (!stillOpen) {
+    state.status = 'completed';
+    state.completedAt = Date.now();
+    const summary = computeBlueprintSummary(state);
+    onEvent('blueprintCompleted', summary);
+    return { state, done: true, summary };
+  }
+  return { state, done: false };
+}
+
 module.exports = {
   runParallelBlueprint,
+  initBlueprintRun,
+  stepBlueprintWave,
+  computeBlueprintSummary,
   DEFAULT_MAX_PARALLEL
 };
