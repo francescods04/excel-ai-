@@ -258,6 +258,30 @@ function assertSerializable(state, label) {
     console.log('OK disabledTools blocks execute_office_js with redirect and refunds iter');
   }
 
+  /* 14) sequential create_named_range x3 → hard-block + force bulk + iter refund */
+  {
+    const state = initAgentRun('build assumptions', CTX, { promptVariant: 'fast' });
+    // First two pass through (real action emitted).
+    let deps = scripted([
+      { thought: 'name 1', tool: 'create_named_range', params: { name: 'rev', refers_to: '=Assumptions!$B$5' } },
+      { thought: 'name 2', tool: 'create_named_range', params: { name: 'cogs', refers_to: '=Assumptions!$B$6' } },
+      { thought: 'name 3', tool: 'create_named_range', params: { name: 'opex', refers_to: '=Assumptions!$B$7' } }
+    ]);
+    await runAgentStep(state, null, deps);
+    await runAgentStep(state, null, deps);
+    const iterBefore = state.iteration;
+    const blocked = await runAgentStep(state, null, deps);
+    assert.strictEqual(blocked.control, 'continue', 'third call rejected as continue');
+    const last = blocked.state.results[blocked.state.results.length - 1];
+    assert.strictEqual(last.blocked, true);
+    assert.strictEqual(last.tool, 'create_named_range');
+    const lastMsg = blocked.state.messages[blocked.state.messages.length - 1];
+    assert.match(String(lastMsg.content), /STAGNATION GUARD/);
+    assert.match(String(lastMsg.content), /bulk_create_named_ranges/);
+    assert.strictEqual(blocked.state.iteration, iterBefore, 'iteration refunded');
+    console.log('OK third sequential create_named_range hard-blocked with bulk redirect');
+  }
+
   console.log('\nagent step tests completed.');
 })().catch(err => {
   console.error('FAIL:', err && err.stack ? err.stack : err);

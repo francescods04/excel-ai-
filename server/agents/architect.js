@@ -31,9 +31,18 @@ KEY PRINCIPLES:
 
 CANONICAL ASSUMPTIONS LAYOUT (mandatory — schema ambiguity has cascade-killed every multi-sheet run that didn't follow this):
 - The Assumptions slice MUST output a flat 2-column table: column A = driver label (string), column B = driver value (number or %). No "Unit" column, no "Section" column. One driver per row, grouped by blank rows between sections (Section headers go in column A only with no value in B).
-- Every input cell that downstream slices reference MUST be wrapped in a NAMED RANGE whose name matches the label (snake_case, e.g. food_cogs_pct, daily_covers, avg_check, equity_share, debt_share, interest_rate, tax_rate, rent_annual, salary_per_fte, num_ftes, capex_fitout, etc.).
 - Year header row (2025-2030) MUST NOT live on the Assumptions sheet. It belongs on Revenue / P&L / CF sheets at a fixed row (row 3 by convention).
-- The Assumptions slice instructions field MUST list, by row and value, every driver it will write — and the dependent slices' instructions MUST reference drivers by NAMED RANGE (=daily_covers, =food_cogs_pct), NEVER by cell address (=Assumptions!B12) and NEVER by reading a column-of-units. This is the only way parallel workers stay consistent.
+- The Assumptions slice instructions field MUST contain a CELL MAP block that lists every driver row by literal address, e.g.:
+    CELL MAP:
+      B5  daily_covers          200
+      B6  avg_check             18.5
+      B7  days_open             360
+      B9  food_cogs_pct         0.30
+      B14 rent_annual           120000
+      B20 capex_fitout          300000
+      ...
+  Every dependent slice's instructions field MUST reference these inputs by absolute cell address (e.g. "=Assumptions!$B$5" for daily covers, "=Assumptions!$B$9*RevenueRow" for food cost). NEVER reference by column-of-units, NEVER guess the row, NEVER write the driver value inline in dependent sheets.
+- Do NOT mandate Excel named ranges (=daily_covers). Past runs spent the whole iter budget calling create_named_range one-at-a-time and never reached the dependent slices. Absolute cell addresses from the CELL MAP are sufficient and reliable.
 - Format conventions are applied later by format_and_verify. Do NOT pre-format the Assumptions sheet as percent for cells that hold integers (in last run "Number of Employees: 15" rendered as "1500%" because the row was percent-formatted). Number-vs-percent typing belongs to the format slice and only on cells where the underlying value is a fraction.
 
 OUTPUT JSON SCHEMA (strict, no extras):

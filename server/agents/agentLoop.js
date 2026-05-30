@@ -4284,6 +4284,28 @@ async function runAgentStep(state, clientResult, deps = {}) {
       return { state, control: 'continue', payload: { thought } };
     }
 
+    // Hard-block sequential one-at-a-time tools after 2 attempts. The soft
+    // BATCH HINT nudge was ignored 17 times in the 2026-05-30 run, burning
+    // the whole iter budget on create_named_range one-by-one. Once the LLM
+    // demonstrates the pattern, force the bulk alternative.
+    const SEQUENTIAL_FORCE_BULK = {
+      create_named_range: 'bulk_create_named_ranges',
+      create_sheet: 'bulk_create_sheets',
+      set_format: 'bulk_set_format'
+    };
+    const bulkReplacement = SEQUENTIAL_FORCE_BULK[toolName];
+    if (bulkReplacement) {
+      const recent = state.recentToolTrail.slice(-2).map(e => e.toolName);
+      if (recent.length === 2 && recent.every(n => n === toolName)) {
+        const forceMsg = `STAGNATION GUARD: "${toolName}" was called 3 times in a row. Your NEXT call MUST be "${bulkReplacement}" with ALL remaining items in one payload. Sequential one-at-a-time calls have killed prior slices by exhausting the iteration budget. This call is rejected; retry as ${bulkReplacement}.`;
+        state.messages.push(makeUserMessage(forceMsg));
+        state.results.push({ type: 'error', error: forceMsg, blocked: true, tool: toolName });
+        onProgress('iterationError', { iteration: state.iteration, error: forceMsg });
+        state.iteration = Math.max(0, state.iteration - 1);
+        return { state, control: 'continue', payload: { thought } };
+      }
+    }
+
     if (toolName === 'web_search' || toolName === 'web_fetch') {
       state.webSearchCount++;
       if (state.webSearchCount > state.config.maxWebSearch) {
