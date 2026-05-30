@@ -1882,6 +1882,9 @@ async function runAgentLoop(objective, context, options = {}) {
   let iteration = options.resumeIteration || 0;
   let done = false;
   const codeLog = options.resumeCodeLog || [];
+  // Track sheets touched by write actions so we can run the deterministic format
+  // pass once on done. Without this the agent ends with raw unformatted numbers.
+  const touchedSheets = new Set(options.resumeTouchedSheets || []);
 
   logger.info(`[AgentLoop] Starting loop for: ${objective}`);
   onEvent('agentStarted', { objective, iteration });
@@ -2060,6 +2063,31 @@ async function runAgentLoop(objective, context, options = {}) {
       // Handle done
       if (toolName === 'done') {
         done = true;
+        // Auto-format pass: agent built data but skipped formatting (typical with
+        // the HAR prompt that decouples format from write). Run the deterministic
+        // institutional format plan over every touched sheet — colors, number
+        // formats, headers/totals — in one no-LLM pass before exiting.
+        if (touchedSheets.size > 0 && options.autoFormatOnDone !== false) {
+          try {
+            const { runFormatAgent } = require('./specialists');
+            const sheets = Array.from(touchedSheets);
+            logger.info(`[AgentLoop] auto-format on done: ${sheets.length} sheet(s) — ${sheets.join(', ')}`);
+            const formatResult = await runFormatAgent(
+              { sheets, mode: 'institutional_finance' },
+              { results: results }
+            );
+            if (formatResult && Array.isArray(formatResult.actions) && formatResult.actions.length > 0) {
+              const formatActions = formatResult.actions.map((a) => {
+                if (!a.explanation) return { ...a, explanation: `auto-format ${a.sheet || ''}` };
+                return a;
+              });
+              onEvent('actions', { tool: 'auto_format_on_done', actions: formatActions });
+              logger.info(`[AgentLoop] auto-format emitted ${formatActions.length} actions`);
+            }
+          } catch (fmtErr) {
+            logger.warn(`[AgentLoop] auto-format on done failed: ${fmtErr.message}`);
+          }
+        }
         results.push({ type: 'done', summary: params.summary || 'Task completed' });
         messages.push(makeUserMessage('Task completed successfully.'));
         onEvent('agentDone', { summary: params.summary || 'Task completed', iteration });
@@ -2207,6 +2235,12 @@ async function runAgentLoop(objective, context, options = {}) {
           // Propagate preflight metadata to client for trust UX
           if (idx === 0 && toolResult._preflight) {
             enriched = { ...enriched, _preflight: toolResult._preflight };
+          }
+          // Track sheets that received data so the auto-format pass on done
+          // can target them. Only data writes (not pure-format actions) count.
+          if (a && (a.type === 'setCellRange' || a.type === 'setCellValue' || a.type === 'writeRange' || a.type === 'fillRange' || a.type === 'createSheet')) {
+            const sheetName = a.sheet || a.sheetName || a.name;
+            if (sheetName && typeof sheetName === 'string') touchedSheets.add(sheetName);
           }
           return enriched;
         });
@@ -3567,6 +3601,7 @@ function initAgentRun(objective, context, options = {}) {
     forceThinkingNext: false,
     loadedSkillNames: [],
     recentToolTrail: [],
+    touchedSheets: [],
     status: 'running',
     pending: null,
     summary: null,
@@ -3850,6 +3885,8 @@ async function finishToolExecution(state, toolName, params, thought, toolResult,
 
   let actions = null;
   if (toolResult && Array.isArray(toolResult.actions) && toolResult.actions.length > 0) {
+    if (!Array.isArray(state.touchedSheets)) state.touchedSheets = [];
+    const touchedSet = new Set(state.touchedSheets);
     actions = toolResult.actions.map((a, idx) => {
       let enriched = a;
       if (!a.explanation) {
@@ -3861,8 +3898,13 @@ async function finishToolExecution(state, toolName, params, thought, toolResult,
         enriched = { ...a, explanation: parts.join(' ').slice(0, 50) };
       }
       if (idx === 0 && toolResult._preflight) enriched = { ...enriched, _preflight: toolResult._preflight };
+      if (a && (a.type === 'setCellRange' || a.type === 'setCellValue' || a.type === 'writeRange' || a.type === 'fillRange' || a.type === 'createSheet')) {
+        const sheetName = a.sheet || a.sheetName || a.name;
+        if (sheetName && typeof sheetName === 'string') touchedSet.add(sheetName);
+      }
       return enriched;
     });
+    state.touchedSheets = Array.from(touchedSet);
   }
 
   if (toolName === 'execute_python') {
@@ -4022,10 +4064,30 @@ async function runAgentStep(state, clientResult, deps = {}) {
     if (toolName === 'done') {
       state.status = 'completed';
       state.summary = params.summary || 'Task completed';
+      // Auto-format pass before exit. See runAgentLoop's done handler for rationale.
+      let autoFormatActions = null;
+      if (Array.isArray(state.touchedSheets) && state.touchedSheets.length > 0) {
+        try {
+          const { runFormatAgent } = require('./specialists');
+          const formatResult = await runFormatAgent(
+            { sheets: state.touchedSheets, mode: 'institutional_finance' },
+            { results: state.results }
+          );
+          if (formatResult && Array.isArray(formatResult.actions) && formatResult.actions.length > 0) {
+            autoFormatActions = formatResult.actions.map((a) => a.explanation ? a : ({ ...a, explanation: `auto-format ${a.sheet || ''}` }));
+            logger.info(`[AgentStep] auto-format on done: ${state.touchedSheets.length} sheet(s), ${autoFormatActions.length} actions`);
+          }
+        } catch (fmtErr) {
+          logger.warn(`[AgentStep] auto-format on done failed: ${fmtErr.message}`);
+        }
+      }
       state.results.push({ type: 'done', summary: state.summary });
       state.messages.push(makeUserMessage('Task completed successfully.'));
       onProgress('agentDone', { summary: state.summary, iteration: state.iteration });
-      return { state, control: 'done', payload: { summary: state.summary } };
+      if (autoFormatActions && autoFormatActions.length > 0) {
+        onProgress('actions', { tool: 'auto_format_on_done', actions: autoFormatActions });
+      }
+      return { state, control: 'done', payload: { summary: state.summary, autoFormatActions } };
     }
 
     if (toolName === 'todo_write') {
