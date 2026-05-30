@@ -2818,10 +2818,17 @@ function resolveStaleStep(turn, clientSeq) {
 
 async function stepTurn(turnId, clientResult, clientSeq) {
   let turn = _getTurnRef(turnId);
-  // Multi-instance staleness guard: if the client has acknowledged a step beyond
-  // what this instance's in-memory copy knows, another serverless instance
-  // advanced the turn. Reload the committed state from Supabase so we don't
-  // rewind and re-run already-completed iterations.
+  // Cold-instance recovery: if this Vercel instance has no in-memory copy of
+  // the turn (just spun up after a previous instance's FUNCTION_INVOCATION_TIMEOUT),
+  // hydrate from Supabase. Without this, /step returns "Turn non è in modalità
+  // stepwise" forever and the client retry loop wedges. Same for the case
+  // where we know the client is ahead of us (staleness guard below).
+  if (!turn) {
+    try {
+      const fresh = await hydrateTurnFromSupabase(turnId);
+      if (fresh) turn = fresh;
+    } catch (_) { /* fall through to the not-found error below */ }
+  }
   if (turn && clientSeq != null && Number(clientSeq) > (turn.agentStepSeq || 0)) {
     const fresh = await hydrateTurnFromSupabase(turnId);
     if (fresh) turn = fresh;

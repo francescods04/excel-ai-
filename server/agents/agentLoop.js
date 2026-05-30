@@ -2877,9 +2877,10 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       };
     }
     case 'bulk_set_cell_ranges': {
-      const writes = Array.isArray(params && params.writes) ? params.writes : [];
+      // LLM kept passing "ranges" instead of "writes". Accept either.
+      const writes = Array.isArray(params && (params.writes || params.ranges)) ? (params.writes || params.ranges) : [];
       if (writes.length === 0) {
-        return { error: 'bulk_set_cell_ranges: "writes" must be a non-empty array' };
+        return { error: 'bulk_set_cell_ranges: "writes" must be a non-empty array (alias: "ranges").' };
       }
       if (writes.length > 16) {
         return { error: `bulk_set_cell_ranges: max 16 writes per call, got ${writes.length}` };
@@ -2925,9 +2926,13 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       };
     }
     case 'bulk_set_format': {
-      const formats = Array.isArray(params && params.formats) ? params.formats : [];
+      // Accept "formats" (canonical) plus the aliases the LLM kept trying:
+      // ranges, items, entries. Each entry is still { sheet, target, options }.
+      const formats = Array.isArray(params && (params.formats || params.ranges || params.items || params.entries))
+        ? (params.formats || params.ranges || params.items || params.entries)
+        : [];
       if (formats.length === 0) {
-        return { error: 'bulk_set_format: "formats" must be a non-empty array' };
+        return { error: 'bulk_set_format: "formats" must be a non-empty array of { sheet, target, options } (aliases: ranges, items, entries).' };
       }
       if (formats.length > 32) {
         return { error: `bulk_set_format: max 32 formats per call, got ${formats.length}` };
@@ -2942,20 +2947,24 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
           errors.push({ index: i, reason: 'missing sheet' });
           continue;
         }
-        if (!f.target || typeof f.target !== 'string') {
-          errors.push({ index: i, sheet, reason: 'missing or invalid target' });
+        // Accept target / range / addr / address — the LLM has tried them all.
+        const target = f.target || f.range || f.addr || f.address;
+        if (!target || typeof target !== 'string') {
+          errors.push({ index: i, sheet, reason: 'missing or invalid target (aliases: range, addr, address)' });
           continue;
         }
-        if (!f.options || typeof f.options !== 'object') {
-          errors.push({ index: i, sheet, target: f.target, reason: 'missing options' });
+        // Options aliases too — sometimes the LLM nests under "format" or "style".
+        const options = f.options || f.format || f.style;
+        if (!options || typeof options !== 'object') {
+          errors.push({ index: i, sheet, target, reason: 'missing options (aliases: format, style)' });
           continue;
         }
-        accepted.push({ sheet, target: f.target });
+        accepted.push({ sheet, target });
         actions.push({
           type: 'setCellFormat',
           sheet,
-          target: f.target,
-          options: expandPresetInOptions(f.options)
+          target,
+          options: expandPresetInOptions(options)
         });
       }
       if (actions.length === 0) {

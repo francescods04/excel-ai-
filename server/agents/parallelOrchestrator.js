@@ -26,6 +26,17 @@ const DEFAULT_MAX_PARALLEL = Number(process.env.PARALLEL_ORCHESTRATOR_MAX || 4);
 // (reserved by the architect for a final audit/verification slice, not routine formatting).
 const PRO_MODEL = process.env.AGENT_LOOP_PRO_MODEL || process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro';
 
+// Per-slice iteration ceiling. Each iteration is ~2-5s, so 12 iter ≈ 60s and
+// gives a wave-of-4 a comfortable margin under Vercel's 300s function cap.
+// Architect-suggested estimated_iters still scales it (max 2x), so smaller
+// slices stay smaller; this only clamps the architect's optimism.
+const SLICE_HARD_ITER_CAP = Number(process.env.SLICE_HARD_ITER_CAP) || 12;
+// Wall-clock budget for an entire wave's Promise.allSettled. If the longest
+// slice in the wave exceeds this, we cut it off and mark every still-running
+// slice as failed_timeout so the wave returns to the client and the next
+// /step can proceed. Default 240s = stays safely under Vercel's 300s cap.
+const WAVE_WALL_TIMEOUT_MS = Number(process.env.WAVE_WALL_TIMEOUT_MS) || 240000;
+
 async function runParallelBlueprint({
   blueprint,
   turnId,
@@ -95,7 +106,7 @@ async function runParallelBlueprint({
         turnId,
         promptVariant: tier === 'pro' ? 'default' : 'fast',
         modelOverride: tier === 'pro' ? PRO_MODEL : undefined,
-        maxIterations: Math.max(6, Math.min(20, slice.estimated_iters * 2)),
+        maxIterations: Math.max(6, Math.min(SLICE_HARD_ITER_CAP, slice.estimated_iters * 2)),
         systemPromptAddendum: slicePrompt,
         onEvent: (evt, data) => {
           onEvent('sliceEvent', { sliceId, event: evt, data });
@@ -329,7 +340,7 @@ async function stepBlueprintWave(state, {
       turnId,
       promptVariant: tier === 'pro' ? 'default' : 'fast',
       modelOverride: tier === 'pro' ? PRO_MODEL : undefined,
-      maxIterations: Math.max(6, Math.min(20, slice.estimated_iters * 2)),
+      maxIterations: Math.max(6, Math.min(SLICE_HARD_ITER_CAP, slice.estimated_iters * 2)),
       systemPromptAddendum: slicePrompt,
       onEvent: (evt, data) => { onEvent('sliceEvent', { sliceId, event: evt, data }); },
       requestClientTool: runtimeHelpers.requestClientTool,
@@ -364,7 +375,26 @@ async function stepBlueprintWave(state, {
       });
   });
 
-  await Promise.allSettled(promises);
+  // Race the wave's Promise.allSettled against a wall-clock timeout so a
+  // runaway slice (or a stuck RPC after an SSE reconnect on a new instance)
+  // can't drag the whole HTTP invocation past Vercel's 300s cap.
+  const waveStartMs = Date.now();
+  let waveTimedOut = false;
+  await Promise.race([
+    Promise.allSettled(promises),
+    new Promise(resolve => setTimeout(() => { waveTimedOut = true; resolve(); }, WAVE_WALL_TIMEOUT_MS))
+  ]);
+  if (waveTimedOut) {
+    const elapsed = Date.now() - waveStartMs;
+    for (const sliceId of toLaunch) {
+      if (state.sliceStates[sliceId] === 'running') {
+        state.sliceStates[sliceId] = 'failed';
+        state.sliceResults[sliceId] = { ok: false, error: `wave_wall_timeout after ${elapsed}ms (cap=${WAVE_WALL_TIMEOUT_MS}ms)` };
+        onEvent('sliceFailed', { sliceId, error: 'wave_wall_timeout', elapsedMs: elapsed });
+      }
+    }
+    logger.warn(`[Orchestrator/stepwise] wave ${state.waveIndex} timed out after ${elapsed}ms; marked stuck slices failed.`);
+  }
 
   // Final check: anything still open? If not, mark complete.
   const stillOpen = Object.values(state.sliceStates).some(s => s === 'pending' || s === 'running');
