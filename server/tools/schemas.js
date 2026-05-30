@@ -50,7 +50,7 @@ const CELL_SPEC = {
     note: { type: 'string' },
     cellStyles: CELL_STYLES,
     borderStyles: { type: 'object' },
-    style_preset: { type: 'string', description: 'IB-grade shortcut applied as default cellStyles (your explicit cellStyles fields still override). One of: header, subheader, input, input_pct, input_int, formula, formula_pct, total, subtotal, currency, percent, date, year, label, assumption. Use this to merge write + format into ONE iteration.' }
+    style_preset: { type: 'string', description: 'IB-grade shortcut applied as default cellStyles (your explicit cellStyles fields still override). One of: header, subheader, table_header, section, label, input, input_pct, input_int, input_eur, input_usd, formula, formula_pct, formula_int, formula_eur, formula_usd, output, output_pct, output_eur, output_usd, output_multiple, output_per_share, total, subtotal, internal_link, external_link, check_ok, check_warn, check_error, scenario_base, scenario_upside, scenario_downside, currency, percent, multiple, per_share, date, year, assumption. Use this to merge write + format into ONE iteration.' }
   }
 };
 

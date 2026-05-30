@@ -4,6 +4,17 @@
  */
 
 const SKILL_KEYWORDS = {
+  'business-plan': [
+    'business plan', 'bp', 'investor', 'investors', 'investitori', 'institutional',
+    'istituzional', 'catena', 'chain', 'fast food', 'restaurant', 'ristorante',
+    'menu', 'single location', 'location', 'milano', 'milan', 'owned location',
+    'not franchise', 'franchising', 'unit economics', 'use of funds', 'payback'
+  ],
+  'formatting-finance': [
+    'formatting', 'formattazione', 'format', 'polish', 'precisione', 'preciso',
+    'investor-ready', 'presentation-ready', 'presentazione', 'ib-grade',
+    'stile', 'dashboard', 'kpi', 'readable', 'leggibile'
+  ],
   'dcf-model': [
     'dcf', 'discounted cash flow', 'free cash flow', 'fcff', 'fcfe', 'enterprise value',
     'unlevered', 'levered', 'terminal value', 'perpetuity growth', 'exit multiple',
@@ -51,6 +62,11 @@ const MAX_AUTO_PRELOAD =
 function detectSkills(text) {
   const lower = String(text).toLowerCase();
   const scored = [];
+  const restaurantBusinessPlan =
+    /(business plan|\bbp\b|investor|investitori|institutional|istituzional)/i.test(lower) &&
+    /(restaurant|ristorante|fast food|menu|single location|location|milano|milan|catena|owned location|franchising)/i.test(lower);
+  const explicitLbo =
+    /\b(lbo|leveraged buyout|buyout|entry multiple|exit multiple|sponsor returns|sponsor equity|debt schedule|moic)\b/i.test(lower);
   for (const [skill, keywords] of Object.entries(SKILL_KEYWORDS)) {
     let hits = 0;
     let firstIdx = Infinity;
@@ -61,6 +77,9 @@ function detectSkills(text) {
         if (idx < firstIdx) firstIdx = idx;
       }
     }
+    if (skill === 'business-plan' && restaurantBusinessPlan) hits += 4;
+    if (skill === 'formatting-finance' && /(formatting|formattazione|polish|investor-ready|presentation-ready|precisione)/i.test(lower)) hits += 2;
+    if (skill === 'lbo-model' && restaurantBusinessPlan && !explicitLbo) hits = 0;
     if (hits > 0) scored.push({ skill, hits, firstIdx });
   }
   // Most keyword hits first; tie-break by earliest mention in the message.

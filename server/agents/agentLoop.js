@@ -123,50 +123,128 @@ function normalizeOpenBBSymbolParams(params = {}) {
  * write into "write" + "format" two-iteration pairs.
  */
 const STYLE_PRESETS = Object.freeze({
+  // --- structural ---
   header: {
-    cellStyles: { bold: true, backgroundColor: '#0D1F2D', fontColor: '#FFFFFF', horizontalAlignment: 'Center' }
+    cellStyles: { bold: true, backgroundColor: '#1F4E78', fontColor: '#FFFFFF', fontSize: 14, horizontalAlignment: 'Left' }
   },
   subheader: {
     cellStyles: { bold: true, backgroundColor: '#E8EEF4', fontColor: '#0D1F2D' }
   },
+  table_header: {
+    cellStyles: { bold: true, backgroundColor: '#404040', fontColor: '#FFFFFF', fontSize: 10, horizontalAlignment: 'Center' }
+  },
+  section: {
+    cellStyles: { bold: true, backgroundColor: '#D9E1F2', fontColor: '#000000', borderTopColor: '#000000' }
+  },
+  label: {
+    cellStyles: { fontColor: '#333333', horizontalAlignment: 'Left' }
+  },
+  // --- inputs (blue font, light blue bg) ---
   input: {
-    cellStyles: { fontColor: '#0000FF', numberFormat: '#,##0.00_);(#,##0.00);-_)' }
+    cellStyles: { fontColor: '#0000FF', backgroundColor: '#E6F2FF', numberFormat: '#,##0.00_);(#,##0.00);-_)' }
   },
   input_pct: {
-    cellStyles: { fontColor: '#0000FF', numberFormat: '0.0%' }
+    cellStyles: { fontColor: '#0000FF', backgroundColor: '#E6F2FF', numberFormat: '0.0%' }
   },
   input_int: {
-    cellStyles: { fontColor: '#0000FF', numberFormat: '#,##0' }
+    cellStyles: { fontColor: '#0000FF', backgroundColor: '#E6F2FF', numberFormat: '#,##0' }
   },
+  input_eur: {
+    cellStyles: { fontColor: '#0000FF', backgroundColor: '#E6F2FF', numberFormat: '#,##0.0 EUR' }
+  },
+  input_usd: {
+    cellStyles: { fontColor: '#0000FF', backgroundColor: '#E6F2FF', numberFormat: '$#,##0.0' }
+  },
+  // --- formulas (black font, white bg) ---
   formula: {
-    cellStyles: { fontColor: '#000000', numberFormat: '#,##0.00_);(#,##0.00);-_)' }
+    cellStyles: { fontColor: '#000000', backgroundColor: '#FFFFFF', numberFormat: '#,##0.00_);(#,##0.00);-_)' }
   },
   formula_pct: {
-    cellStyles: { fontColor: '#000000', numberFormat: '0.0%' }
+    cellStyles: { fontColor: '#000000', backgroundColor: '#FFFFFF', numberFormat: '0.0%' }
   },
+  formula_int: {
+    cellStyles: { fontColor: '#000000', backgroundColor: '#FFFFFF', numberFormat: '#,##0' }
+  },
+  formula_eur: {
+    cellStyles: { fontColor: '#000000', backgroundColor: '#FFFFFF', numberFormat: '#,##0.0 EUR' }
+  },
+  formula_usd: {
+    cellStyles: { fontColor: '#000000', backgroundColor: '#FFFFFF', numberFormat: '$#,##0.0' }
+  },
+  // --- outputs (bold, light grey bg) ---
+  output: {
+    cellStyles: { bold: true, fontColor: '#000000', backgroundColor: '#F2F2F2', numberFormat: '#,##0.00_);(#,##0.00);-_)' }
+  },
+  output_pct: {
+    cellStyles: { bold: true, fontColor: '#000000', backgroundColor: '#F2F2F2', numberFormat: '0.0%' }
+  },
+  output_eur: {
+    cellStyles: { bold: true, fontColor: '#000000', backgroundColor: '#F2F2F2', numberFormat: '#,##0.0 EUR' }
+  },
+  output_usd: {
+    cellStyles: { bold: true, fontColor: '#000000', backgroundColor: '#F2F2F2', numberFormat: '$#,##0.0' }
+  },
+  output_multiple: {
+    cellStyles: { bold: true, fontColor: '#000000', backgroundColor: '#F2F2F2', numberFormat: '0.0x' }
+  },
+  output_per_share: {
+    cellStyles: { bold: true, fontColor: '#000000', backgroundColor: '#F2F2F2', numberFormat: '$#,##0.00' }
+  },
+  // --- totals ---
   total: {
-    cellStyles: { bold: true, numberFormat: '#,##0_);(#,##0);-_)', borderTopColor: '#000000' }
+    cellStyles: { bold: true, fontColor: '#000000', backgroundColor: '#F2F2F2', numberFormat: '#,##0_);(#,##0);-_)', borderTopColor: '#000000' }
   },
   subtotal: {
-    cellStyles: { bold: true, numberFormat: '#,##0_);(#,##0);-_)' }
+    cellStyles: { bold: true, fontColor: '#000000', backgroundColor: '#F9F9F9', numberFormat: '#,##0_);(#,##0);-_)' }
   },
+  // --- links ---
+  internal_link: {
+    cellStyles: { fontColor: '#008000', backgroundColor: '#FFFFFF' }
+  },
+  external_link: {
+    cellStyles: { fontColor: '#FF0000', backgroundColor: '#FFFFFF' }
+  },
+  // --- checks ---
+  check_ok: {
+    cellStyles: { fontColor: '#006100', backgroundColor: '#C6EFCE', italic: true }
+  },
+  check_warn: {
+    cellStyles: { fontColor: '#9C6500', backgroundColor: '#FFEB9C', italic: true }
+  },
+  check_error: {
+    cellStyles: { fontColor: '#9C0006', backgroundColor: '#FFC7CE', italic: true }
+  },
+  // --- scenarios ---
+  scenario_base: {
+    cellStyles: { fontColor: '#000000', backgroundColor: '#FFFFFF' }
+  },
+  scenario_upside: {
+    cellStyles: { fontColor: '#006100', backgroundColor: '#C6EFCE' }
+  },
+  scenario_downside: {
+    cellStyles: { fontColor: '#9C0006', backgroundColor: '#FFC7CE' }
+  },
+  // --- standalone formats (no semantic color) ---
   currency: {
     cellStyles: { numberFormat: '$#,##0.00_);($#,##0.00);-_)' }
   },
   percent: {
     cellStyles: { numberFormat: '0.0%' }
   },
+  multiple: {
+    cellStyles: { numberFormat: '0.0x' }
+  },
+  per_share: {
+    cellStyles: { numberFormat: '$#,##0.00' }
+  },
   date: {
     cellStyles: { numberFormat: 'mmm-yyyy' }
   },
   year: {
-    cellStyles: { numberFormat: '0000', horizontalAlignment: 'Center', bold: true }
-  },
-  label: {
-    cellStyles: { fontColor: '#333333' }
+    cellStyles: { numberFormat: '0000', horizontalAlignment: 'Center', bold: true, backgroundColor: '#404040', fontColor: '#FFFFFF' }
   },
   assumption: {
-    cellStyles: { fontColor: '#0000FF', backgroundColor: '#FFF8C5', numberFormat: '#,##0.00_);(#,##0.00);-_)' }
+    cellStyles: { fontColor: '#0000FF', backgroundColor: '#FFFF00', numberFormat: '#,##0.00_);(#,##0.00);-_)' }
   }
 });
 
@@ -314,7 +392,15 @@ const DEFAULT_PROMPT_VARIANT = process.env.AGENT_PROMPT_VARIANT || 'default';
 let AGENT_SYSTEM_PROMPT = loadPromptVariant(DEFAULT_PROMPT_VARIANT);
 
 /* Common output format suffix appended to ANY variant */
-const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nOUTPUT FORMAT: Respond with a JSON object containing:\n{\n  "thought": "Your reasoning about what to do next",\n  "tool": "tool_name",\n  "params": { ...tool parameters... }\n}\n\nIMPORTANT: Call exactly one tool per response. The only way to do multiple things in one iteration is the parallel_calls tool, which fans out up to 8 INDEPENDENT read-only calls (reads, OpenBB fetches, bundles) in parallel. Use parallel_calls whenever you would otherwise emit multiple consecutive read-only tool calls — it cuts those N iterations down to 1. Mutations and writes still run sequentially, one per iteration.\n\nEXCEL AGENT WORKFLOW:\n- For complex workbook work, inspect the workbook first, build_workbook_graph for multi-sheet dependency context, create a brief task list, then execute in small visible chunks.\n- Prefer set_cell_range for each logical section instead of many single-cell writes.\n- **BATCH RULE (critical for speed):** when you are about to write to 2+ different sheets or 2+ different sections, you MUST use bulk_set_cell_ranges with all of them in a single call instead of consecutive set_cell_range calls. Same rule for formatting: 2+ formats → bulk_set_format. Issuing N consecutive single-write tools when bulk_* would have worked is the #1 source of slow runs.\n- **ATOMIC WRITE+FORMAT (critical for quality):** every write MUST carry its formatting in the same call via the per-cell \`style_preset\` field — one of: header, subheader, input, input_pct, input_int, formula, formula_pct, total, subtotal, currency, percent, date, year, label, assumption. Splitting "first write, then format in a separate pass" is forbidden: in production the separate format pass routinely never lands and the output looks unstyled. Example: \`{ "B5": { "formula": "=SUM(B2:B4)", "style_preset": "total" } }\`. Use cellStyles on top of style_preset only for one-off overrides.\n- **FORMATTING RULE:** use set_format / bulk_set_format ONLY for the things style_preset can't reach: column widths, freeze panes, full-row top/bottom borders. Numbers, colors, bold belong inside style_preset on the write itself. Never hand-write numberFormat arrays in execute_office_js (a 1x1 matrix on a multi-cell range throws and wastes iterations).\n- **VERIFY FORMATTING:** at the END of the build (not after every sheet), call read_format_summary ONCE on the most important block per sheet to confirm styling landed. If something's off, issue ONE targeted bulk_set_format repair; do NOT loop re-reading. Plain get_cell_ranges does NOT see colors or notes — read_format_summary is the only way.\n- **VERIFY DATA (anti-loop):** when a formula looks wrong, read the BLOCK (e.g. \`A1:F60\`) with get_cell_ranges or get_range_as_csv — not individual cells one at a time. After at MOST 2 verify reads on a section, either fix in one bulk write or call done. Do not keep re-reading the same area.\n- After important writes, verify touched ranges or formulas before calling done.\n- Report only changes you actually made and checked, with sheet names and ranges.\n- Use allow_overwrite:false when exploring a new range. Use allow_overwrite:true only when the user asked to replace or the target sheet was just created by you.\n\nWHEN THE TASK IS COMPLETE: You MUST call the tool "done" with a summary. Do NOT keep calling other tools after the work is finished. Calling "done" ends the session.\n\nPYTHON RULES:\n- execute_python is ONLY for mathematical calculations on data provided as variables in the code string.\n- execute_python does NOT have access to the Excel workbook file system. Do NOT use openpyxl, xlrd, or any file paths like /tmp/current.xlsx, /files/input/workbook.xlsx, etc.\n- To read or write Excel, always use the dedicated Excel tools (set_cell_range, create_sheet, execute_excel_formula, etc.).\n\nDATA RULES:\n- For public-company valuation work, use available finance tools first (OpenBB/Yahoo, treasury/macro tools when relevant), then visible workbook data.\n- Do not invent live market data. If a value is from training memory or a heuristic, label it as an assumption in the workbook.\n- Annotate assumption INPUT cells and key outputs with notes: use the per-cell \"note\" field in set_cell_range / bulk_set_cell_ranges, or bulk_set_notes for many at once. Notes apply as native Excel comments (with an Assumption_Notes sheet fallback) and never block your data writes — add them generously for any externally sourced or assumed value.\n- Search/fetch the web only when the user asks for current source material or when a required data point is unavailable from the provided finance tools.\n\nASK_USER_QUESTION RULES (CRITICAL):\n- The tool ask_user_question is an EMERGENCY BREAK. Use it ONLY when a truly critical piece of information is missing AND cannot be inferred from the workbook context or the user's original request.\n- NEVER ask the user for confirmation before proceeding (e.g. "Should I proceed?", "Continue?", "Go ahead?"). Just DO the work.\n- NEVER ask which sheet to use — the active sheet is provided in the context. If unspecified, default to the active sheet.\n- NEVER ask for a ticker/company name if the user already mentioned it in the original request.\n- NEVER ask for data that is already visible in the workbook context preview. Reference those cells directly.\n- If you are unsure about a minor assumption, make a reasonable default choice and proceed. Do NOT pause the flow.
+const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nOUTPUT FORMAT: Respond with a JSON object containing:\n{\n  "thought": "Your reasoning about what to do next",\n  "tool": "tool_name",\n  "params": { ...tool parameters... }\n}\n\nIMPORTANT: Call exactly one tool per response. The only way to do multiple things in one iteration is the parallel_calls tool, which fans out up to 8 INDEPENDENT read-only calls (reads, OpenBB fetches, bundles) in parallel. Use parallel_calls whenever you would otherwise emit multiple consecutive read-only tool calls — it cuts those N iterations down to 1. Mutations and writes still run sequentially, one per iteration.\n\nEXCEL AGENT WORKFLOW:\n- For complex workbook work, inspect the workbook first, build_workbook_graph for multi-sheet dependency context, create a brief task list, then execute in small visible chunks.\n- Prefer set_cell_range for each logical section instead of many single-cell writes.\n- **BATCH RULE (critical for speed):** when you are about to write to 2+ different sheets or 2+ different sections, you MUST use bulk_set_cell_ranges with all of them in a single call instead of consecutive set_cell_range calls. Same rule for formatting: 2+ formats → bulk_set_format. Issuing N consecutive single-write tools when bulk_* would have worked is the #1 source of slow runs.\n- **ATOMIC WRITE+FORMAT (critical for quality):** every write MUST carry its formatting in the same call via the per-cell \`style_preset\` field — one of: header, subheader, table_header, section, label, input, input_pct, input_int, input_eur, input_usd, formula, formula_pct, formula_int, formula_eur, formula_usd, output, output_pct, output_eur, output_usd, output_multiple, output_per_share, total, subtotal, internal_link, external_link, check_ok, check_warn, check_error, scenario_base, scenario_upside, scenario_downside, currency, percent, multiple, per_share, date, year, assumption. Splitting "first write, then format in a separate pass" is forbidden: in production the separate format pass routinely never lands and the output looks unstyled. Example: \`{ "B5": { "formula": "=SUM(B2:B4)", "style_preset": "total" } }\`. Use cellStyles on top of style_preset only for one-off overrides.\n- **INSTITUTIONAL COLOR CODING (Goldman/JPMorgan standard — MANDATORY):**
+  - Blue font (#0000FF) on light-blue bg (#E6F2FF) = hardcoded INPUTS users can change (use input* presets).
+  - Black font (#000000) on white bg (#FFFFFF) = FORMULAS and calculations (use formula* presets).
+  - Green font (#008000) = cross-sheet INTERNAL LINKS (use internal_link preset).
+  - Red font (#FF0000) = EXTERNAL LINKS to other files (use external_link preset).
+  - Bold on light-grey bg (#F2F2F2) with top border = TOTALS (use total/subtotal preset).
+  - NEVER swap input/formula colors. Blue on anything not an assumption cell is a defect.
+  - Number formats: $#,##0.0 for currency, 0.0% for percentages, 0.0x for multiples, show zeros as "-".
+- **FORMATTING RULE:** use set_format / bulk_set_format ONLY for the things style_preset can't reach: column widths, freeze panes, full-row top/bottom borders. Numbers, colors, bold belong inside style_preset on the write itself. Never hand-write numberFormat arrays in execute_office_js (a 1x1 matrix on a multi-cell range throws and wastes iterations).\n- **VERIFY FORMATTING:** at the END of the build (not after every sheet), call read_format_summary ONCE on the most important block per sheet to confirm styling landed. If something's off, issue ONE targeted bulk_set_format repair; do NOT loop re-reading. Plain get_cell_ranges does NOT see colors or notes — read_format_summary is the only way.\n- **VERIFY DATA (anti-loop):** when a formula looks wrong, read the BLOCK (e.g. \`A1:F60\`) with get_cell_ranges or get_range_as_csv — not individual cells one at a time. After at MOST 2 verify reads on a section, either fix in one bulk write or call done. Do not keep re-reading the same area.\n- After important writes, verify touched ranges or formulas before calling done.\n- Report only changes you actually made and checked, with sheet names and ranges.\n- Use allow_overwrite:false when exploring a new range. Use allow_overwrite:true only when the user asked to replace or the target sheet was just created by you.\n\nWHEN THE TASK IS COMPLETE: You MUST call the tool "done" with a summary. Do NOT keep calling other tools after the work is finished. Calling "done" ends the session.\n\nPYTHON RULES:\n- execute_python is ONLY for mathematical calculations on data provided as variables in the code string.\n- execute_python does NOT have access to the Excel workbook file system. Do NOT use openpyxl, xlrd, or any file paths like /tmp/current.xlsx, /files/input/workbook.xlsx, etc.\n- To read or write Excel, always use the dedicated Excel tools (set_cell_range, create_sheet, execute_excel_formula, etc.).\n\nDATA RULES:\n- For public-company valuation work, use available finance tools first (OpenBB/Yahoo, treasury/macro tools when relevant), then visible workbook data.\n- Do not invent live market data. If a value is from training memory or a heuristic, label it as an assumption in the workbook.\n- Annotate assumption INPUT cells and key outputs with notes: use the per-cell \"note\" field in set_cell_range / bulk_set_cell_ranges, or bulk_set_notes for many at once. Notes apply as native Excel comments (with an Assumption_Notes sheet fallback) and never block your data writes — add them generously for any externally sourced or assumed value.\n- Search/fetch the web only when the user asks for current source material or when a required data point is unavailable from the provided finance tools.\n\nASK_USER_QUESTION RULES (CRITICAL):\n- The tool ask_user_question is an EMERGENCY BREAK. Use it ONLY when a truly critical piece of information is missing AND cannot be inferred from the workbook context or the user's original request.\n- NEVER ask the user for confirmation before proceeding (e.g. "Should I proceed?", "Continue?", "Go ahead?"). Just DO the work.\n- NEVER ask which sheet to use — the active sheet is provided in the context. If unspecified, default to the active sheet.\n- NEVER ask for a ticker/company name if the user already mentioned it in the original request.\n- NEVER ask for data that is already visible in the workbook context preview. Reference those cells directly.\n- If you are unsure about a minor assumption, make a reasonable default choice and proceed. Do NOT pause the flow.
 
 CITATION RULES:
 - Every action explanation MUST include a citation in the format: [A1:D1](<citation:SheetName!A1:D1>)
@@ -626,7 +712,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'set_cell_range',
-      description: `Write cells using a map of A1 addresses to {value, formula, note, cellStyles, borderStyles, style_preset}. Supports copyToRange for pattern fill. Supports allow_overwrite for overwrite protection. This is the PRIMARY write tool.\n\nFor MULTIPLE sheets / sections in one shot, prefer bulk_set_cell_ranges (1 iteration vs N).\n\n**style_preset** — ATOMIC IB-grade formatting in one token. Use this on EVERY cell instead of splitting "write" and "format" into two iterations. Available presets: header, subheader, input, input_pct, input_int, formula, formula_pct, total, subtotal, currency, percent, date, year, label, assumption. You can still add cellStyles on top; they override the preset.\n\nExample (write + format atomic):\n{\n  "sheet": "DCF",\n  "cells": {\n    "A1": { "value": "Revenue Build",            "style_preset": "header" },\n    "A2": { "value": "Base revenue",               "style_preset": "label" },\n    "B2": { "value": 100,                          "style_preset": "input" },\n    "B3": { "value": 0.05,                         "style_preset": "input_pct" },\n    "B4": { "formula": "=B2*(1+B3)",               "style_preset": "formula" },\n    "B5": { "formula": "=SUM(B2:B4)",              "style_preset": "total" }\n  },\n  "copyToRange": "B4:F4",\n  "allow_overwrite": false\n}`,
+      description: `Write cells using a map of A1 addresses to {value, formula, note, cellStyles, borderStyles, style_preset}. Supports copyToRange for pattern fill. Supports allow_overwrite for overwrite protection. This is the PRIMARY write tool.\n\nFor MULTIPLE sheets / sections in one shot, prefer bulk_set_cell_ranges (1 iteration vs N).\n\n**style_preset** — ATOMIC IB-grade formatting in one token. Use this on EVERY cell instead of splitting "write" and "format" into two iterations. Available presets: header, subheader, table_header, section, label, input, input_pct, input_int, input_eur, input_usd, formula, formula_pct, formula_int, formula_eur, formula_usd, output, output_pct, output_eur, output_usd, output_multiple, output_per_share, total, subtotal, internal_link, external_link, check_ok, check_warn, check_error, scenario_base, scenario_upside, scenario_downside, currency, percent, multiple, per_share, date, year, assumption. You can still add cellStyles on top; they override the preset.\n\nExample (write + format atomic):\n{\n  "sheet": "DCF",\n  "cells": {\n    "A1": { "value": "Revenue Build",            "style_preset": "header" },\n    "A2": { "value": "Base revenue",               "style_preset": "label" },\n    "B2": { "value": 100,                          "style_preset": "input" },\n    "B3": { "value": 0.05,                         "style_preset": "input_pct" },\n    "B4": { "formula": "=B2*(1+B3)",               "style_preset": "formula" },\n    "B5": { "formula": "=SUM(B2:B4)",              "style_preset": "total" }\n  },\n  "copyToRange": "B4:F4",\n  "allow_overwrite": false\n}`,
       // Schema sourced from server/tools/schemas.js (single source of truth, also used by registry.js)
       parameters: SHARED_SCHEMAS.SET_CELL_RANGE
     }
@@ -649,7 +735,7 @@ const TOOL_DEFINITIONS = [
               required: ['sheet', 'cells'],
               properties: {
                 sheet: { type: 'string', description: 'Sheet name' },
-                cells: { type: 'object', description: 'A1 address -> {value | formula, note?, cellStyles?, borderStyles?, style_preset?}. style_preset is one of: header, subheader, input, input_pct, input_int, formula, formula_pct, total, subtotal, currency, percent, date, year, label, assumption.' },
+                cells: { type: 'object', description: 'A1 address -> {value | formula, note?, cellStyles?, borderStyles?, style_preset?}. style_preset is one of: header, subheader, table_header, section, label, input, input_pct, input_int, input_eur, input_usd, formula, formula_pct, formula_int, formula_eur, formula_usd, output, output_pct, output_eur, output_usd, output_multiple, output_per_share, total, subtotal, internal_link, external_link, check_ok, check_warn, check_error, scenario_base, scenario_upside, scenario_downside, currency, percent, multiple, per_share, date, year, assumption.' },
                 copyToRange: { type: 'string', description: 'Optional range to copy the pattern to (e.g. "B2:B100")' },
                 allow_overwrite: { type: 'boolean', description: 'If false, fail when target cells are non-empty (default true)' }
               }
@@ -687,7 +773,7 @@ const TOOL_DEFINITIONS = [
               borderBottomColor: { type: 'string' },
               borderTopColor: { type: 'string' },
               borders: { type: 'object' },
-              style_preset: { type: 'string', description: 'IB-grade shortcut: header, subheader, input, input_pct, input_int, formula, formula_pct, total, subtotal, currency, percent, date, year, label, assumption. Any explicit fields you pass override the preset.' }
+              style_preset: { type: 'string', description: 'IB-grade shortcut: header, subheader, table_header, section, label, input, input_pct, input_int, input_eur, input_usd, formula, formula_pct, formula_int, formula_eur, formula_usd, output, output_pct, output_eur, output_usd, output_multiple, output_per_share, total, subtotal, internal_link, external_link, check_ok, check_warn, check_error, scenario_base, scenario_upside, scenario_downside, currency, percent, multiple, per_share, date, year, assumption. Any explicit fields you pass override the preset.' }
             }
           }
         },
