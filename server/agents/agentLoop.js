@@ -273,6 +273,88 @@ function expandPresetsInCells(cells) {
   return out;
 }
 
+/* ---------- Anti-flood-fill guard ----------
+ *
+ * Rejects payloads where a single non-formula scalar (label / text) would be
+ * replicated across many cells via a multi-cell range key or a wide copyToRange.
+ * This catches the "MEAT CREW × 120 cells" bug where the LLM treats copyToRange
+ * or range-keys as a way to paint a heading across a whole dashboard area.
+ *
+ * Returns { ok, reason } — { ok: true } means safe to proceed.
+ *
+ * Single-cell repeats (e.g. "A1:A1") and formulas (relative refs adjust on
+ * copyFrom / reshape) are always allowed. Numbers are allowed too — the bug
+ * is specific to text labels propagated as decoration.
+ */
+function rangeAddrCellCount(addr) {
+  if (typeof addr !== 'string') return 1;
+  const raw = addr.replace(/\$/g, '');
+  const withoutSheet = raw.includes('!') ? raw.split('!').pop() : raw;
+  const m = withoutSheet.match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/i);
+  if (!m) return 1;
+  const colNum = (s) => {
+    let n = 0;
+    for (const ch of s.toUpperCase()) n = n * 26 + (ch.charCodeAt(0) - 64);
+    return n;
+  };
+  const c1 = colNum(m[1]);
+  const r1 = Number(m[2]);
+  const c2 = m[3] ? colNum(m[3]) : c1;
+  const r2 = m[4] ? Number(m[4]) : r1;
+  return (Math.abs(r2 - r1) + 1) * (Math.abs(c2 - c1) + 1);
+}
+
+const FLOOD_FILL_CELL_THRESHOLD = 20;
+
+function isFormulaSpec(spec) {
+  if (!spec || typeof spec !== 'object') return false;
+  if (spec.formula != null) return true;
+  if (typeof spec.value === 'string' && spec.value.startsWith('=')) return true;
+  return false;
+}
+
+function isTextScalar(spec) {
+  if (!spec || typeof spec !== 'object') return false;
+  if (spec.formula != null) return false;
+  const v = spec.value;
+  if (v == null) return false;
+  if (typeof v === 'number' || typeof v === 'boolean') return false;
+  if (Array.isArray(v)) return false;
+  if (typeof v === 'string' && v.startsWith('=')) return false;
+  return typeof v === 'string';
+}
+
+function detectScalarTextFloodFill(cells, copyToRange) {
+  if (!cells || typeof cells !== 'object') return { ok: true };
+
+  for (const [addr, spec] of Object.entries(cells)) {
+    if (!isTextScalar(spec)) continue;
+    const n = rangeAddrCellCount(addr);
+    if (n > FLOOD_FILL_CELL_THRESHOLD) {
+      return {
+        ok: false,
+        reason: `set_cell_range rejected: cell key "${addr}" expands to ${n} cells but value is a single text label ("${String(spec.value).slice(0, 40)}"). Excel will paint that label across every cell, which is rarely what you want. If you need a header, write it to ONE cell (e.g. "${addr.split(':')[0]}"). If you need repetition, use a formula. If you need a merged title, use execute_office_js + range.merge().`
+      };
+    }
+  }
+
+  if (copyToRange) {
+    const destCount = rangeAddrCellCount(copyToRange);
+    if (destCount > FLOOD_FILL_CELL_THRESHOLD) {
+      const entries = Object.entries(cells);
+      if (entries.length === 1 && isTextScalar(entries[0][1])) {
+        const [srcAddr, srcSpec] = entries[0];
+        return {
+          ok: false,
+          reason: `set_cell_range rejected: copyToRange "${copyToRange}" (${destCount} cells) with a text-only source cell ("${srcAddr}" = "${String(srcSpec.value).slice(0, 40)}") would replicate that label everywhere. copyToRange is for FORMULAS with relative refs (e.g. "=B2*(1+C$1)" copied across years). For a header, write it to one cell. For a repeated value, use a formula like "=$A$1" so the source is clear.`
+        };
+      }
+    }
+  }
+
+  return { ok: true };
+}
+
 /** Expand for format-tool options: preset goes through cellStyles too. */
 function expandPresetInOptions(options) {
   if (!options || typeof options !== 'object') return options;
@@ -674,7 +756,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'set_cell_range',
-      description: `Write cells using a map of A1 addresses to {value, formula, note}. Supports copyToRange for pattern fill and allow_overwrite for overwrite protection. This is the PRIMARY write tool.\n\n**Workflow (preferred):** one logical section per call. Write values/formulas first, verify the returned formula_results, then run formatting in a final bulk_set_format pass. This is faster, more debuggable, and matches the institutional Excel patterns in the system prompt.\n\n**copyToRange** — set the pattern in the first row/col, then copyToRange fills the rest preserving relative/absolute refs. One call instead of N.\n\nExample (values + formulas, no inline formatting):\n{\n  "sheet": "DCF",\n  "cells": {\n    "A1": { "value": "Revenue Build" },\n    "A2": { "value": "Base revenue" },\n    "B2": { "value": 100 },\n    "B3": { "value": 0.05 },\n    "B4": { "formula": "=B2*(1+B3)" },\n    "B5": { "formula": "=SUM(B2:B4)" }\n  },\n  "copyToRange": "B4:F4",\n  "allow_overwrite": false\n}\n\n**Optional** cellStyles / borderStyles / style_preset per cell are still supported for back-compat. Use sparingly: a malformed inline format on a single cell can poison the whole batch with an opaque error. Prefer a separate bulk_set_format pass once data is verified.`,
+      description: `Write cells using a map of A1 addresses to {value, formula, note}. Supports copyToRange for pattern fill and allow_overwrite for overwrite protection. This is the PRIMARY write tool.\n\n**Workflow (preferred):** one logical section per call. Write values/formulas first, verify the returned formula_results, then run formatting in a final bulk_set_format pass. This is faster, more debuggable, and matches the institutional Excel patterns in the system prompt.\n\n**copyToRange** — set the pattern in the first row/col, then copyToRange fills the rest preserving relative/absolute refs. One call instead of N.\n\nExample (values + formulas, no inline formatting):\n{\n  "sheet": "DCF",\n  "cells": {\n    "A1": { "value": "Revenue Build" },\n    "A2": { "value": "Base revenue" },\n    "B2": { "value": 100 },\n    "B3": { "value": 0.05 },\n    "B4": { "formula": "=B2*(1+B3)" },\n    "B5": { "formula": "=SUM(B2:B4)" }\n  },\n  "copyToRange": "B4:F4",\n  "allow_overwrite": false\n}\n\n**Optional** cellStyles / borderStyles / style_preset per cell are still supported for back-compat. Use sparingly: a malformed inline format on a single cell can poison the whole batch with an opaque error. Prefer a separate bulk_set_format pass once data is verified.\n\n**❌ ANTI-PATTERN — DO NOT do this:**\n- \`{ "A1:F24": { "value": "MEAT CREW" } }\` — range key with a text scalar paints "MEAT CREW" into 144 cells. That's noise, not a dashboard.\n- \`{ "A1": { "value": "Title" } } + copyToRange: "A1:F24"\` — copyToRange with a text source replicates the label everywhere. copyToRange is for FORMULAS with relative refs.\n- These payloads are auto-rejected server-side.\n\n**✅ Correct alternatives:**\n- Header: write to ONE cell (\`"A1": { "value": "MEAT CREW — Dashboard" }\`) and merge with execute_office_js if you need it visually wide.\n- Repeated value: use a formula referencing one source cell (\`"=$A$1"\`) so updates flow from one place.\n- Filling a column with a pattern: write the formula in one cell + copyToRange with relative refs that adjust per row.`,
       // Schema sourced from server/tools/schemas.js (single source of truth, also used by registry.js)
       parameters: SHARED_SCHEMAS.SET_CELL_RANGE
     }
@@ -2900,6 +2982,13 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
         logger.warn(`[AgentLoop] set_cell_range called without 'sheet' param; defaulting to activeSheet="${targetSheet}". LLM should specify sheet explicitly.`);
       }
 
+      // Anti-flood-fill guard — reject scalar text replicated across many cells
+      const floodCheck = detectScalarTextFloodFill(params.cells, copyToRange);
+      if (!floodCheck.ok) {
+        logger.warn(`[AgentLoop] ${floodCheck.reason}`);
+        return { error: floodCheck.reason };
+      }
+
       // Preflight read: verify target cells are empty before writing (trust UX)
       if (params.allow_overwrite === false && requestClientTool && params.cells && Object.keys(params.cells).length > 0) {
         const bounds = getCellRangeBounds(params.cells);
@@ -2984,6 +3073,12 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
         let copyToRange = w.copyToRange;
         if (copyToRange && typeof copyToRange === 'object' && copyToRange.range) {
           copyToRange = copyToRange.range;
+        }
+        const floodCheck = detectScalarTextFloodFill(w.cells, copyToRange);
+        if (!floodCheck.ok) {
+          logger.warn(`[AgentLoop] bulk_set_cell_ranges entry ${i} (${sheet}): ${floodCheck.reason}`);
+          errors.push({ index: i, sheet, reason: floodCheck.reason });
+          continue;
         }
         accepted.push({ sheet, cellCount: Object.keys(w.cells).length });
         actions.push({
@@ -4016,5 +4111,6 @@ module.exports = {
   formatToolStagnationReason,
   executeAgentTool,
   formatToolResultForMessages,
-  trimDeepArrays
+  trimDeepArrays,
+  detectScalarTextFloodFill
 };
