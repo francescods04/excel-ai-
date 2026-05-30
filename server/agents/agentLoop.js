@@ -37,7 +37,7 @@ const MUTATION_TOOLS = new Set([
 const AGENT_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT_AGENT || 'high';
 const AGENT_POSTWRITE_CRITIC = process.env.AGENT_POSTWRITE_CRITIC === 'true';
 const AGENT_POSTWRITE_CRITIC_TIMEOUT_MS = Number(process.env.AGENT_POSTWRITE_CRITIC_TIMEOUT_MS) || 8000;
-const AGENT_POSTWRITE_CRITIC_MIN_ACTIONS = Number(process.env.AGENT_POSTWRITE_CRITIC_MIN_ACTIONS) || 1;
+const AGENT_POSTWRITE_CRITIC_MIN_ACTIONS = Number(process.env.AGENT_POSTWRITE_CRITIC_MIN_ACTIONS) || 10;
 const POSTWRITE_CRITIC_TOOLS = new Set([
   'set_cell_range',
   'bulk_set_cell_ranges',
@@ -446,12 +446,10 @@ AGENT_SYSTEM_PROMPT += ACTIVE_AGENT_SYSTEM_PROMPT_SUFFIX;
 function getSystemPrompt(variant) {
   const v = variant || DEFAULT_PROMPT_VARIANT;
   const base = loadPromptVariant(v);
-  const skillsBlock = getAvailableSkillsForPrompt();
-  const instructionsBlock = getInstructionsForPrompt();
-  // Prepend available skills to the prompt (lightweight index, not full content)
-  const skillsPrefix = skillsBlock ? skillsBlock + '\n\n' : '';
-  const instructionsPrefix = instructionsBlock ? instructionsBlock + '\n\n' : '';
-  return skillsPrefix + instructionsPrefix + base + ACTIVE_AGENT_SYSTEM_PROMPT_SUFFIX;
+  // Return ONLY the frozen base + suffix — no dynamic skills/instructions attached.
+  // Dynamic content (skills index, user instructions) goes into the first user message
+  // to keep the system prompt immutable across iterations, enabling DeepSeek context caching.
+  return base + ACTIVE_AGENT_SYSTEM_PROMPT_SUFFIX;
 }
 
 /* ---------- Tool Definitions (OpenAI function calling schema) ---------- */
@@ -1814,9 +1812,25 @@ async function runAgentLoop(objective, context, options = {}) {
   const systemPromptAddendum = typeof options.systemPromptAddendum === 'string' && options.systemPromptAddendum.trim()
     ? '\n\n' + options.systemPromptAddendum.trim()
     : '';
+  // Inject dynamic content (skills index, user instructions, pre-loaded skill content)
+  // into the first user message instead of the system prompt. This keeps the system
+  // prompt immutable across iterations, enabling DeepSeek disk-based context caching.
+  // Without this, the system prompt hash changes every call and caching is 0%.
+  const skillsBlock = getAvailableSkillsForPrompt();
+  const instructionsBlock = getInstructionsForPrompt();
+  const dynamicPrefix = [
+    skillsBlock ? `<available_skills>\n${skillsBlock}\n</available_skills>` : '',
+    instructionsBlock ? `<user_instructions>\n${instructionsBlock}\n</user_instructions>` : '',
+    systemPromptAddendum ? `<task_context>\n${systemPromptAddendum.trim()}\n</task_context>` : ''
+  ].filter(Boolean).join('\n\n');
+  const fullUserPrompt = [
+    dynamicPrefix,
+    skillReminder || '',
+    `---\n\n${userPrompt}`
+  ].filter(Boolean).join('\n\n');
   const messages = options.resumeMessages || [
-    { role: 'system', content: systemPromptForRun + (skillReminder ? '\n\n' + skillReminder : '') + systemPromptAddendum },
-    makeUserMessage(userPrompt)
+    { role: 'system', content: systemPromptForRun },
+    makeUserMessage(fullUserPrompt)
   ];
 
   const results = options.resumeResults || [];
@@ -1882,6 +1896,15 @@ async function runAgentLoop(objective, context, options = {}) {
       } catch (steerErr) {
         logger.warn(`[AgentLoop] pullSteerMessages failed: ${steerErr.message}`);
       }
+    }
+
+    // Drain pending background critics: wait for any fire-and-forget post-write
+    // critic to complete before the next LLM call so its findings are available.
+    if (state._pendingCritic && state._pendingCritic.length > 0) {
+      try {
+        await Promise.all(state._pendingCritic);
+        state._pendingCritic = [];
+      } catch (_) { state._pendingCritic = []; }
     }
 
     try {
@@ -2186,21 +2209,25 @@ async function runAgentLoop(objective, context, options = {}) {
       // it without waiting for a downstream verify. Per-turn flag wins over
       // the AGENT_POSTWRITE_CRITIC env default.
       const postWriteCriticOn = (options.postWriteCriticEnabled === true) || (options.postWriteCriticEnabled !== false && AGENT_POSTWRITE_CRITIC);
-      if (postWriteCriticOn && POSTWRITE_CRITIC_TOOLS.has(toolName) && Array.isArray(toolResult?.actions) && toolResult.actions.length > 0) {
-        try {
-          const critique = await runPostWriteCritic(toolName, toolResult.actions);
-          if (critique && Array.isArray(critique.issues) && critique.issues.length > 0) {
-            const formatted = critique.issues.slice(0, 6).map((i, idx) =>
-              `${idx + 1}. [${i.severity || 'note'}] ${i.message || '(no message)'}${i.suggestion ? ` — fix: ${i.suggestion}` : ''}`
-            ).join('\n');
-            const msg = `POST-WRITE CRITIC (fast pass, ${critique.issues.length} issue${critique.issues.length === 1 ? '' : 's'}):\n${formatted}\n\nAddress the high-severity issues in your next step before continuing the build.`;
-            messages.push(makeUserMessage(msg));
-            onEvent('postWriteCritic', { iteration, tool: toolName, issues: critique.issues });
-            logger.info(`[AgentLoop] post-write critic flagged ${critique.issues.length} issue(s) after ${toolName}`);
-          }
-        } catch (err) {
-          logger.warn(`[AgentLoop] post-write critic threw: ${err.message}`);
-        }
+      if (postWriteCriticOn && POSTWRITE_CRITIC_TOOLS.has(toolName) && Array.isArray(toolResult?.actions) && toolResult.actions.length >= AGENT_POSTWRITE_CRITIC_MIN_ACTIONS) {
+        // Fire-and-forget: run critic in background, inject findings before NEXT iteration's LLM call
+        const criticPromise = runPostWriteCritic(toolName, toolResult.actions)
+          .then(critique => {
+            if (critique && Array.isArray(critique.issues) && critique.issues.length > 0) {
+              const formatted = critique.issues.slice(0, 6).map((i, idx) =>
+                `${idx + 1}. [${i.severity || 'note'}] ${i.message || '(no message)'}${i.suggestion ? ` — fix: ${i.suggestion}` : ''}`
+              ).join('\n');
+              const msg = `POST-WRITE CRITIC (fast pass, ${critique.issues.length} issue${critique.issues.length === 1 ? '' : 's'}):\n${formatted}\n\nAddress the high-severity issues in your next step before continuing the build.`;
+              // Push into messages array; the loop will pick it up in the next iteration
+              messages.push(makeUserMessage(msg));
+              onEvent('postWriteCritic', { iteration, tool: toolName, issues: critique.issues });
+              logger.info(`[AgentLoop] post-write critic flagged ${critique.issues.length} issue(s) after ${toolName}`);
+            }
+          })
+          .catch(err => logger.warn(`[AgentLoop] post-write critic threw: ${err.message}`));
+        // Track background job (don't await — let it resolve before next LLM call)
+        if (!state._pendingCritic) state._pendingCritic = [];
+        state._pendingCritic.push(criticPromise);
       }
 
       recentToolTrail.push({
@@ -2705,8 +2732,8 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       }
       // If requestClientTool is available, batch-read all ranges from client
       if (requestClientTool) {
-        const results = [];
-        for (const rangeSpec of ranges) {
+        // Parallelize all range reads — sequential client round-trips waste 200-500ms each
+        const readPromises = ranges.map(async (rangeSpec) => {
           try {
             const data = await requestClientTool('workbook.readRange', {
               sheet: rangeSpec.sheet,
@@ -2714,7 +2741,7 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
               maxRows: rangeSpec.maxRows || 100,
               format: 'snapshot'
             });
-            results.push({
+            return {
               sheet: data.sheet || rangeSpec.sheet,
               target: data.target || rangeSpec.target,
               values: data.values || [],
@@ -2722,9 +2749,9 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
               rowCount: data.rowCount || 0,
               columnCount: data.columnCount || 0,
               error: null
-            });
+            };
           } catch (err) {
-            results.push({
+            return {
               sheet: rangeSpec.sheet,
               target: rangeSpec.target,
               values: [],
@@ -2732,9 +2759,14 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
               rowCount: 0,
               columnCount: 0,
               error: err.message
-            });
+            };
           }
-        }
+        });
+        const settled = await Promise.allSettled(readPromises);
+        const results = settled.map(r => r.status === 'fulfilled' ? r.value : {
+          sheet: '', target: '', values: [], formulas: [], rowCount: 0, columnCount: 0,
+          error: r.reason?.message || 'Promise rejected'
+        });
         return { ranges: results };
       }
       // Fallback: extract from static context (allSheetsData or selectedValues)

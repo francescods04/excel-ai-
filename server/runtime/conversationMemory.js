@@ -52,10 +52,12 @@ function flush() {
     const fp = memoryFilePath();
     const tmp = `${fp}.tmp`;
     const data = JSON.stringify({ summary, turns: memory, updatedAt: new Date().toISOString() }, null, 2);
-    fs.writeFileSync(tmp, data);
-    fs.renameSync(tmp, fp);
+    // Async I/O — no reason to block the event loop for a debounced write
+    fs.promises.writeFile(tmp, data)
+      .then(() => fs.promises.rename(tmp, fp))
+      .catch(err => logger.warn(`[Memory] Flush failed: ${err.message}`));
   } catch (err) {
-    logger.error(`[Memory] Flush failed: ${err.message}`);
+    logger.warn(`[Memory] Flush failed: ${err.message}`);
   }
 }
 
