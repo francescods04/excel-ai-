@@ -67,6 +67,22 @@ const STAGNATION_WATCH_TOOLS = new Set([
 const STAGNATION_MAX_REPEAT = Math.max(3, Number(process.env.AGENT_STAGNATION_MAX_REPEAT) || 4);
 const STAGNATION_ALT_CYCLES = Math.max(2, Number(process.env.AGENT_STAGNATION_ALT_CYCLES) || 3);
 const STAGNATION_MAX_TRAIL = Math.max(8, (STAGNATION_ALT_CYCLES * 2) + 2);
+// Read-thrash: when the agent runs N consecutive read-only tool calls without
+// any mutation in between, it's stuck in a "verify → re-verify → re-verify"
+// loop. Triggered repeatedly after the formula_not_landing confusion that
+// killed the LBO run on 2026-05-30: 8+ reads on the same area while convinced
+// writes weren't taking effect. We treat any stretch of READS_WITHOUT_WRITE
+// pure reads as terminal stagnation — bigger than the per-signature repeat
+// limit because read params often differ slightly between iterations.
+const READS_WITHOUT_WRITE_LIMIT = Math.max(4, Number(process.env.AGENT_READS_WITHOUT_WRITE_LIMIT) || 5);
+const READ_ONLY_TOOLS_FOR_STAGNATION = new Set([
+  'read_workbook',
+  'read_sheet',
+  'get_range_as_csv',
+  'get_cell_ranges',
+  'build_workbook_graph',
+  'read_format_summary'
+]);
 
 function resolveAgentLoopModel(modelOverride, promptVariant) {
   if (modelOverride) return modelOverride;
@@ -1657,6 +1673,20 @@ function detectToolStagnation(trail, maxRepeat = STAGNATION_MAX_REPEAT, altCycle
   const last = trail[trail.length - 1];
   if (!last || !STAGNATION_WATCH_TOOLS.has(last.toolName)) return null;
 
+  // Read-thrash: last N entries are ALL pure reads (no write between them).
+  // Different signatures (different ranges) still count — what matters is the
+  // absence of any mutation that could have changed the workbook state the
+  // agent keeps re-reading.
+  if (trail.length >= READS_WITHOUT_WRITE_LIMIT) {
+    const tail = trail.slice(-READS_WITHOUT_WRITE_LIMIT);
+    if (tail.every(entry => READ_ONLY_TOOLS_FOR_STAGNATION.has(entry.toolName))) {
+      return {
+        pattern: 'read_thrash',
+        entries: tail
+      };
+    }
+  }
+
   if (trail.length >= maxRepeat) {
     const repeated = trail.slice(-maxRepeat);
     if (repeated.every(entry => entry.signature === last.signature)) {
@@ -1705,6 +1735,10 @@ function formatToolStagnationReason(stagnation) {
     const first = stagnation.entries[0].toolName;
     const second = stagnation.entries[1].toolName;
     return `stagnation_cycle:${first}->${second}:x${Math.floor(stagnation.entries.length / 2)}`;
+  }
+  if (stagnation.pattern === 'read_thrash') {
+    const tools = stagnation.entries.map(e => e.toolName).join(',');
+    return `stagnation_read_thrash:${stagnation.entries.length}_reads_no_write:[${tools}]`;
   }
   return `stagnation_${stagnation.pattern}`;
 }

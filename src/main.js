@@ -815,8 +815,16 @@ function awaitStepQuestion(turnId, question) {
   });
 }
 
+// Per-turn terminal status — once a turn is done/aborted, never re-run its loop
+// even if SSE reconnect re-delivers stepwiseReady from history replay.
+const stepLoopTerminated = new Set();
+
 async function runStepLoop(turnId) {
   if (stepLoopStarted.has(turnId)) return;
+  if (stepLoopTerminated.has(turnId)) {
+    addLog(`Step loop ignorato per turn già terminato: ${turnId}`, 'warn');
+    return;
+  }
   stepLoopStarted.add(turnId);
   addLog('Motore stepwise: avvio esecuzione guidata dal client.');
   let clientResult = null;
@@ -869,9 +877,11 @@ async function runStepLoop(turnId) {
           break;
         }
         case 'done':
+          stepLoopTerminated.add(turnId);
           addLog('Esecuzione completata (stepwise).');
           return;
         case 'aborted':
+          stepLoopTerminated.add(turnId);
           addLog(`Esecuzione interrotta: ${payload.reason || 'errore sconosciuto'}`, 'error');
           return;
         default:
@@ -940,9 +950,23 @@ function openTurnEventStream(turnId, planMsgId) {
     // Stepwise engine: server has initialized the agent state; the client now
     // drives the loop via POST /api/turn/step (no SSE-pushed actions). Fires on
     // both auto-approve and manual approve, and is replayed on reconnect.
+    //
+    // Gates: skip during history replay (loop is already running from before the
+    // reconnect), and skip if this turn has been marked terminal (done/aborted).
+    // Without these, every SSE reconnect would re-fire runStepLoop and the
+    // stale agent state would either spam server with redundant /step calls or,
+    // worse, restart a turn that already hit max-iter.
     src.addEventListener('stepwiseReady', (e) => {
       let tid = turnId;
       try { const d = JSON.parse(e.data); if (d && d.turnId) tid = d.turnId; } catch (_) {}
+      if (inReplay) {
+        addLog(`stepwiseReady (replay) ignorato: loop ${tid} già attivo`);
+        return;
+      }
+      if (stepLoopTerminated.has(tid)) {
+        addLog(`stepwiseReady ignorato: turn ${tid} è già in stato terminale`);
+        return;
+      }
       runStepLoop(tid);
     });
 
