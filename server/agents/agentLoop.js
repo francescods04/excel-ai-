@@ -2661,11 +2661,15 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       };
     }
     case 'delete_sheet': {
-      if (!params.name || typeof params.name !== 'string') {
-        return { error: 'delete_sheet: parametro "name" (nome del foglio) è obbligatorio e deve essere una stringa.' };
+      // Accept any reasonable param name — the LLM regularly tries "name", "sheet",
+      // "sheet_name", "sheetName". Picking one and rejecting the others wasted iters
+      // in production (log shows agent retrying with different names).
+      const sheetName = params.name || params.sheet || params.sheet_name || params.sheetName;
+      if (!sheetName || typeof sheetName !== 'string') {
+        return { error: 'delete_sheet: nome del foglio obbligatorio (usa "name" o "sheet").' };
       }
       return {
-        actions: [{ type: 'deleteSheet', name: params.name }]
+        actions: [{ type: 'deleteSheet', name: sheetName }]
       };
     }
     case 'duplicate_sheet': {
