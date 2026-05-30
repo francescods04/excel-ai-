@@ -3882,7 +3882,7 @@ function normalizeClientResults(clientResult) {
 function bulkNudgeFor(lastN) {
   if (lastN.length !== 2) return null;
   if (lastN.every(n => n === 'set_cell_range')) {
-    return 'BATCH HINT: you just called set_cell_range twice in a row. If the next write is also a different sheet/section, consolidate the upcoming writes into ONE bulk_set_cell_ranges call, then run one explicit bulk_set_format pass after the structure exists.';
+    return 'BATCH HINT (HARD): you just called set_cell_range twice. Your NEXT write MUST be bulk_set_cell_ranges with ALL remaining sections in one call (cap 16 entries). Sequential set_cell_range calls in a slice worker burn the iter budget and have cascade-killed downstream waves in prior runs. After all data lands, run ONE bulk_set_format pass.';
   }
   if (lastN.every(n => n === 'set_format')) {
     return 'BATCH HINT: you just called set_format twice in a row. Consolidate the next formats into ONE bulk_set_format call based on the observed ranges.';

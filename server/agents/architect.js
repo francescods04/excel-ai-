@@ -197,7 +197,7 @@ function validateBlueprint(raw) {
       deps,
       scope: { sheets_owned: sheetsOwned, ranges_owned: rangesOwned, may_read_from: mayReadFrom },
       instructions: String(s.instructions || '').slice(0, 8000),
-      estimated_iters: Number.isFinite(estIters) ? Math.max(3, Math.min(20, Math.round(estIters))) : 8,
+      estimated_iters: Number.isFinite(estIters) ? Math.max(3, Math.min(20, Math.round(estIters))) : 10,
       tier
     });
   }
@@ -309,7 +309,8 @@ HARD RULES:
 - DO NOT write to sheets or ranges outside your scope. If you need to reference data from another slice, use a formula referencing its known address from may_read_from.
 - DO NOT call ask_user_question. Make reasonable defaults.${hasUpstream ? `
 - READ BEFORE YOU WRITE: your first tool call MUST be a read (get_cell_ranges / read_sheet) against the upstream ranges listed above. Do NOT guess upstream layout from the slice instructions — in prod runs, workers that skipped this step wrote formulas pointing to wrong cells and had to redo the slice 4-8 times. Confirm exact addresses, then write your formulas against those exact addresses.` : ''}
-- execute_office_js is BLOCKED for slice workers. Use set_cell_range / bulk_set_cell_ranges for data + formulas, bulk_set_format for formatting, execute_excel_formula for one-off formulas. Hand-written Office.js routinely throws on numberFormat dimension mismatches and silently rolls back fill/font writes.
+- ITER BUDGET IS TIGHT (~${20}). Consolidate writes: a P&L / cash-flow / balance-sheet slice should be ONE bulk_set_cell_ranges call (up to 16 writes per call) for ALL section rows, then ONE bulk_set_format pass for formatting. Sequential per-row set_cell_range calls burn the budget and cascade-kill downstream waves.
+- execute_office_js is BLOCKED for slice workers. Use set_cell_range / bulk_set_cell_ranges for data + formulas, bulk_set_format for formatting, execute_excel_formula for one-off formulas. Hand-written Office.js routinely throws on numberFormat dimension mismatches and silently rolls back fill/font writes. Do NOT attempt it — the call is rejected before reaching Excel and wastes one iteration.
 - copyToRange is FORMULAS ONLY (relative refs adjust per cell). Never use copyToRange with a text label as the source cell — it paints the label into every destination. For headers/titles, write to one cell and merge if you need it visually wide.
 - When this slice is done, call the "done" tool with a one-line summary.
 </slice-context>`;

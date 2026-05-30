@@ -17,7 +17,12 @@ const { buildSliceWorkerPrompt } = require('./architect');
 // and 4 forced them into two sequential LLM batches. Six fits the common 5-7 slice
 // shape in one batch and roughly halves wall-clock time on build-heavy turns.
 const DEFAULT_MAX_PARALLEL = Number(process.env.PARALLEL_ORCHESTRATOR_MAX || 6);
-const SLICE_HARD_ITER_CAP = Number(process.env.SLICE_HARD_ITER_CAP) || 12;
+// Bumped from 12 → 20: the 2026-05-30 fast-food run hit 12 on the P&L slice
+// after 5 sequential set_cell_range calls + 1 blocked execute_office_js attempt,
+// which cascade-failed waves 4-7 (cash flow, balance sheet, scalability, format).
+// 20 gives complex P&L / cash-flow slices room for read-before-write + 8-10
+// structured writes + 1 format pass without starving downstream waves.
+const SLICE_HARD_ITER_CAP = Number(process.env.SLICE_HARD_ITER_CAP) || 20;
 const PRO_MODEL = process.env.AGENT_LOOP_PRO_MODEL || process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro';
 
 function initArchitectRun(blueprint) {
