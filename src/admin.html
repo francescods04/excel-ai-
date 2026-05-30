@@ -597,11 +597,11 @@ async function loadCosts() {
     return `$${n.toFixed(2)}`;
   };
   document.getElementById('cost24h').innerHTML = fmtCost(d['24h']?.totalCost);
-  document.getElementById('cost24hSub').textContent = `${d['24h']?.turns||0} turns`;
+  document.getElementById('cost24hSub').textContent = `${d['24h']?.calls||0} LLM calls`;
   document.getElementById('cost7d').innerHTML = fmtCost(d['7d']?.totalCost);
-  document.getElementById('cost7dSub').textContent = `${d['7d']?.turns||0} turns`;
+  document.getElementById('cost7dSub').textContent = `${d['7d']?.calls||0} LLM calls`;
   document.getElementById('cost30d').innerHTML = fmtCost(d['30d']?.totalCost);
-  document.getElementById('cost30dSub').textContent = `${d['30d']?.turns||0} turns`;
+  document.getElementById('cost30dSub').textContent = `${d['30d']?.calls||0} LLM calls`;
   const avg = (d['24h']?.totalCost && d['24h']?.turns) ? (d['24h'].totalCost / d['24h'].turns) : 0;
   document.getElementById('avgCostPerTurn').textContent = avg ? `$${avg.toFixed(3)}` : '—';
   document.getElementById('avgCostSub').textContent = 'last 24h';
