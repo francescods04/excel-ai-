@@ -9,20 +9,27 @@
   <link rel="stylesheet" href="taskpane.css">
 </head>
 <body>
-  <!-- Login Overlay -->
+  <!-- ===== LOGIN OVERLAY ===== -->
   <div id="login-overlay">
-    <div id="login-bg-grid"></div>
+    <canvas id="login-canvas"></canvas>
+    <div id="login-vignette"></div>
     <div id="login-card">
-      <div id="login-brandmark">
-        <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
-          <rect x="2" y="2" width="16" height="16" rx="3" stroke="currentColor" stroke-width="1.5"/>
-          <rect x="22" y="2" width="16" height="16" rx="3" stroke="currentColor" stroke-width="1.5"/>
-          <rect x="2" y="22" width="16" height="16" rx="3" stroke="currentColor" stroke-width="1.5"/>
-          <rect x="22" y="22" width="16" height="16" rx="3" stroke="currentColor" stroke-width="1.5"/>
-          <rect x="5" y="5" width="5" height="5" rx="1" fill="currentColor" opacity="0.6"/>
-          <rect x="25" y="5" width="5" height="5" rx="1" fill="currentColor" opacity="0.9"/>
-          <rect x="5" y="25" width="5" height="5" rx="1" fill="currentColor" opacity="0.3"/>
-          <rect x="25" y="25" width="5" height="5" rx="1" fill="currentColor" opacity="0.7"/>
+      <div id="login-brandmark" aria-hidden="true">
+        <svg width="44" height="44" viewBox="0 0 44 44" fill="none">
+          <defs>
+            <linearGradient id="brandGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#0b7f5c"/>
+              <stop offset="100%" stop-color="#1f6f8b"/>
+            </linearGradient>
+          </defs>
+          <rect x="2" y="2" width="18" height="18" rx="4" stroke="url(#brandGrad)" stroke-width="1.5"/>
+          <rect x="24" y="2" width="18" height="18" rx="4" stroke="url(#brandGrad)" stroke-width="1.5"/>
+          <rect x="2" y="24" width="18" height="18" rx="4" stroke="url(#brandGrad)" stroke-width="1.5"/>
+          <rect x="24" y="24" width="18" height="18" rx="4" stroke="url(#brandGrad)" stroke-width="1.5"/>
+          <rect x="6" y="6" width="5" height="5" rx="1.5" fill="url(#brandGrad)" opacity="0.6"/>
+          <rect x="28" y="6" width="5" height="5" rx="1.5" fill="url(#brandGrad)" opacity="0.9"/>
+          <rect x="6" y="28" width="5" height="5" rx="1.5" fill="url(#brandGrad)" opacity="0.3"/>
+          <rect x="28" y="28" width="5" height="5" rx="1.5" fill="url(#brandGrad)" opacity="0.7"/>
         </svg>
       </div>
       <h2>Excel AI</h2>
@@ -34,11 +41,11 @@
       <form id="login-form" class="auth-form active">
         <div class="input-group">
           <label for="login-email">Email</label>
-          <input type="email" id="login-email" required autocomplete="email">
+          <input type="email" id="login-email" required autocomplete="email" placeholder="your@email.com">
         </div>
         <div class="input-group">
           <label for="login-password">Password</label>
-          <input type="password" id="login-password" required autocomplete="current-password">
+          <input type="password" id="login-password" required autocomplete="current-password" placeholder="••••••••">
         </div>
         <div class="auth-error" id="login-error"></div>
         <button type="submit" class="btn-auth">Sign in &rarr;</button>
@@ -46,15 +53,15 @@
       <form id="register-form" class="auth-form">
         <div class="input-group">
           <label for="register-name">Name</label>
-          <input type="text" id="register-name" required autocomplete="name">
+          <input type="text" id="register-name" required autocomplete="name" placeholder="Your name">
         </div>
         <div class="input-group">
           <label for="register-email">Email</label>
-          <input type="email" id="register-email" required autocomplete="email">
+          <input type="email" id="register-email" required autocomplete="email" placeholder="your@email.com">
         </div>
         <div class="input-group">
           <label for="register-password">Password</label>
-          <input type="password" id="register-password" required minlength="6" autocomplete="new-password">
+          <input type="password" id="register-password" required minlength="6" autocomplete="new-password" placeholder="••••••••">
         </div>
         <div class="auth-error" id="register-error"></div>
         <button type="submit" class="btn-auth">Create account &rarr;</button>
@@ -62,7 +69,19 @@
     </div>
   </div>
 
+  <!-- ===== APP ===== -->
   <div id="app">
+    <!-- Parallax Background Layers -->
+    <div id="parallax-bg">
+      <div class="pl-layer pl-grid-back"></div>
+      <div class="pl-layer pl-orb orb-1"></div>
+      <div class="pl-layer pl-orb orb-2"></div>
+      <div class="pl-layer pl-orb orb-3"></div>
+      <div class="pl-layer pl-grid-front"></div>
+      <div class="pl-layer pl-dust"></div>
+    </div>
+
+    <!-- Header -->
     <div id="header">
       <div id="header-left">
         <div id="brand-mark" aria-hidden="true">
@@ -92,7 +111,7 @@
         <label id="prompt-variant-toggle" class="toggle-chip" title="Variante rapida">
           <input type="checkbox" id="prompt-variant-check"><span>Fast</span>
         </label>
-        <select id="speed-mode-select" title="Modalità velocità (Fast: rapido/meno preciso, Balanced: default, Pro: lento/più preciso)">
+        <select id="speed-mode-select" title="Modalità velocità">
           <option value="fast">⚡ Fast</option>
           <option value="balanced" selected>⚖ Balanced</option>
           <option value="pro">🎯 Pro</option>
@@ -109,10 +128,9 @@
       <button class="tab-btn" data-tab="details">Review</button>
     </div>
 
-    <!-- Tab: Chat -->
+    <!-- ===== TAB: CHAT ===== -->
     <div id="chat-panel" class="tab-panel active">
       <div id="chat-container">
-        <!-- Fixed banner for pending questions (impossible to miss) -->
         <div id="pending-question-banner" class="pending-question-banner hidden">
           <div class="pending-question-content">
             <span class="pending-question-icon">?</span>
@@ -135,11 +153,13 @@
       </div>
       <div id="input-area">
         <textarea id="user-input" placeholder="Chiedi una modifica o un'analisi del workbook..." rows="2"></textarea>
-        <button id="send-btn" title="Invia" aria-label="Invia">➤</button>
+        <button id="send-btn" title="Invia" aria-label="Invia">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+        </button>
       </div>
     </div>
 
-    <!-- Tab: Progresso -->
+    <!-- ===== TAB: PROGRESS ===== -->
     <div id="progress-panel" class="tab-panel">
       <div class="overall-progress">
         <div class="progress-header">
@@ -178,7 +198,7 @@
       </div>
     </div>
 
-    <!-- Tab: Dettagli -->
+    <!-- ===== TAB: DETAILS ===== -->
     <div id="details-panel" class="tab-panel">
       <div id="code-panel" class="code-panel">
         <h4>Generated Code</h4>
@@ -198,8 +218,9 @@
       </div>
     </div>
 
-    <!-- Approval Modal Overlay -->
+    <!-- ===== APPROVAL MODAL ===== -->
     <div id="approval-overlay">
+      <div class="approval-backdrop"></div>
       <div class="approval-sheet">
         <div class="approval-handle"></div>
         <div class="approval-title" id="approval-title">Conferma modifiche</div>
@@ -212,10 +233,10 @@
       </div>
     </div>
 
-    <!-- Toast Container -->
+    <!-- ===== TOAST CONTAINER ===== -->
     <div id="toast-container"></div>
 
-    <!-- Undo Floating Badge -->
+    <!-- ===== UNDO BADGE ===== -->
     <div id="undo-badge">
       <span id="undo-badge-text"></span>
       <button id="undo-badge-undo">Undo</button>
@@ -223,6 +244,135 @@
     </div>
   </div>
 
+  <script>
+  /* ── Login Particle Canvas & Parallax System ── */
+  (function() {
+    'use strict';
+
+    // 1. Login Canvas Particle Field with Parallax Depth
+    const canvas = document.getElementById('login-canvas');
+    if (canvas) {
+      const ctx = canvas.getContext('2d');
+      let w, h, particles = [];
+      const PARTICLE_COUNT = 80;
+      const DEPTH_LAYERS = 3;
+      let mouseX = 0, mouseY = 0;
+      let targetMouseX = 0, targetMouseY = 0;
+
+      function resize() {
+        w = canvas.width = window.innerWidth;
+        h = canvas.height = window.innerHeight;
+      }
+      resize();
+      window.addEventListener('resize', resize);
+
+      class Particle {
+        constructor() {
+          this.reset();
+        }
+        reset() {
+          this.x = Math.random() * w;
+          this.y = Math.random() * h;
+          this.layer = Math.floor(Math.random() * DEPTH_LAYERS);
+          this.size = 1 + this.layer * 1.5 + Math.random() * 2;
+          this.speedX = (Math.random() - 0.5) * (0.2 + this.layer * 0.15);
+          this.speedY = (Math.random() - 0.5) * (0.2 + this.layer * 0.15);
+          this.opacity = 0.15 + this.layer * 0.1 + Math.random() * 0.15;
+          this.phase = Math.random() * Math.PI * 2;
+        }
+        update() {
+          this.x += this.speedX;
+          this.y += this.speedY;
+          this.phase += 0.01;
+
+          // Mouse parallax influence
+          const parallaxStrength = (this.layer + 1) * 0.3;
+          this.x += (targetMouseX - mouseX) * parallaxStrength * 0.02;
+          this.y += (targetMouseY - mouseY) * parallaxStrength * 0.02;
+
+          if (this.x < -50) this.x = w + 50;
+          if (this.x > w + 50) this.x = -50;
+          if (this.y < -50) this.y = h + 50;
+          if (this.y > h + 50) this.y = -50;
+        }
+        draw() {
+          const pulse = 1 + Math.sin(this.phase) * 0.2;
+          ctx.beginPath();
+          ctx.arc(this.x, this.y, this.size * pulse, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(38, 201, 125, ${this.opacity})`;
+          ctx.fill();
+        }
+      }
+
+      for (let i = 0; i < PARTICLE_COUNT; i++) {
+        particles.push(new Particle());
+      }
+
+      // Connection lines between nearby particles
+      function drawConnections() {
+        for (let i = 0; i < particles.length; i++) {
+          for (let j = i + 1; j < particles.length; j++) {
+            const dx = particles[i].x - particles[j].x;
+            const dy = particles[i].y - particles[j].y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist < 100 && particles[i].layer === particles[j].layer) {
+              const alpha = (1 - dist / 100) * 0.08;
+              ctx.beginPath();
+              ctx.moveTo(particles[i].x, particles[i].y);
+              ctx.lineTo(particles[j].x, particles[j].y);
+              ctx.strokeStyle = `rgba(38, 201, 125, ${alpha})`;
+              ctx.lineWidth = 0.5;
+              ctx.stroke();
+            }
+          }
+        }
+      }
+
+      function animate() {
+        ctx.clearRect(0, 0, w, h);
+        mouseX += (targetMouseX - mouseX) * 0.05;
+        mouseY += (targetMouseY - mouseY) * 0.05;
+        particles.forEach(p => { p.update(); p.draw(); });
+        drawConnections();
+        requestAnimationFrame(animate);
+      }
+      animate();
+
+      document.addEventListener('mousemove', (e) => {
+        targetMouseX = (e.clientX - w / 2) / w;
+        targetMouseY = (e.clientY - h / 2) / h;
+      });
+    }
+
+    // 2. Login Card 3D Tilt on Mouse Move
+    const loginCard = document.getElementById('login-card');
+    if (loginCard) {
+      loginCard.addEventListener('mousemove', (e) => {
+        const rect = loginCard.getBoundingClientRect();
+        const x = (e.clientX - rect.left) / rect.width - 0.5;
+        const y = (e.clientY - rect.top) / rect.height - 0.5;
+        loginCard.style.transform = `rotateY(${x * 8}deg) rotateX(${-y * 8}deg) translateZ(10px)`;
+      });
+      loginCard.addEventListener('mouseleave', () => {
+        loginCard.style.transform = 'rotateY(0) rotateX(0) translateZ(0)';
+      });
+    }
+
+    // 3. Chat Container Parallax Scroll
+    const chatContainer = document.getElementById('chat-container');
+    if (chatContainer) {
+      chatContainer.addEventListener('scroll', () => {
+        const scrollTop = chatContainer.scrollTop;
+        const back = document.querySelector('.pl-grid-back');
+        const front = document.querySelector('.pl-grid-front');
+        const dust = document.querySelector('.pl-dust');
+        if (back) back.style.transform = `translateZ(-80px) translateY(${scrollTop * 0.15}px)`;
+        if (front) front.style.transform = `translateZ(-40px) translateY(${scrollTop * 0.35}px)`;
+        if (dust) dust.style.transform = `translateZ(-10px) translateY(${scrollTop * 0.5}px)`;
+      });
+    }
+  })();
+  </script>
   <script src="taskpane.bundle.js"></script>
 </body>
 </html>

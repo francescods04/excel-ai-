@@ -22,7 +22,7 @@ function initApprovalModal() {
     if (onCancel) onCancel();
   });
   approvalOverlay.addEventListener('click', (e) => {
-    if (e.target === approvalOverlay) {
+    if (e.target === approvalOverlay || e.target.classList.contains('approval-backdrop')) {
       hideApprovalModal();
       if (onCancel) onCancel();
     }
