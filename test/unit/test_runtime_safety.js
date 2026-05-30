@@ -1,4 +1,6 @@
 const assert = require('assert');
+const path = require('path');
+const { spawnSync } = require('child_process');
 const {
   LIMITS,
   assertPlanWithinLimits,
@@ -11,8 +13,7 @@ const {
   buildToolStagnationSignature,
   detectToolStagnation,
   formatToolStagnationReason,
-  resolveAgentLoopModel,
-  shouldUseAgentThinking
+  resolveAgentLoopModel
 } = require('../../server/agents/agentLoop');
 
 async function test(name, fn) {
@@ -24,6 +25,32 @@ async function test(name, fn) {
     console.error(err);
     process.exitCode = 1;
   }
+}
+
+function probeAgentThinkingWithEnv(env) {
+  const agentLoopPath = path.join(__dirname, '../../server/agents/agentLoop');
+  const script = `
+    const { shouldUseAgentThinking } = require(${JSON.stringify(agentLoopPath)});
+    const values = [
+      shouldUseAgentThinking(1, {}),
+      shouldUseAgentThinking(2, {}),
+      shouldUseAgentThinking(6, {}),
+      shouldUseAgentThinking(3, { forceThinkingNext: true }),
+      shouldUseAgentThinking(3, { consecutiveErrors: 1 }),
+      shouldUseAgentThinking(4, { parseFailureStreak: 1 }),
+      shouldUseAgentThinking(4, { lastToolName: 'todo_write' })
+    ];
+    console.log('__AGENT_THINKING__' + JSON.stringify(values));
+  `;
+  const child = spawnSync(process.execPath, ['-e', script], {
+    cwd: path.join(__dirname, '../..'),
+    env: { ...process.env, ...env },
+    encoding: 'utf8'
+  });
+  assert.strictEqual(child.status, 0, child.stderr || child.stdout);
+  const line = child.stdout.trim().split(/\n/).find(output => output.startsWith('__AGENT_THINKING__'));
+  assert.ok(line, child.stdout);
+  return JSON.parse(line.slice('__AGENT_THINKING__'.length));
 }
 
 async function main() {
@@ -182,13 +209,22 @@ async function main() {
     assert.strictEqual(resolveAgentLoopModel('deepseek-v4-pro', 'fast'), 'deepseek-v4-pro');
   });
 
-  await test('agent loop thinking cadence uses first step, interval, and recovery triggers', () => {
-    assert.strictEqual(shouldUseAgentThinking(1, {}), true);
-    assert.strictEqual(shouldUseAgentThinking(2, {}), false);
-    assert.strictEqual(shouldUseAgentThinking(6, {}), true);
-    assert.strictEqual(shouldUseAgentThinking(3, { forceThinkingNext: true }), true);
-    assert.strictEqual(shouldUseAgentThinking(3, { consecutiveErrors: 1 }), true);
-    assert.strictEqual(shouldUseAgentThinking(4, { parseFailureStreak: 1 }), true);
+  await test('agent loop thinking defaults off except explicit forced next step', () => {
+    assert.deepStrictEqual(probeAgentThinkingWithEnv({
+      AGENT_THINKING_FIRST_ITER: 'false',
+      AGENT_THINKING_INTERVAL: '0',
+      AGENT_FORCE_THINKING_AFTER_ERROR: 'false',
+      AGENT_THINKING_EVERY_ITER: 'false'
+    }), [false, false, false, true, false, false, false]);
+  });
+
+  await test('agent loop thinking env knobs enable first step, interval, and recovery triggers', () => {
+    assert.deepStrictEqual(probeAgentThinkingWithEnv({
+      AGENT_THINKING_FIRST_ITER: 'true',
+      AGENT_THINKING_INTERVAL: '6',
+      AGENT_FORCE_THINKING_AFTER_ERROR: 'true',
+      AGENT_THINKING_EVERY_ITER: 'false'
+    }), [true, false, true, true, true, true, false]);
   });
 }
 

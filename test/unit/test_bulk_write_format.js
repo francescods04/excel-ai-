@@ -110,15 +110,89 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     console.log('OK bulk_set_format surfaces per-entry errors and continues');
   }
 
-  // 7) Over-cap (>32) rejected
+  // 7) Over-cap (>96 by default) rejected
   {
-    const formats = Array.from({ length: 33 }, () => ({ sheet: 'X', target: 'A1', options: { bold: true } }));
+    const formats = Array.from({ length: 97 }, () => ({ sheet: 'X', target: 'A1', options: { bold: true } }));
     const r = await executeAgentTool('bulk_set_format', { formats }, { messages: [], iteration: 0 }, null);
-    assert.match(r.error, /max 32/);
-    console.log('OK bulk_set_format enforces max 32 formats');
+    assert.match(r.error, /max 96/);
+    console.log('OK bulk_set_format enforces max 96 formats');
   }
 
-  // 8) bulk_set_notes fans many notes into ONE setNotes action; sheet defaults to active
+  // 8) format options normalize common LLM spellings/colors before reaching Excel
+  {
+    const r = await executeAgentTool(
+      'bulk_set_format',
+      {
+        formats: [
+          {
+            sheet: 'DCF',
+            target: 'A1:C1',
+            options: {
+              backgroundColor: 'blue',
+              fontColor: 'rgb(255, 0, 0)',
+              horizontalAlignment: 'center',
+              vertical_align: 'middle',
+              columnWidth: '120',
+              wrap: 'false'
+            }
+          }
+        ]
+      },
+      { messages: [], iteration: 0 },
+      null
+    );
+    assert.strictEqual(r.ok, true);
+    assert.deepStrictEqual(r.actions[0].options, {
+      backgroundColor: '#0000FF',
+      fontColor: '#FF0000',
+      horizontalAlignment: 'Center',
+      verticalAlignment: 'Center',
+      columnWidth: 120,
+      wrapText: false
+    });
+    console.log('OK bulk_set_format normalizes colors, aliases, alignment, and numeric/boolean strings');
+  }
+
+  // 9) inline write cellStyles normalize for back-compat without relying on presets
+  {
+    const r = await executeAgentTool(
+      'set_cell_range',
+      {
+        sheet: 'Model',
+        cells: {
+          A1: {
+            value: 'Header',
+            cellStyles: {
+              bg_color: 'red',
+              color: '#fff',
+              alignment: 'right'
+            }
+          }
+        }
+      },
+      { messages: [], iteration: 0 },
+      null
+    );
+    assert.strictEqual(r.actions[0].cells.A1.cellStyles.backgroundColor, '#FF0000');
+    assert.strictEqual(r.actions[0].cells.A1.cellStyles.fontColor, '#FFFFFF');
+    assert.strictEqual(r.actions[0].cells.A1.cellStyles.horizontalAlignment, 'Right');
+    console.log('OK set_cell_range normalizes inline cellStyles for compatibility');
+  }
+
+  // 10) invalid format-only entries are rejected after normalization
+  {
+    const r = await executeAgentTool(
+      'bulk_set_format',
+      { formats: [{ sheet: 'DCF', target: 'A1', options: { backgroundColor: 'not-a-color' } }] },
+      { messages: [], iteration: 0 },
+      null
+    );
+    assert.match(r.error, /no valid formats/);
+    assert.match(r.errors[0].reason, /no supported/);
+    console.log('OK bulk_set_format rejects entries with no supported normalized options');
+  }
+
+  // 11) bulk_set_notes fans many notes into ONE setNotes action; sheet defaults to active
   {
     const r = await executeAgentTool(
       'bulk_set_notes',
@@ -142,7 +216,7 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     console.log('OK bulk_set_notes fans many notes into one setNotes action');
   }
 
-  // 9) Invalid note entries reported, valid ones kept
+  // 12) Invalid note entries reported, valid ones kept
   {
     const r = await executeAgentTool(
       'bulk_set_notes',
@@ -163,7 +237,7 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     console.log('OK bulk_set_notes surfaces per-entry errors and continues');
   }
 
-  // 10) Over-cap (>64) rejected
+  // 13) Over-cap (>64) rejected
   {
     const notes = Array.from({ length: 65 }, (_, i) => ({ sheet: 'X', cell: `A${i + 1}`, note: 'n' }));
     const r = await executeAgentTool('bulk_set_notes', { notes }, { messages: [], iteration: 0 }, null);
@@ -171,7 +245,7 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     console.log('OK bulk_set_notes enforces max 64 notes');
   }
 
-  // 11) Empty / missing -> soft error
+  // 14) Empty / missing -> soft error
   {
     const r1 = await executeAgentTool('bulk_set_notes', { notes: [] }, { messages: [], iteration: 0 }, null);
     assert.match(r1.error, /non-empty/);
@@ -180,7 +254,7 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     console.log('OK bulk_set_notes rejects empty / missing notes');
   }
 
-  // 12) read_format_summary requires a live client and passes through visual-format data
+  // 15) read_format_summary requires a live client and passes through visual-format data
   {
     const noClient = await executeAgentTool('read_format_summary', { sheet: 'DCF', target: 'A1:C5' }, { messages: [], iteration: 0 }, null);
     assert.match(noClient.error, /live Excel client/);

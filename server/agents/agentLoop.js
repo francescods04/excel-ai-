@@ -9,6 +9,7 @@ const streaming = require('./streaming');
 const { initializeTools } = require('../utils/toolSearch');
 const { detectSkills } = require('../utils/skillSuggest');
 const clientReadCache = require('../utils/clientReadCache');
+const { normalizeFormatOptions } = require('../utils/formatOptions');
 
 // Tools that mutate the workbook. After any of these runs, the per-agent
 // workbook-read cache must be invalidated so the next read sees fresh state.
@@ -39,6 +40,8 @@ const AGENT_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT_AGENT || 'h
 const AGENT_POSTWRITE_CRITIC = process.env.AGENT_POSTWRITE_CRITIC === 'true';
 const AGENT_POSTWRITE_CRITIC_TIMEOUT_MS = Number(process.env.AGENT_POSTWRITE_CRITIC_TIMEOUT_MS) || 8000;
 const AGENT_POSTWRITE_CRITIC_MIN_ACTIONS = Number(process.env.AGENT_POSTWRITE_CRITIC_MIN_ACTIONS) || 10;
+const AGENT_AUTO_FORMAT_ON_DONE = process.env.AGENT_AUTO_FORMAT_ON_DONE === 'true';
+const BULK_SET_FORMAT_MAX = Math.max(32, Number(process.env.AGENT_BULK_FORMAT_MAX) || 96);
 const POSTWRITE_CRITIC_TOOLS = new Set([
   'set_cell_range',
   'bulk_set_cell_ranges',
@@ -132,12 +135,9 @@ function normalizeOpenBBSymbolParams(params = {}) {
   return next;
 }
 
-/* ---------- IB-grade style presets (atomic write+format) ----------
- * Map a short tag to a full cellStyles + numberFormat dict so the LLM can
- * format a cell with one token (`style_preset: "input"`) instead of
- * remembering #0000FF + numberFormat + bold + border for every section.
- * Promotes write+format atomic emission — the agent stops splitting a
- * write into "write" + "format" two-iteration pairs.
+/* ---------- Legacy style presets ----------
+ * Kept for compatibility with older traces and persisted states. New plans
+ * should prefer explicit, structure-aware bulk_set_format actions.
  */
 const STYLE_PRESETS = Object.freeze({
   // --- structural ---
@@ -270,13 +270,25 @@ const STYLE_PRESETS = Object.freeze({
 function expandStylePreset(spec) {
   if (!spec || typeof spec !== 'object') return spec;
   const presetName = spec.style_preset || spec.preset;
-  if (!presetName) return spec;
+  if (!presetName) {
+    if (spec.cellStyles && typeof spec.cellStyles === 'object') {
+      const normalized = normalizeFormatOptions(spec.cellStyles);
+      return { ...spec, cellStyles: normalized.options };
+    }
+    return spec;
+  }
   const preset = STYLE_PRESETS[String(presetName).toLowerCase()];
-  if (!preset) return spec;
+  if (!preset) {
+    if (spec.cellStyles && typeof spec.cellStyles === 'object') {
+      const normalized = normalizeFormatOptions(spec.cellStyles);
+      return { ...spec, cellStyles: normalized.options };
+    }
+    return spec;
+  }
   const merged = { ...spec };
   delete merged.style_preset;
   delete merged.preset;
-  merged.cellStyles = { ...(preset.cellStyles || {}), ...(spec.cellStyles || {}) };
+  merged.cellStyles = normalizeFormatOptions({ ...(preset.cellStyles || {}), ...(spec.cellStyles || {}) }).options;
   return merged;
 }
 
@@ -376,15 +388,15 @@ function detectScalarTextFloodFill(cells, copyToRange) {
 function expandPresetInOptions(options) {
   if (!options || typeof options !== 'object') return options;
   const presetName = options.style_preset || options.preset;
-  if (!presetName) return options;
+  if (!presetName) return normalizeFormatOptions(options).options;
   const preset = STYLE_PRESETS[String(presetName).toLowerCase()];
-  if (!preset || !preset.cellStyles) return options;
+  if (!preset || !preset.cellStyles) return normalizeFormatOptions(options).options;
   // set_format options live at top level (backgroundColor, fontColor, etc.)
   // so merge the preset's cellStyles fields into them.
   const merged = { ...preset.cellStyles, ...options };
   delete merged.style_preset;
   delete merged.preset;
-  return merged;
+  return normalizeFormatOptions(merged).options;
 }
 
 /* ---------- Message ID helpers for context_snip targeting ---------- */
@@ -499,7 +511,7 @@ let AGENT_SYSTEM_PROMPT = loadPromptVariant(DEFAULT_PROMPT_VARIANT);
  * prescriptions (no "BATCH RULE", no "ATOMIC FORMAT", no "SPEED RULE" — those
  * are anti-patterns we learned from logs and the HAR analysis).
  */
-const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nDEPLOYMENT REMINDERS (this Excel add-in only):\n\n- **End with done.** When the task is complete, call \`done\` with a summary. Do NOT keep calling tools after the work is finished.\n- **Python is sandboxed.** \`execute_python\` is for math on data you pass in as variables. It does NOT have filesystem access — no openpyxl, no /tmp/*.xlsx paths. To read/write the workbook, use the Excel tools.\n- **Live data first.** For market/regulatory/news facts that could have changed, verify with finance tools or \`web_search\` before writing assumptions. Training memory is for stable methodology only.\n- **Skills.** \`<available_skills>\` lists loadable instructions. Before a complex build (DCF, LBO, comps, 3-statement, audit), call \`read_skill\` for the relevant one. Max 2 per task.\n- **Citation hint.** When referencing cells in chat, use the citation link format from the prompt: \`[A1:D1](<citation:Sheet!A1:D1>)\`.\n- **Industry add-ins.** If the user mentions Bloomberg/FactSet/CapIQ/Refinitiv, prefer the native formula syntax (BDP/BDH, FDS/FDSH, CIQ/CIQH, TR) per the Custom Function Integrations section of the prompt. On #VALUE! fallback, switch to web_search.\n- **Whole-workbook formatting.** When the user asks to format "everything"/"tutto"/"all sheets"/"the whole workbook" — call \`format_workbook\` ONCE with no args (defaults to every sheet) instead of looping set_format / bulk_set_format per sheet. It applies the institutional palette deterministically in one call.\n- **Cannot do.** VBA macros, file downloads, scheduled automations, =TABLE() data tables. Build sensitivity with direct per-cell formulas instead.`;
+const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nDEPLOYMENT REMINDERS (this Excel add-in only):\n\n- **End with done.** When the task is complete, call \`done\` with a summary. Do NOT keep calling tools after the work is finished.\n- **Python is sandboxed.** \`execute_python\` is for math on data you pass in as variables. It does NOT have filesystem access — no openpyxl, no /tmp/*.xlsx paths. To read/write the workbook, use the Excel tools.\n- **Live data first.** For market/regulatory/news facts that could have changed, verify with finance tools or \`web_search\` before writing assumptions. Training memory is for stable methodology only.\n- **Skills.** \`<available_skills>\` lists loadable instructions. Before a complex build (DCF, LBO, comps, 3-statement, audit), call \`read_skill\` for the relevant one. Max 2 per task.\n- **Citation hint.** When referencing cells in chat, use the citation link format from the prompt: \`[A1:D1](<citation:Sheet!A1:D1>)\`.\n- **Industry add-ins.** If the user mentions Bloomberg/FactSet/CapIQ/Refinitiv, prefer the native formula syntax (BDP/BDH, FDS/FDSH, CIQ/CIQH, TR) per the Custom Function Integrations section of the prompt. On #VALUE! fallback, switch to web_search.\n- **Whole-workbook formatting.** First inspect the relevant sheets, then apply one explicit \`bulk_set_format\` pass based on the observed workbook structure. Use \`format_workbook\` only as an emergency cleanup helper when the user asks for broad generic cleanup; do not rely on hidden templates.\n- **Cannot do.** VBA macros, file downloads, scheduled automations, =TABLE() data tables. Build sensitivity with direct per-cell formulas instead.`;
 
 const ACTIVE_AGENT_SYSTEM_PROMPT_SUFFIX = AGENT_SYSTEM_PROMPT_SUFFIX;
 
@@ -641,7 +653,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'bulk_create_sheets',
-      description: 'Create MANY sheets in one iteration. Pass the full list of sheet names. The client creates them all in a single batch. Use this at the start of any multi-sheet build (DCF, LBO, 3-statement, template scaffolding) instead of issuing N separate create_sheet calls — saves N-1 LLM round-trips.\n\nExample: { "names": ["Assumptions", "WACC", "DCF", "Sensitivity"] }',
+      description: 'Create MANY sheets in one iteration. Pass the full list of sheet names. The client creates them all in a single batch. Use this at the start of any multi-sheet build (DCF, LBO, 3-statement, model scaffolding) instead of issuing N separate create_sheet calls — saves N-1 LLM round-trips.\n\nExample: { "names": ["Assumptions", "WACC", "DCF", "Sensitivity"] }',
       parameters: {
         type: 'object',
         required: ['names'],
@@ -796,7 +808,7 @@ const TOOL_DEFINITIONS = [
               required: ['sheet', 'cells'],
               properties: {
                 sheet: { type: 'string', description: 'Sheet name' },
-                cells: { type: 'object', description: 'A1 address -> {value | formula, note?, cellStyles?, borderStyles?, style_preset?}. style_preset is one of: header, subheader, table_header, section, label, input, input_pct, input_int, input_eur, input_usd, formula, formula_pct, formula_int, formula_eur, formula_usd, output, output_pct, output_eur, output_usd, output_multiple, output_per_share, total, subtotal, internal_link, external_link, check_ok, check_warn, check_error, scenario_base, scenario_upside, scenario_downside, currency, percent, multiple, per_share, date, year, assumption.' },
+                cells: { type: 'object', description: 'A1 address -> {value | formula, note?, cellStyles?, borderStyles?, style_preset?}. Prefer value/formula writes here and one explicit bulk_set_format pass after data is verified. style_preset remains accepted only for legacy compatibility.' },
                 copyToRange: { type: 'string', description: 'Optional range to copy the pattern to (e.g. "B2:B100")' },
                 allow_overwrite: { type: 'boolean', description: 'If false, fail when target cells are non-empty (default true)' }
               }
@@ -834,7 +846,7 @@ const TOOL_DEFINITIONS = [
               borderBottomColor: { type: 'string' },
               borderTopColor: { type: 'string' },
               borders: { type: 'object' },
-              style_preset: { type: 'string', description: 'IB-grade shortcut: header, subheader, table_header, section, label, input, input_pct, input_int, input_eur, input_usd, formula, formula_pct, formula_int, formula_eur, formula_usd, output, output_pct, output_eur, output_usd, output_multiple, output_per_share, total, subtotal, internal_link, external_link, check_ok, check_warn, check_error, scenario_base, scenario_upside, scenario_downside, currency, percent, multiple, per_share, date, year, assumption. Any explicit fields you pass override the preset.' }
+              style_preset: { type: 'string', description: 'Legacy shortcut accepted for compatibility. Prefer explicit formatting options chosen from the workbook structure.' }
             }
           }
         },
@@ -846,7 +858,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'bulk_set_format',
-      description: `Apply formatting to MANY ranges in ONE iteration. Each entry has the same shape as set_format. Use when finishing a multi-sheet model (headers, number formats, column widths, borders, etc.) instead of N consecutive set_format calls. Hard cap 32 entries per call.\n\nExample:\n{\n  "formats": [\n    { "sheet": "Assumptions", "target": "A1:B1", "options": { "bold": true, "backgroundColor": "#0D1F2D", "fontColor": "#FFFFFF" } },\n    { "sheet": "DCF",         "target": "B2:F2",  "options": { "numberFormat": "#,##0" } },\n    { "sheet": "DCF",         "target": "A:A",     "options": { "columnWidth": 230 } }\n  ]\n}\n\nFailures on individual entries do NOT abort the batch.`,
+      description: `Apply formatting to MANY ranges in ONE iteration. Each entry has the same shape as set_format. Use when finishing a multi-sheet model (headers, number formats, column widths, borders, etc.) instead of N consecutive set_format calls. Build the pass from the actual workbook structure you just wrote or inspected. Hard cap ${BULK_SET_FORMAT_MAX} entries per call.\n\nExample:\n{\n  "formats": [\n    { "sheet": "Assumptions", "target": "A1:B1", "options": { "bold": true, "backgroundColor": "#0D1F2D", "fontColor": "#FFFFFF" } },\n    { "sheet": "DCF",         "target": "B2:F2",  "options": { "numberFormat": "#,##0" } },\n    { "sheet": "DCF",         "target": "A:A",     "options": { "columnWidth": 230 } }\n  ]\n}\n\nFailures on individual entries do NOT abort the batch.`,
       parameters: {
         type: 'object',
         required: ['formats'],
@@ -854,7 +866,7 @@ const TOOL_DEFINITIONS = [
           formats: {
             type: 'array',
             minItems: 1,
-            maxItems: 32,
+            maxItems: BULK_SET_FORMAT_MAX,
             items: {
               type: 'object',
               required: ['sheet', 'target', 'options'],
@@ -876,7 +888,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'format_workbook',
-      description: `Apply institutional finance formatting (Goldman/JPMorgan palette) to MULTIPLE sheets in ONE call. This is the FASTEST way to format an entire workbook after data is written — uses the deterministic format planner, no extra LLM round-trips needed.\n\nDefaults to ALL sheets in the workbook when "sheets" is omitted. Pass a list to restrict to specific tabs.\n\nUse this when:\n- User asks to format the whole workbook ("formatta tutto", "format all sheets", "make it pretty")\n- You finished building a multi-sheet model and want one final cleanup pass\n- The current formatting is inconsistent across sheets\n\nDo NOT iterate over sheets calling set_format one-by-one — this single call is cheaper and produces a uniform palette.\n\nExamples:\n  { }                                          // format ALL sheets\n  { "sheets": ["Assumptions", "P&L", "DCF"] }  // format only these 3\n  { "mode": "institutional_finance" }          // explicit mode (default)`,
+      description: `Adaptive whole-workbook cleanup helper for MULTIPLE sheets in ONE call. Prefer explicit bulk_set_format when the workbook structure is known; use this only for broad generic cleanup where a semantic fallback is acceptable.\n\nDefaults to ALL sheets in the workbook when "sheets" is omitted. Pass a list to restrict to specific tabs.\n\nExamples:\n  { }                                          // format ALL sheets\n  { "sheets": ["Assumptions", "P&L", "DCF"] }  // format only these 3\n  { "mode": "institutional_finance" }          // explicit mode (default)`,
       parameters: {
         type: 'object',
         properties: {
@@ -1855,7 +1867,7 @@ async function runPostWriteCritic(toolName, actions) {
   const summary = summarizeActionsForCritic(actions);
   if (!summary) return null;
 
-  const prompt = `You are a fast deterministic critic for Excel agent writes. Scan the actions below for OBVIOUS errors only — do NOT speculate, do NOT make stylistic suggestions.
+  const prompt = `You are a fast strict critic for Excel agent writes. Scan the actions below for OBVIOUS errors only — do NOT speculate, do NOT make stylistic suggestions.
 
 Flag ONLY:
 - Unbalanced parentheses, missing leading "=" on formulas, obvious typos in function names
@@ -1986,9 +1998,12 @@ async function runAgentLoop(objective, context, options = {}) {
   let iteration = options.resumeIteration || 0;
   let done = false;
   const codeLog = options.resumeCodeLog || [];
-  // Track sheets touched by write actions so we can run the deterministic format
-  // pass once on done. Without this the agent ends with raw unformatted numbers.
+  // Track sheets touched by write actions. Hidden auto-format is opt-in now:
+  // parallel architect runs already end with a dedicated format/verify slice,
+  // and generic cleanup inside every data slice caused slow, conflicting passes.
   const touchedSheets = new Set(options.resumeTouchedSheets || []);
+  const autoFormatOnDone = options.autoFormatOnDone === true ||
+    (options.autoFormatOnDone !== false && AGENT_AUTO_FORMAT_ON_DONE);
 
   logger.info(`[AgentLoop] Starting loop for: ${objective}`);
   onEvent('agentStarted', { objective, iteration });
@@ -2001,6 +2016,7 @@ async function runAgentLoop(objective, context, options = {}) {
   let abortReason = '';
   let forceThinkingNext = options.resumeForceThinkingNext || false;
   let parseFailureStreak = options.resumeParseFailureStreak || 0;
+  const pendingCritics = [];
   const loadedSkillNames = new Set(options.resumeLoadedSkillNames || []);
   const recentToolTrail = Array.isArray(options.resumeRecentToolTrail)
     ? [...options.resumeRecentToolTrail]
@@ -2052,11 +2068,14 @@ async function runAgentLoop(objective, context, options = {}) {
 
     // Drain pending background critics: wait for any fire-and-forget post-write
     // critic to complete before the next LLM call so its findings are available.
-    if (state._pendingCritic && state._pendingCritic.length > 0) {
+    if (pendingCritics.length > 0) {
       try {
-        await Promise.all(state._pendingCritic);
-        state._pendingCritic = [];
-      } catch (_) { state._pendingCritic = []; }
+        await Promise.all(pendingCritics);
+      } catch (_) {
+        // Individual critic failures are already logged by their promise chain.
+      } finally {
+        pendingCritics.length = 0;
+      }
     }
 
     try {
@@ -2167,11 +2186,8 @@ async function runAgentLoop(objective, context, options = {}) {
       // Handle done
       if (toolName === 'done') {
         done = true;
-        // Auto-format pass: agent built data but skipped formatting (typical with
-        // the HAR prompt that decouples format from write). Run the deterministic
-        // institutional format plan over every touched sheet — colors, number
-        // formats, headers/totals — in one no-LLM pass before exiting.
-        if (touchedSheets.size > 0 && options.autoFormatOnDone !== false) {
+        // Optional auto-format pass for legacy single-agent runs.
+        if (touchedSheets.size > 0 && autoFormatOnDone) {
           try {
             const { runFormatAgent } = require('./specialists');
             const sheets = Array.from(touchedSheets);
@@ -2409,8 +2425,7 @@ async function runAgentLoop(objective, context, options = {}) {
           })
           .catch(err => logger.warn(`[AgentLoop] post-write critic threw: ${err.message}`));
         // Track background job (don't await — let it resolve before next LLM call)
-        if (!state._pendingCritic) state._pendingCritic = [];
-        state._pendingCritic.push(criticPromise);
+        pendingCritics.push(criticPromise);
       }
 
       recentToolTrail.push({
@@ -2434,11 +2449,11 @@ async function runAgentLoop(objective, context, options = {}) {
         const lastN = recentToolTrail.slice(-BULK_TRIGGER_RUN).map(e => e.toolName);
         if (lastN.length === BULK_TRIGGER_RUN && lastN.every(n => n === 'set_cell_range')) {
           messages.push(makeUserMessage(
-            'BATCH HINT: you just called set_cell_range twice in a row. Consolidate the upcoming writes into ONE bulk_set_cell_ranges call. ALSO: include style_preset on each cell (header/input/formula/total/percent/date/...) so write and format happen in the same iteration — do NOT plan a separate format pass.'
+            'BATCH HINT: you just called set_cell_range twice in a row. Consolidate the upcoming writes into ONE bulk_set_cell_ranges call. Write data/formulas first; do one explicit bulk_set_format pass after the structure is in place.'
           ));
         } else if (lastN.length === BULK_TRIGGER_RUN && lastN.every(n => n === 'set_format')) {
           messages.push(makeUserMessage(
-            'BATCH HINT: you just called set_format twice in a row. Consolidate the next formats into ONE bulk_set_format call. Better still: most of those formats belong INSIDE the original writes via style_preset — restructure so future sections format themselves at write time.'
+            'BATCH HINT: you just called set_format twice in a row. Consolidate the next formats into ONE bulk_set_format call based on the ranges you have already written or inspected.'
           ));
         } else if (lastN.length === BULK_TRIGGER_RUN && lastN.every(n => n === 'create_sheet')) {
           messages.push(makeUserMessage(
@@ -3177,12 +3192,18 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
     case 'set_format': {
       const targetSheet = params.sheet || context?.activeSheet;
       if (!params.sheet) logger.warn(`[AgentLoop] set_format without 'sheet'; defaulting to "${targetSheet}".`);
+      if (!targetSheet) return { error: 'set_format: missing sheet and no active sheet in context' };
+      if (!params.target || typeof params.target !== 'string') return { error: 'set_format: missing or invalid target' };
+      const options = expandPresetInOptions(params.options);
+      if (!options || Object.keys(options).length === 0) {
+        return { error: 'set_format: no supported format options after normalization' };
+      }
       return {
         actions: [{
           type: 'setCellFormat',
           sheet: targetSheet,
           target: params.target,
-          options: expandPresetInOptions(params.options)
+          options
         }]
       };
     }
@@ -3250,8 +3271,8 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       if (formats.length === 0) {
         return { error: 'bulk_set_format: "formats" must be a non-empty array of { sheet, target, options } (aliases: ranges, items, entries).' };
       }
-      if (formats.length > 32) {
-        return { error: `bulk_set_format: max 32 formats per call, got ${formats.length}` };
+      if (formats.length > BULK_SET_FORMAT_MAX) {
+        return { error: `bulk_set_format: max ${BULK_SET_FORMAT_MAX} formats per call, got ${formats.length}` };
       }
       const actions = [];
       const errors = [];
@@ -3270,9 +3291,14 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
           continue;
         }
         // Options aliases too — sometimes the LLM nests under "format" or "style".
-        const options = f.options || f.format || f.style;
-        if (!options || typeof options !== 'object') {
+        const rawOptions = f.options || f.format || f.style;
+        if (!rawOptions || typeof rawOptions !== 'object') {
           errors.push({ index: i, sheet, target, reason: 'missing options (aliases: format, style)' });
+          continue;
+        }
+        const options = expandPresetInOptions(rawOptions);
+        if (!options || Object.keys(options).length === 0) {
+          errors.push({ index: i, sheet, target, reason: 'no supported format options after normalization' });
           continue;
         }
         accepted.push({ sheet, target });
@@ -3280,7 +3306,7 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
           type: 'setCellFormat',
           sheet,
           target,
-          options: expandPresetInOptions(options)
+          options
         });
       }
       if (actions.length === 0) {
@@ -3294,7 +3320,7 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       };
     }
     case 'format_workbook': {
-      // One-shot deterministic format pass over many sheets. Defaults to ALL
+      // One-shot semantic cleanup pass over many sheets. Defaults to ALL
       // sheets in the workbook when params.sheets is empty/missing.
       const explicitSheets = Array.isArray(params && params.sheets) ? params.sheets.filter(s => typeof s === 'string' && s) : [];
       const fallbackSheets = Array.isArray(context && context.workbookSheets) ? context.workbookSheets : [];
@@ -3750,6 +3776,8 @@ function initAgentRun(objective, context, options = {}) {
       fallbackTimeoutMs: options.fallbackTimeoutMs || Number(process.env.AGENT_LLM_FALLBACK_TIMEOUT_MS) || 180000,
       forceThinkingDisabled: options.forceThinkingDisabled === true,
       postWriteCriticEnabled: options.postWriteCriticEnabled,
+      autoFormatOnDone: options.autoFormatOnDone === true ||
+        (options.autoFormatOnDone !== false && AGENT_AUTO_FORMAT_ON_DONE),
       maxWebSearch: Number(process.env.AGENT_MAX_WEB_SEARCH) || 20
     }
   };
@@ -3818,10 +3846,10 @@ function normalizeClientResults(clientResult) {
 function bulkNudgeFor(lastN) {
   if (lastN.length !== 2) return null;
   if (lastN.every(n => n === 'set_cell_range')) {
-    return 'BATCH HINT: you just called set_cell_range twice in a row. If the next write is also a different sheet/section, consolidate the upcoming writes into ONE bulk_set_cell_ranges call instead of issuing them one at a time.';
+    return 'BATCH HINT: you just called set_cell_range twice in a row. If the next write is also a different sheet/section, consolidate the upcoming writes into ONE bulk_set_cell_ranges call, then run one explicit bulk_set_format pass after the structure exists.';
   }
   if (lastN.every(n => n === 'set_format')) {
-    return 'BATCH HINT: you just called set_format twice in a row. Consolidate the next formats into ONE bulk_set_format call.';
+    return 'BATCH HINT: you just called set_format twice in a row. Consolidate the next formats into ONE bulk_set_format call based on the observed ranges.';
   }
   if (lastN.every(n => n === 'create_sheet')) {
     return 'BATCH HINT: you just created two sheets one at a time. If more are coming, use bulk_create_sheets with the full list.';
@@ -4213,9 +4241,9 @@ async function runAgentStep(state, clientResult, deps = {}) {
     if (toolName === 'done') {
       state.status = 'completed';
       state.summary = params.summary || 'Task completed';
-      // Auto-format pass before exit. See runAgentLoop's done handler for rationale.
+      // Optional legacy auto-format pass before exit.
       let autoFormatActions = null;
-      if (Array.isArray(state.touchedSheets) && state.touchedSheets.length > 0) {
+      if (state.config.autoFormatOnDone && Array.isArray(state.touchedSheets) && state.touchedSheets.length > 0) {
         try {
           const { runFormatAgent } = require('./specialists');
           const formatResult = await runFormatAgent(

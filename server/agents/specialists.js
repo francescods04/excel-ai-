@@ -3,6 +3,7 @@ const logger = require('../utils/logger');
 const { getWikiContextForPrompt } = require('../wiki/loader');
 const { buildProfessionalFormatPlan, classifyFormatIntent } = require('../models/formatTemplate');
 const { getAnalystDepth } = require('../models/analystDepth');
+const { normalizeFormatOptions } = require('../utils/formatOptions');
 
 const LAYOUT_TIMEOUT_MS = Number(process.env.LAYOUT_TIMEOUT_MS) || 240000;
 const LAYOUT_FALLBACK_TIMEOUT_MS = Number(process.env.LAYOUT_FALLBACK_TIMEOUT_MS) || 150000;
@@ -361,10 +362,10 @@ async function runFormatAgent(params, memory) {
   logger.info('[FormatAgent] Avvio formattazione');
   const fallback = buildProfessionalFormatPlan(params, memory);
 
-  // Deterministic path: for routine formatting, skip LLM entirely.
-  // LLM formatting is ONLY used for explicit style/palette/color/look changes.
+  // Fast semantic fallback: routine whole-workbook cleanup skips an extra LLM.
+  // The main agent should prefer explicit bulk_set_format for bespoke formatting.
   if (!shouldUseFormatLLM(params)) {
-    logger.info(`[FormatAgent] Piano deterministico: ${fallback.actions.length} azioni su ${fallback.data.sheetCount} fogli (${fallback.data.strategy}, palette ${fallback.data.theme})`);
+    logger.info(`[FormatAgent] Piano fallback: ${fallback.actions.length} azioni su ${fallback.data.sheetCount} fogli (${fallback.data.strategy}, palette ${fallback.data.theme})`);
     return fallback;
   }
 
@@ -386,7 +387,7 @@ ${JSON.stringify(intent, null, 2)}
 Analyst-depth playbook:
 ${formatDepthForPrompt(analystDepth)}
 
-Deterministic base plan (use as starting point, enhance or override for style-specific changes):
+Fallback base plan (use only as a rough starting point; enhance or override for style-specific changes):
 ${JSON.stringify({ data: fallback.data, sampleActions: fallback.actions.slice(0, 24) }, null, 2)}
 
 Previous task results:
@@ -421,7 +422,7 @@ ${wikiContext}`;
       actions
     };
   } catch (error) {
-    logger.warn(`[FormatAgent] LLM failed, using deterministic plan: ${error.message}`);
+    logger.warn(`[FormatAgent] LLM failed, using fallback plan: ${error.message}`);
     return {
       ...fallback,
       data: {
@@ -440,24 +441,6 @@ function shouldUseFormatLLM(params = {}) {
   return /(colou?r|colori|colore|palette|tema|theme|stile|style|look|brand|elegante|luxury|minimal|minimalista|creative|design|#[0-9a-f]{6})/i.test(text);
 }
 
-const FORMAT_OPTION_KEYS = new Set([
-  'backgroundColor',
-  'fontColor',
-  'bold',
-  'italic',
-  'fontSize',
-  'fontName',
-  'numberFormat',
-  'horizontalAlignment',
-  'verticalAlignment',
-  'wrapText',
-  'columnWidth',
-  'rowHeight',
-  'borderBottomColor',
-  'borderTopColor',
-  'borders'
-]);
-
 function normalizeFormatActions(rawActions, defaultSheet) {
   if (!Array.isArray(rawActions)) return [];
   const actions = [];
@@ -469,10 +452,7 @@ function normalizeFormatActions(rawActions, defaultSheet) {
     if (!sheet || !target) continue;
     if (type === 'setCellFormat') {
       const rawOptions = action.options || action.format || action.style || {};
-      const options = {};
-      for (const [key, value] of Object.entries(rawOptions)) {
-        if (FORMAT_OPTION_KEYS.has(key) && value !== undefined && value !== null) options[key] = value;
-      }
+      const { options } = normalizeFormatOptions(rawOptions);
       if (Object.keys(options).length > 0) {
         actions.push({ type, sheet, target, options });
       }

@@ -861,12 +861,16 @@ async function runStepLoop(turnId) {
           break;
         case 'emit_actions':
           if (Array.isArray(payload.actions) && payload.actions.length > 0) {
-            addLog(`Eseguo ${payload.actions.length} azioni su Excel`);
+            const sliceIds = Array.from(new Set(payload.actions.map(a => a && a._sliceId).filter(Boolean)));
+            const sliceSuffix = sliceIds.length > 0 ? ` (${sliceIds.length} slice)` : '';
+            addLog(`Eseguo ${payload.actions.length} azioni su Excel${sliceSuffix}`);
             await applyStepActions(payload.actions);
           }
           clientResult = null;
           break;
         case 'await_client': {
+          const sliceIds = Array.from(new Set((payload.requests || []).map(r => r && r.sliceId).filter(Boolean)));
+          if (sliceIds.length > 0) addLog(`Letture client richieste da ${sliceIds.length} slice`);
           const results = await runStepClientReads(payload.requests);
           clientResult = { results };
           break;
