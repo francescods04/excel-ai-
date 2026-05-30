@@ -23,6 +23,7 @@ import { init as initAuth, getAccessToken, apiCall } from './auth/auth.js';
 
 const AGENT_KEYWORDS = ['dcf','wacc','lbo','model','modello','build','costruisci','valuation','finanziario','financial','forecast','proiezioni','sensitivity','scenario'];
 const MAX_HANDLED_IDS = 1500;
+const MAX_ACTION_PREVIEW_ITEMS = 60;
 
 const messagesContainer = document.getElementById('messages');
 const userInput = document.getElementById('user-input');
@@ -57,9 +58,15 @@ function getSelectedSpeedMode() {
 }
 
 function showActionsPreview(actions) {
-  actionsList.innerHTML = actions.map(a =>
+  const visibleActions = actions.slice(0, MAX_ACTION_PREVIEW_ITEMS);
+  const hiddenCount = Math.max(0, actions.length - visibleActions.length);
+  const visibleHtml = visibleActions.map(a =>
     `<li><span class="code-block">${a.type}</span> → ${escapeHtml(formatActionTarget(a))}</li>`
   ).join('');
+  const hiddenHtml = hiddenCount > 0
+    ? `<li><span class="code-block">+${hiddenCount}</span> altre azioni in coda</li>`
+    : '';
+  actionsList.innerHTML = visibleHtml + hiddenHtml;
   actionsPreview.classList.add('visible');
 }
 

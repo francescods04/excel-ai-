@@ -86,7 +86,7 @@ async function processQueue(excelActionQueue, showActionsPreview, hideActionsPre
       try {
         showActionsPreview(group.actions);
         if (group.batches.length > 1) {
-          addLog(`Coda Excel: drenati ${group.batches.length} eventi in un unico batch (${group.actions.length} azioni, ~${group.cellCount} celle).`);
+          addLog(`Coda Excel: drenati ${group.batches.length} eventi in un unico batch (${group.actions.length} azioni, ~${group.cellCount} celle, costo ~${Math.round(group.costCount)}).`);
         }
         const result = await executeActions(group.actions);
         const errors = Array.isArray(result?.errors) ? result.errors : [];
@@ -136,10 +136,18 @@ const HEAVY_BATCH_SNAPSHOT_TARGETS = 80;
 const MAX_EXCEL_CHUNK_ACTIONS = 32;
 const MAX_EXCEL_CHUNK_CELLS = 250;
 const MAX_SET_CELL_RANGE_KEYS_PER_CHUNK = 80;
-const QUEUE_DRAIN_WINDOW_MS = 12;
+const QUEUE_DRAIN_WINDOW_MS = 20;
 const MAX_QUEUE_GROUP_ACTIONS = MAX_EXCEL_CHUNK_ACTIONS;
 const MAX_QUEUE_GROUP_CELLS = MAX_EXCEL_CHUNK_CELLS;
+const BASE_EXCEL_CHUNK_COST = 220;
+const MIN_EXCEL_CHUNK_COST = 90;
+const MAX_EXCEL_CHUNK_COST = 340;
+const SLOW_CHUNK_MS = 700;
+const FAST_CHUNK_MS = 220;
+const UI_YIELD_MS = 16;
+const MAX_NATIVE_NOTE_ATTEMPTS_PER_BATCH = 8;
 const QUEUE_BATCH_KEY = '__excelQueueBatchKey';
+let adaptiveChunkCostLimit = BASE_EXCEL_CHUNK_COST;
 
 function isMutationAction(action) {
   return action && MUTATION_TYPES.has(action.type);
@@ -219,7 +227,25 @@ function estimateTargetCells(target) {
 
 function estimateActionCells(action) {
   if (!action) return 1;
-  if (action.type === 'setCellRange' && action.cells) return Object.keys(action.cells).length;
+  if (action.type === 'setCellRange' && action.cells) {
+    let total = 0;
+    for (const addr of Object.keys(action.cells)) {
+      const parsed = parseTargetReference(addr);
+      const n = estimateTargetCells(parsed.rangeAddress || addr);
+      if (!Number.isFinite(n)) return Infinity;
+      total += n;
+    }
+    if (action.copyToRange) {
+      const parsedCopy = parseTargetReference(action.copyToRange);
+      const copyCells = estimateTargetCells(parsedCopy.rangeAddress || action.copyToRange);
+      if (!Number.isFinite(copyCells)) return Infinity;
+      total += copyCells;
+    }
+    return Math.max(1, total);
+  }
+  if (action.type === 'setNotes' && Array.isArray(action.notes)) {
+    return Math.max(1, action.notes.length);
+  }
   const matrix = Array.isArray(action.formulas) ? action.formulas : action.values;
   if (Array.isArray(matrix)) {
     const rows = matrix.length;
@@ -237,9 +263,119 @@ function estimateBatchCells(actions = []) {
   }, 0);
 }
 
+function clampNumber(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function nowMs() {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function countSetCellRangeDecorations(action) {
+  let styleFields = 0;
+  let notes = 0;
+  const cells = action?.cells || {};
+  for (const spec of Object.values(cells)) {
+    if (!spec || typeof spec !== 'object') continue;
+    if (spec.note != null && spec.note !== '') notes++;
+    if (spec.cellStyles && typeof spec.cellStyles === 'object') {
+      styleFields += Math.max(1, Object.keys(spec.cellStyles).length);
+    }
+    if (spec.borderStyles && typeof spec.borderStyles === 'object') {
+      styleFields += Math.max(1, Object.keys(spec.borderStyles).length * 2);
+    }
+  }
+  return { styleFields, notes };
+}
+
+function estimateActionCost(action) {
+  if (!action) return 1;
+  const cells = estimateActionCells(action);
+  if (!Number.isFinite(cells)) return Infinity;
+
+  switch (action.type) {
+    case 'setCellRange': {
+      const keys = action.cells ? Object.keys(action.cells).length : 1;
+      const { styleFields, notes } = countSetCellRangeDecorations(action);
+      const copyCost = action.copyToRange ? Math.max(8, cells * 0.25) : 0;
+      return Math.max(1, cells + keys * 0.75 + styleFields * 2 + notes * 6 + copyCost);
+    }
+    case 'setCellFormat': {
+      const fields = action.options && typeof action.options === 'object'
+        ? Object.keys(action.options).length
+        : 1;
+      return Math.max(8, cells * 1.4 + fields * 4);
+    }
+    case 'addConditionalFormat':
+    case 'setConditionalFormat':
+      return Math.max(12, cells * 2);
+    case 'setNotes':
+      return Math.max(8, (Array.isArray(action.notes) ? action.notes.length : 1) * 10);
+    case 'createChart':
+      return 90;
+    case 'copyRange':
+      return Math.max(40, cells * 1.2);
+    case 'duplicateSheet':
+      return 120;
+    case 'createSheet':
+    case 'deleteSheet':
+    case 'renameSheet':
+      return 45;
+    case 'runJavaScript':
+      return 160;
+    case 'createNamedRange':
+      return 4;
+    default:
+      return Math.max(1, cells);
+  }
+}
+
+function estimateBatchCost(actions = []) {
+  return actions.reduce((sum, action) => {
+    const n = estimateActionCost(action);
+    if (!Number.isFinite(n)) return Infinity;
+    return sum + n;
+  }, 0);
+}
+
+function currentChunkCostLimit() {
+  return adaptiveChunkCostLimit;
+}
+
+function recordChunkTiming(durationMs, actions = []) {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) return;
+  const previous = adaptiveChunkCostLimit;
+  const cost = estimateBatchCost(actions);
+  if (durationMs > SLOW_CHUNK_MS) {
+    adaptiveChunkCostLimit = Math.floor(clampNumber(previous * 0.75, MIN_EXCEL_CHUNK_COST, MAX_EXCEL_CHUNK_COST));
+  } else if (durationMs < FAST_CHUNK_MS && Number.isFinite(cost) && cost >= previous * 0.75) {
+    adaptiveChunkCostLimit = Math.ceil(clampNumber(previous * 1.08, MIN_EXCEL_CHUNK_COST, MAX_EXCEL_CHUNK_COST));
+  }
+
+  if (durationMs > SLOW_CHUNK_MS) {
+    addLog(
+      `Chunk Excel lento: ${Math.round(durationMs)}ms, ${actions.length} azioni, ~${estimateBatchCells(actions)} celle. ` +
+      `Prossima finestra ~${adaptiveChunkCostLimit}.`,
+      'warn'
+    );
+  }
+}
+
+function yieldToHost(delayMs = 0) {
+  return new Promise(resolve => setTimeout(resolve, delayMs));
+}
+
+function yieldDelayForChunk(durationMs) {
+  return durationMs > SLOW_CHUNK_MS ? UI_YIELD_MS : 0;
+}
+
 function queueBatchKey(batch, index) {
   const meta = batch?.meta || {};
-  return String(meta.itemId || meta.taskId || `batch-${Date.now()}-${index}`);
+  const base = meta.itemId || meta.taskId || `batch-${Date.now()}`;
+  return `${base}:${index}`;
 }
 
 function tagQueuedAction(action, key) {
@@ -247,19 +383,21 @@ function tagQueuedAction(action, key) {
   return { ...action, [QUEUE_BATCH_KEY]: key };
 }
 
-function canMergeQueuedBatches(first, next, currentActions, currentCells) {
+function canMergeQueuedBatches(first, next, currentActions, currentCells, currentCost) {
   if (!first || !next || !Array.isArray(next.actions) || next.actions.length === 0) return false;
   if (first.meta?.isUndo || next.meta?.isUndo) return false;
   if (first.onBatchComplete || next.onBatchComplete) {
     if (first.onBatchComplete !== next.onBatchComplete) return false;
     if ((first.meta?.turnId || null) !== (next.meta?.turnId || null)) return false;
-    if ((first.meta?.taskId || null) !== (next.meta?.taskId || null)) return false;
   }
 
   const nextCells = estimateBatchCells(next.actions);
-  if (!Number.isFinite(currentCells) || !Number.isFinite(nextCells)) return false;
+  const nextCost = estimateBatchCost(next.actions);
+  if (!Number.isFinite(currentCells) || !Number.isFinite(nextCells) ||
+      !Number.isFinite(currentCost) || !Number.isFinite(nextCost)) return false;
   if (currentActions + next.actions.length > MAX_QUEUE_GROUP_ACTIONS) return false;
-  return currentCells + nextCells <= MAX_QUEUE_GROUP_CELLS;
+  if (currentCells + nextCells > MAX_QUEUE_GROUP_CELLS) return false;
+  return currentCost + nextCost <= currentChunkCostLimit();
 }
 
 function takeNextQueueGroup(excelActionQueue) {
@@ -270,6 +408,7 @@ function takeNextQueueGroup(excelActionQueue) {
   const actions = [];
   let actionCount = 0;
   let cellCount = estimateBatchCells(first.actions);
+  let costCount = estimateBatchCost(first.actions);
 
   function append(batch) {
     const key = queueBatchKey(batch, batches.length);
@@ -282,13 +421,14 @@ function takeNextQueueGroup(excelActionQueue) {
   append(first);
   while (excelActionQueue.length > 0) {
     const next = normalizeBatch(excelActionQueue[0]);
-    if (!canMergeQueuedBatches(first, next, actionCount, cellCount)) break;
+    if (!canMergeQueuedBatches(first, next, actionCount, cellCount, costCount)) break;
     excelActionQueue.shift();
     append(next);
     cellCount += estimateBatchCells(next.actions);
+    costCount += estimateBatchCost(next.actions);
   }
 
-  return { batches, actions, cellCount };
+  return { batches, actions, cellCount, costCount };
 }
 
 function buildBatchCompletion(entry, executionResult) {
@@ -313,21 +453,57 @@ function splitSetCellRangeAction(action) {
   }
 
   const entries = Object.entries(action.cells);
-  if (entries.length <= MAX_SET_CELL_RANGE_KEYS_PER_CHUNK || action.copyToRange) {
+  if (entries.length === 0) {
+    return [action];
+  }
+  if (action.copyToRange) {
     return [action];
   }
 
   const chunks = [];
-  for (let i = 0; i < entries.length; i += MAX_SET_CELL_RANGE_KEYS_PER_CHUNK) {
-    const cells = Object.fromEntries(entries.slice(i, i + MAX_SET_CELL_RANGE_KEYS_PER_CHUNK));
+  let current = [];
+  let currentCells = 0;
+  let currentCost = 0;
+
+  function flush() {
+    if (current.length === 0) return;
+    const idx = chunks.length + 1;
+    const cells = Object.fromEntries(current);
     chunks.push({
       ...action,
       cells,
       explanation: action.explanation
-        ? `${action.explanation} (${Math.floor(i / MAX_SET_CELL_RANGE_KEYS_PER_CHUNK) + 1})`
+        ? `${action.explanation} (${idx})`
         : undefined
     });
+    current = [];
+    currentCells = 0;
+    currentCost = 0;
   }
+
+  for (const entry of entries) {
+    const [addr, spec] = entry;
+    const singleAction = { ...action, cells: { [addr]: spec } };
+    const entryCells = estimateActionCells(singleAction);
+    const entryCost = estimateActionCost(singleAction);
+    const finiteCells = Number.isFinite(entryCells) ? entryCells : MAX_EXCEL_CHUNK_CELLS;
+    const finiteCost = Number.isFinite(entryCost) ? entryCost : currentChunkCostLimit();
+    const wouldOverflowKeys = current.length >= MAX_SET_CELL_RANGE_KEYS_PER_CHUNK;
+    const wouldOverflowCells = current.length > 0 && currentCells + finiteCells > MAX_EXCEL_CHUNK_CELLS;
+    const wouldOverflowCost = current.length > 0 && currentCost + finiteCost > currentChunkCostLimit();
+
+    if (wouldOverflowKeys || wouldOverflowCells || wouldOverflowCost) flush();
+    current.push(entry);
+    currentCells += finiteCells;
+    currentCost += finiteCost;
+
+    if (!Number.isFinite(entryCells) ||
+        finiteCells >= MAX_EXCEL_CHUNK_CELLS ||
+        finiteCost >= currentChunkCostLimit()) {
+      flush();
+    }
+  }
+  flush();
   return chunks;
 }
 
@@ -340,24 +516,35 @@ function splitActionsIntoSafeChunks(actions = []) {
   const chunks = [];
   let current = [];
   let currentCells = 0;
+  let currentCost = 0;
 
   function flush() {
     if (current.length > 0) chunks.push(current);
     current = [];
     currentCells = 0;
+    currentCost = 0;
   }
 
   for (const action of expanded) {
     const actionCells = estimateActionCells(action);
+    const actionCost = estimateActionCost(action);
     const finiteCells = Number.isFinite(actionCells) ? actionCells : MAX_EXCEL_CHUNK_CELLS;
+    const finiteCost = Number.isFinite(actionCost) ? actionCost : currentChunkCostLimit();
     const wouldOverflowActions = current.length >= MAX_EXCEL_CHUNK_ACTIONS;
     const wouldOverflowCells = current.length > 0 && currentCells + finiteCells > MAX_EXCEL_CHUNK_CELLS;
+    const wouldOverflowCost = current.length > 0 && currentCost + finiteCost > currentChunkCostLimit();
 
-    if (wouldOverflowActions || wouldOverflowCells) flush();
+    if (wouldOverflowActions || wouldOverflowCells || wouldOverflowCost) flush();
     current.push(action);
     currentCells += finiteCells;
+    currentCost += finiteCost;
 
-    if (!Number.isFinite(actionCells) || finiteCells >= MAX_EXCEL_CHUNK_CELLS) flush();
+    if (!Number.isFinite(actionCells) ||
+        !Number.isFinite(actionCost) ||
+        finiteCells >= MAX_EXCEL_CHUNK_CELLS ||
+        finiteCost >= currentChunkCostLimit()) {
+      flush();
+    }
   }
 
   flush();
@@ -531,17 +718,24 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
       };
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
-        addLog(`Chunk Excel ${i + 1}/${chunks.length}: ${chunk.length} azioni, ~${estimateBatchCells(chunk)} celle.`);
+        addLog(`Chunk Excel ${i + 1}/${chunks.length}: ${chunk.length} azioni, ~${estimateBatchCells(chunk)} celle, costo ~${Math.round(estimateBatchCost(chunk))}.`);
+        const started = nowMs();
         const result = await executeActions(chunk, updateStepsPanel, 1);
+        const durationMs = nowMs() - started;
+        recordChunkTiming(durationMs, chunk);
         const errors = Array.isArray(result?.errors) ? result.errors : [];
         aggregate.errorCount += Number(result?.errorCount) || errors.length || 0;
         aggregate.errors.push(...errors);
+        if (i < chunks.length - 1) {
+          await yieldToHost(yieldDelayForChunk(durationMs));
+        }
       }
       return aggregate;
     }
   }
 
   let focusLost = false;
+  const runStarted = nowMs();
   const result = await Excel.run(async (context) => {
     const actionErrors = [];
     const defaultSheet = context.workbook.worksheets.getActiveWorksheet();
@@ -743,6 +937,10 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
     return executeActions(actions, updateStepsPanel, _attempt + 1);
   }
 
+  if (_attempt === 0) {
+    recordChunkTiming(nowMs() - runStarted, actions);
+  }
+
   return result;
 }
 
@@ -888,9 +1086,12 @@ async function applyNotes(context, notes) {
   let applied = 0;
   const failed = [];
 
-  // If we've already learned native comments aren't supported here, skip the per-note
-  // try/catch/sync and send everything straight to the fallback sheet.
-  if (_nativeCommentsUnsupported) {
+  // If native comments are unavailable or the note batch is large, skip the
+  // per-note sync loop and persist annotations in one fallback write.
+  if (_nativeCommentsUnsupported || notes.length > MAX_NATIVE_NOTE_ATTEMPTS_PER_BATCH) {
+    if (!_nativeCommentsUnsupported && notes.length > MAX_NATIVE_NOTE_ATTEMPTS_PER_BATCH) {
+      addLog(`Note: ${notes.length} annotazioni scritte su ${ASSUMPTION_NOTES_SHEET} per evitare freeze da commenti nativi.`, 'warn');
+    }
     failed.push(...notes);
   } else {
     for (const n of notes) {
