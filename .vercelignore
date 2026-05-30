@@ -34,3 +34,11 @@ PIANO_ERRORI.md
 PIANO_MASTER.md
 PIANO_PARALLELIZZAZIONE.md
 PIANO_PRODOTTO.md
+
+# Local runtime artifacts — never needed at runtime, blow past 250MB
+data/llm-traces
+server/turns
+server/metrics
+server/memory
+.har_extract
+har_extract
