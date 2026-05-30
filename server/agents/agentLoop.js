@@ -511,7 +511,7 @@ let AGENT_SYSTEM_PROMPT = loadPromptVariant(DEFAULT_PROMPT_VARIANT);
  * prescriptions (no "BATCH RULE", no "ATOMIC FORMAT", no "SPEED RULE" — those
  * are anti-patterns we learned from logs and the HAR analysis).
  */
-const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nDEPLOYMENT REMINDERS (this Excel add-in only):\n\n- **End with done.** When the task is complete, call \`done\` with a summary. Do NOT keep calling tools after the work is finished.\n- **Python is sandboxed.** \`execute_python\` is for math on data you pass in as variables. It does NOT have filesystem access — no openpyxl, no /tmp/*.xlsx paths. To read/write the workbook, use the Excel tools.\n- **Live data first.** For market/regulatory/news facts that could have changed, verify with finance tools or \`web_search\` before writing assumptions. Training memory is for stable methodology only.\n- **Skills.** \`<available_skills>\` lists loadable instructions. Before a complex build (DCF, LBO, comps, 3-statement, audit), call \`read_skill\` for the relevant one. Max 2 per task.\n- **Citation hint.** When referencing cells in chat, use the citation link format from the prompt: \`[A1:D1](<citation:Sheet!A1:D1>)\`.\n- **Industry add-ins.** If the user mentions Bloomberg/FactSet/CapIQ/Refinitiv, prefer the native formula syntax (BDP/BDH, FDS/FDSH, CIQ/CIQH, TR) per the Custom Function Integrations section of the prompt. On #VALUE! fallback, switch to web_search.\n- **Whole-workbook formatting.** First inspect the relevant sheets, then apply one explicit \`bulk_set_format\` pass based on the observed workbook structure. Use \`format_workbook\` only as an emergency cleanup helper when the user asks for broad generic cleanup; do not rely on hidden templates.\n- **Cannot do.** VBA macros, file downloads, scheduled automations, =TABLE() data tables. Build sensitivity with direct per-cell formulas instead.`;
+const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nDEPLOYMENT REMINDERS (this Excel add-in only):\n\n- **End with done.** When the task is complete, call \`done\` with a summary. Do NOT keep calling tools after the work is finished.\n- **Python is sandboxed.** \`execute_python\` is for math on data you pass in as variables. It does NOT have filesystem access — no openpyxl, no /tmp/*.xlsx paths. To read/write the workbook, use the Excel tools.\n- **Live data first.** For market/regulatory/news facts that could have changed, verify with finance tools or \`web_search\` before writing assumptions. Training memory is for stable methodology only.\n- **Skills.** \`<available_skills>\` lists loadable instructions. Before a complex build (DCF, LBO, comps, 3-statement, audit), call \`read_skill\` for the relevant one. Max 2 per task.\n- **Citation hint.** When referencing cells in chat, use the citation link format from the prompt: \`[A1:D1](<citation:Sheet!A1:D1>)\`.\n- **Industry add-ins.** If the user mentions Bloomberg/FactSet/CapIQ/Refinitiv, prefer the native formula syntax (BDP/BDH, FDS/FDSH, CIQ/CIQH, TR) per the Custom Function Integrations section of the prompt. On #VALUE! fallback, switch to web_search.\n- **Whole-workbook formatting.** First inspect the relevant sheets, then apply one explicit \`bulk_set_format\` pass based on the observed workbook structure. Use \`format_workbook\` only as an emergency cleanup helper when the user asks for broad generic cleanup; do not rely on hidden templates. Do NOT hand-write formatting via \`execute_office_js\` — \`range.format.fill.color\` writes are silently rolled back when a later \`numberFormat = [["x"]]\` 1x1 matrix throws on a multi-cell range during the same \`context.sync\`, leaving column widths visible but colors missing. If \`bulk_set_format\` returns "missing options", the entries used the wrong key — its options can also be passed as \`format\`, \`style\`, \`cellStyles\`, \`styles\`, or \`formatting\`; retry with one of those, do not switch tools.\n- **Cannot do.** VBA macros, file downloads, scheduled automations, =TABLE() data tables. Build sensitivity with direct per-cell formulas instead.`;
 
 const ACTIVE_AGENT_SYSTEM_PROMPT_SUFFIX = AGENT_SYSTEM_PROMPT_SUFFIX;
 
@@ -858,7 +858,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'bulk_set_format',
-      description: `Apply formatting to MANY ranges in ONE iteration. Each entry has the same shape as set_format. Use when finishing a multi-sheet model (headers, number formats, column widths, borders, etc.) instead of N consecutive set_format calls. Build the pass from the actual workbook structure you just wrote or inspected. Hard cap ${BULK_SET_FORMAT_MAX} entries per call.\n\nExample:\n{\n  "formats": [\n    { "sheet": "Assumptions", "target": "A1:B1", "options": { "bold": true, "backgroundColor": "#0D1F2D", "fontColor": "#FFFFFF" } },\n    { "sheet": "DCF",         "target": "B2:F2",  "options": { "numberFormat": "#,##0" } },\n    { "sheet": "DCF",         "target": "A:A",     "options": { "columnWidth": 230 } }\n  ]\n}\n\nFailures on individual entries do NOT abort the batch.`,
+      description: `Apply formatting to MANY ranges in ONE iteration. Each entry has the same shape as set_format. Use when finishing a multi-sheet model (headers, number formats, column widths, borders, etc.) instead of N consecutive set_format calls. Build the pass from the actual workbook structure you just wrote or inspected. Hard cap ${BULK_SET_FORMAT_MAX} entries per call.\n\nALWAYS use this for coloring/formatting; do NOT hand-write Office.js via execute_office_js — it bypasses normalization and frequently throws on numberFormat dimension mismatches, leaving column widths visible but colors silently rolled back.\n\nPER-ENTRY SHAPE: { sheet, target, options }. The options field is also accepted under any of these aliases: format, style, cellStyles, styles, formatting. Per-entry target also accepts: range, addr, address.\n\nExample:\n{\n  "formats": [\n    { "sheet": "Assumptions", "target": "A1:B1", "options": { "bold": true, "backgroundColor": "#0D1F2D", "fontColor": "#FFFFFF" } },\n    { "sheet": "DCF",         "target": "B2:F2",  "options": { "numberFormat": "#,##0" } },\n    { "sheet": "DCF",         "target": "A:A",     "options": { "columnWidth": 230 } }\n  ]\n}\n\nFailures on individual entries do NOT abort the batch.`,
       parameters: {
         type: 'object',
         required: ['formats'],
@@ -3193,16 +3193,23 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       const targetSheet = params.sheet || context?.activeSheet;
       if (!params.sheet) logger.warn(`[AgentLoop] set_format without 'sheet'; defaulting to "${targetSheet}".`);
       if (!targetSheet) return { error: 'set_format: missing sheet and no active sheet in context' };
-      if (!params.target || typeof params.target !== 'string') return { error: 'set_format: missing or invalid target' };
-      const options = expandPresetInOptions(params.options);
+      const target = params.target || params.range || params.addr || params.address;
+      if (!target || typeof target !== 'string') return { error: 'set_format: missing or invalid target (aliases: range, addr, address)' };
+      const rawOptions = params.options || params.format || params.style
+        || params.cellStyles || params.cell_styles || params.styles
+        || params.formatting || params.props || params.properties;
+      if (!rawOptions || typeof rawOptions !== 'object') {
+        return { error: 'set_format: missing options. Accepted aliases: format, style, cellStyles, styles, formatting.' };
+      }
+      const options = expandPresetInOptions(rawOptions);
       if (!options || Object.keys(options).length === 0) {
-        return { error: 'set_format: no supported format options after normalization' };
+        return { error: `set_format: no supported format options after normalization. Provided keys: [${Object.keys(rawOptions).join(', ') || 'none'}].` };
       }
       return {
         actions: [{
           type: 'setCellFormat',
           sheet: targetSheet,
-          target: params.target,
+          target,
           options
         }]
       };
@@ -3290,15 +3297,30 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
           errors.push({ index: i, sheet, reason: 'missing or invalid target (aliases: range, addr, address)' });
           continue;
         }
-        // Options aliases too — sometimes the LLM nests under "format" or "style".
-        const rawOptions = f.options || f.format || f.style;
+        // Options aliases — the LLM nests under many names. Accept every shape
+        // we have seen in production logs so it stays on this structured path
+        // instead of falling back to brittle hand-written execute_office_js.
+        const rawOptions = f.options || f.format || f.style
+          || f.cellStyles || f.cell_styles || f.styles
+          || f.formatting || f.props || f.properties;
         if (!rawOptions || typeof rawOptions !== 'object') {
-          errors.push({ index: i, sheet, target, reason: 'missing options (aliases: format, style)' });
+          const seenKeys = Object.keys(f).filter(k => !['sheet', 'target', 'range', 'addr', 'address'].includes(k));
+          errors.push({
+            index: i,
+            sheet,
+            target,
+            reason: `missing options. Pass the formatting as "options" (aliases also accepted: format, style, cellStyles, styles, formatting). Keys seen on this entry: [${seenKeys.join(', ') || 'none'}].`
+          });
           continue;
         }
         const options = expandPresetInOptions(rawOptions);
         if (!options || Object.keys(options).length === 0) {
-          errors.push({ index: i, sheet, target, reason: 'no supported format options after normalization' });
+          errors.push({
+            index: i,
+            sheet,
+            target,
+            reason: `no supported format options after normalization. Provided keys: [${Object.keys(rawOptions).join(', ') || 'none'}]. Use backgroundColor / fontColor / bold / italic / numberFormat / columnWidth / rowHeight / horizontalAlignment / borders.`
+          });
           continue;
         }
         accepted.push({ sheet, target });

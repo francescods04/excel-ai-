@@ -13,7 +13,10 @@
 const { initAgentRun, runAgentStep } = require('./agentLoop');
 const { buildSliceWorkerPrompt } = require('./architect');
 
-const DEFAULT_MAX_PARALLEL = Number(process.env.PARALLEL_ORCHESTRATOR_MAX || 4);
+// Bumped from 4 → 6: typical blueprints have 5-8 build slices in their first wave,
+// and 4 forced them into two sequential LLM batches. Six fits the common 5-7 slice
+// shape in one batch and roughly halves wall-clock time on build-heavy turns.
+const DEFAULT_MAX_PARALLEL = Number(process.env.PARALLEL_ORCHESTRATOR_MAX || 6);
 const SLICE_HARD_ITER_CAP = Number(process.env.SLICE_HARD_ITER_CAP) || 12;
 const PRO_MODEL = process.env.AGENT_LOOP_PRO_MODEL || process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro';
 

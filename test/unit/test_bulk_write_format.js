@@ -192,6 +192,55 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     console.log('OK bulk_set_format rejects entries with no supported normalized options');
   }
 
+  // 10b) bulk_set_format accepts the per-entry option aliases LLM keeps using
+  {
+    const r = await executeAgentTool(
+      'bulk_set_format',
+      {
+        formats: [
+          { sheet: 'A', target: 'A1', cellStyles: { backgroundColor: '#FF0000', bold: true } },
+          { sheet: 'A', range:  'A2', styles:     { fontColor: 'blue' } },
+          { sheet: 'A', addr:   'A3', formatting: { numberFormat: '0.00%' } }
+        ]
+      },
+      { messages: [], iteration: 0 },
+      null
+    );
+    assert.strictEqual(r.ok, true, 'bulk_set_format should accept cellStyles/styles/formatting + range/addr');
+    assert.strictEqual(r.applied, 3);
+    assert.deepStrictEqual(r.actions[0].options, { backgroundColor: '#FF0000', bold: true });
+    assert.deepStrictEqual(r.actions[1].options, { fontColor: '#0000FF' });
+    assert.strictEqual(r.actions[2].options.numberFormat, '0.00%');
+    console.log('OK bulk_set_format accepts cellStyles/styles/formatting + range/addr aliases');
+  }
+
+  // 10c) set_format also accepts the alias names
+  {
+    const r = await executeAgentTool(
+      'set_format',
+      { sheet: 'A', range: 'A1:B1', cellStyles: { backgroundColor: '#0D1F2D', fontColor: '#FFFFFF' } },
+      { messages: [], iteration: 0 },
+      null
+    );
+    assert.strictEqual(r.actions.length, 1);
+    assert.deepStrictEqual(r.actions[0].options, { backgroundColor: '#0D1F2D', fontColor: '#FFFFFF' });
+    assert.strictEqual(r.actions[0].target, 'A1:B1');
+    console.log('OK set_format accepts range + cellStyles aliases');
+  }
+
+  // 10d) bulk_set_format missing-options error message lists keys actually seen
+  {
+    const r = await executeAgentTool(
+      'bulk_set_format',
+      { formats: [{ sheet: 'A', target: 'A1', mystyle: { bold: true } }] },
+      { messages: [], iteration: 0 },
+      null
+    );
+    assert.match(r.error, /no valid formats/);
+    assert.match(r.errors[0].reason, /Keys seen on this entry: \[mystyle\]/);
+    console.log('OK bulk_set_format error reports the unknown keys the LLM passed');
+  }
+
   // 11) bulk_set_notes fans many notes into ONE setNotes action; sheet defaults to active
   {
     const r = await executeAgentTool(
