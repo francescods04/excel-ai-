@@ -29,6 +29,13 @@ KEY PRINCIPLES:
 - ALWAYS end with a dedicated final slice (id like "format_and_verify", deps = ALL other slices) that runs alone in the LAST wave. It chooses formatting from the user's request and the workbook structure created by previous slices, applies it across every sheet with explicit bulk_set_format actions, adds notes to assumption/input cells (bulk_set_notes), then verifies with read_format_summary and issues at most ONE targeted repair batch. Formatting and notes belong in THIS final wave — do NOT interleave them into data-build slices (it slows workers and risks write conflicts). Because it runs alone, this slice may list ALL sheets in sheets_owned.
 - MODEL TIER: set "tier":"flash" for every build and formatting worker (fast — this is the default). Use "tier":"pro" ONLY for a final audit/verification slice that needs deep cross-checking. Routine formatting is flash. Most blueprints are flash for everything.
 
+CANONICAL ASSUMPTIONS LAYOUT (mandatory — schema ambiguity has cascade-killed every multi-sheet run that didn't follow this):
+- The Assumptions slice MUST output a flat 2-column table: column A = driver label (string), column B = driver value (number or %). No "Unit" column, no "Section" column. One driver per row, grouped by blank rows between sections (Section headers go in column A only with no value in B).
+- Every input cell that downstream slices reference MUST be wrapped in a NAMED RANGE whose name matches the label (snake_case, e.g. food_cogs_pct, daily_covers, avg_check, equity_share, debt_share, interest_rate, tax_rate, rent_annual, salary_per_fte, num_ftes, capex_fitout, etc.).
+- Year header row (2025-2030) MUST NOT live on the Assumptions sheet. It belongs on Revenue / P&L / CF sheets at a fixed row (row 3 by convention).
+- The Assumptions slice instructions field MUST list, by row and value, every driver it will write — and the dependent slices' instructions MUST reference drivers by NAMED RANGE (=daily_covers, =food_cogs_pct), NEVER by cell address (=Assumptions!B12) and NEVER by reading a column-of-units. This is the only way parallel workers stay consistent.
+- Format conventions are applied later by format_and_verify. Do NOT pre-format the Assumptions sheet as percent for cells that hold integers (in last run "Number of Employees: 15" rendered as "1500%" because the row was percent-formatted). Number-vs-percent typing belongs to the format slice and only on cells where the underlying value is a fraction.
+
 OUTPUT JSON SCHEMA (strict, no extras):
 {
   "objective_restated": "<one-line restatement of what you're building>",

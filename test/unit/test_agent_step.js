@@ -231,12 +231,13 @@ function assertSerializable(state, label) {
     console.log('OK set_cell_range preflight conflict (via client) → continue');
   }
 
-  /* 13) disabledTools blocks execute_office_js for slice workers with a redirect */
+  /* 13) disabledTools blocks execute_office_js for slice workers with a redirect AND refunds the iter */
   {
     const state = initAgentRun('slice worker run', CTX, {
       promptVariant: 'fast',
       disabledTools: ['execute_office_js']
     });
+    const iterBefore = state.iteration;
     const deps = scripted([{
       thought: 'I will write JS',
       tool: 'execute_office_js',
@@ -252,7 +253,9 @@ function assertSerializable(state, label) {
     const lastMsg = s.messages[s.messages.length - 1];
     assert.match(String(lastMsg.content), /execute_office_js.*disabled/i);
     assert.match(String(lastMsg.content), /set_cell_range/);
-    console.log('OK disabledTools blocks execute_office_js with redirect message');
+    // Iter is refunded so the wasted attempt doesn't count toward maxIter.
+    assert.strictEqual(s.iteration, iterBefore, 'iteration counter refunded after disabled-tool block');
+    console.log('OK disabledTools blocks execute_office_js with redirect and refunds iter');
   }
 
   console.log('\nagent step tests completed.');

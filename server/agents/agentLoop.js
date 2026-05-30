@@ -85,7 +85,13 @@ const STAGNATION_MAX_TRAIL = Math.max(8, (STAGNATION_ALT_CYCLES * 2) + 2);
 // writes weren't taking effect. We treat any stretch of READS_WITHOUT_WRITE
 // pure reads as terminal stagnation — bigger than the per-signature repeat
 // limit because read params often differ slightly between iterations.
-const READS_WITHOUT_WRITE_LIMIT = Math.max(4, Number(process.env.AGENT_READS_WITHOUT_WRITE_LIMIT) || 5);
+// Bumped from 5 → 8 (2026-05-30 fast-food run): slice workers got the new
+// READ-BEFORE-YOU-WRITE directive plus had to inspect multiple upstream sheets
+// (Assumptions, Revenue, Capex). opex_and_ebitda legitimately needed 5 reads
+// just to sample Assumptions sections + the Revenue total row before writing,
+// and was killed before its first write. 8 allows the inspection phase without
+// re-allowing the LBO-style "verify → re-verify" loop we originally guarded.
+const READS_WITHOUT_WRITE_LIMIT = Math.max(4, Number(process.env.AGENT_READS_WITHOUT_WRITE_LIMIT) || 8);
 const READ_ONLY_TOOLS_FOR_STAGNATION = new Set([
   'read_workbook',
   'read_sheet',
@@ -4269,6 +4275,12 @@ async function runAgentStep(state, clientResult, deps = {}) {
       state.messages.push(makeUserMessage(blockMsg));
       state.results.push({ type: 'error', error: blockMsg, blocked: true, tool: toolName });
       onProgress('iterationError', { iteration: state.iteration, error: blockMsg });
+      // Refund the iteration counter — the LLM call returned but the tool was
+      // rejected without touching Excel or the client. Charging it pushes the
+      // slice toward maxIter for a no-op, which cascade-killed downstream
+      // waves in the 2026-05-30 fast-food run. The redirect message is in
+      // the message log so the LLM still learns from the mistake.
+      state.iteration = Math.max(0, state.iteration - 1);
       return { state, control: 'continue', payload: { thought } };
     }
 
