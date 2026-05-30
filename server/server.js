@@ -278,8 +278,20 @@ app.get('/api/admin/events-daily', authenticate, async (req, res) => {
       if (t.status === 'completed') byDay[day].completed++;
       if (t.status === 'error' || t.status === 'failed') byDay[day].failed++;
     }
-    const days = Object.keys(byDay).sort();
-    res.json({ days, completed: days.map(d => byDay[d].completed), failed: days.map(d => byDay[d].failed) });
+    // Fill every day in the 30-day window so Chart.js keeps bar widths consistent
+    const days = [];
+    const completed = [];
+    const failed = [];
+    const now = new Date();
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date(now);
+      d.setDate(d.getDate() - i);
+      const dayStr = d.toISOString().slice(0, 10);
+      days.push(dayStr);
+      completed.push(byDay[dayStr]?.completed || 0);
+      failed.push(byDay[dayStr]?.failed || 0);
+    }
+    res.json({ days, completed, failed });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
