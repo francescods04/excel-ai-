@@ -49,7 +49,8 @@ const CELL_SPEC = {
     formula: { type: 'string', description: 'Formula starting with "=", e.g. "=SUM(A1:A10)"' },
     note: { type: 'string' },
     cellStyles: CELL_STYLES,
-    borderStyles: { type: 'object' }
+    borderStyles: { type: 'object' },
+    style_preset: { type: 'string', description: 'IB-grade shortcut applied as default cellStyles (your explicit cellStyles fields still override). One of: header, subheader, input, input_pct, input_int, formula, formula_pct, total, subtotal, currency, percent, date, year, label, assumption. Use this to merge write + format into ONE iteration.' }
   }
 };
 

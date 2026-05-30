@@ -115,6 +115,101 @@ function normalizeOpenBBSymbolParams(params = {}) {
   return next;
 }
 
+/* ---------- IB-grade style presets (atomic write+format) ----------
+ * Map a short tag to a full cellStyles + numberFormat dict so the LLM can
+ * format a cell with one token (`style_preset: "input"`) instead of
+ * remembering #0000FF + numberFormat + bold + border for every section.
+ * Promotes write+format atomic emission — the agent stops splitting a
+ * write into "write" + "format" two-iteration pairs.
+ */
+const STYLE_PRESETS = Object.freeze({
+  header: {
+    cellStyles: { bold: true, backgroundColor: '#0D1F2D', fontColor: '#FFFFFF', horizontalAlignment: 'Center' }
+  },
+  subheader: {
+    cellStyles: { bold: true, backgroundColor: '#E8EEF4', fontColor: '#0D1F2D' }
+  },
+  input: {
+    cellStyles: { fontColor: '#0000FF', numberFormat: '#,##0.00_);(#,##0.00);-_)' }
+  },
+  input_pct: {
+    cellStyles: { fontColor: '#0000FF', numberFormat: '0.0%' }
+  },
+  input_int: {
+    cellStyles: { fontColor: '#0000FF', numberFormat: '#,##0' }
+  },
+  formula: {
+    cellStyles: { fontColor: '#000000', numberFormat: '#,##0.00_);(#,##0.00);-_)' }
+  },
+  formula_pct: {
+    cellStyles: { fontColor: '#000000', numberFormat: '0.0%' }
+  },
+  total: {
+    cellStyles: { bold: true, numberFormat: '#,##0_);(#,##0);-_)', borderTopColor: '#000000' }
+  },
+  subtotal: {
+    cellStyles: { bold: true, numberFormat: '#,##0_);(#,##0);-_)' }
+  },
+  currency: {
+    cellStyles: { numberFormat: '$#,##0.00_);($#,##0.00);-_)' }
+  },
+  percent: {
+    cellStyles: { numberFormat: '0.0%' }
+  },
+  date: {
+    cellStyles: { numberFormat: 'mmm-yyyy' }
+  },
+  year: {
+    cellStyles: { numberFormat: '0000', horizontalAlignment: 'Center', bold: true }
+  },
+  label: {
+    cellStyles: { fontColor: '#333333' }
+  },
+  assumption: {
+    cellStyles: { fontColor: '#0000FF', backgroundColor: '#FFF8C5', numberFormat: '#,##0.00_);(#,##0.00);-_)' }
+  }
+});
+
+/** Merge a preset (if present) into a cell spec or format options object.
+ *  Caller-provided styles win over the preset (preset = defaults). */
+function expandStylePreset(spec) {
+  if (!spec || typeof spec !== 'object') return spec;
+  const presetName = spec.style_preset || spec.preset;
+  if (!presetName) return spec;
+  const preset = STYLE_PRESETS[String(presetName).toLowerCase()];
+  if (!preset) return spec;
+  const merged = { ...spec };
+  delete merged.style_preset;
+  delete merged.preset;
+  merged.cellStyles = { ...(preset.cellStyles || {}), ...(spec.cellStyles || {}) };
+  return merged;
+}
+
+/** Apply expandStylePreset across a `cells` map (A1 -> spec). */
+function expandPresetsInCells(cells) {
+  if (!cells || typeof cells !== 'object') return cells;
+  const out = {};
+  for (const [addr, spec] of Object.entries(cells)) {
+    out[addr] = expandStylePreset(spec);
+  }
+  return out;
+}
+
+/** Expand for format-tool options: preset goes through cellStyles too. */
+function expandPresetInOptions(options) {
+  if (!options || typeof options !== 'object') return options;
+  const presetName = options.style_preset || options.preset;
+  if (!presetName) return options;
+  const preset = STYLE_PRESETS[String(presetName).toLowerCase()];
+  if (!preset || !preset.cellStyles) return options;
+  // set_format options live at top level (backgroundColor, fontColor, etc.)
+  // so merge the preset's cellStyles fields into them.
+  const merged = { ...preset.cellStyles, ...options };
+  delete merged.style_preset;
+  delete merged.preset;
+  return merged;
+}
+
 /* ---------- Message ID helpers for context_snip targeting ---------- */
 function generateMsgId() {
   return Math.random().toString(36).slice(2, 8).toLowerCase();
@@ -219,7 +314,7 @@ const DEFAULT_PROMPT_VARIANT = process.env.AGENT_PROMPT_VARIANT || 'default';
 let AGENT_SYSTEM_PROMPT = loadPromptVariant(DEFAULT_PROMPT_VARIANT);
 
 /* Common output format suffix appended to ANY variant */
-const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nOUTPUT FORMAT: Respond with a JSON object containing:\n{\n  "thought": "Your reasoning about what to do next",\n  "tool": "tool_name",\n  "params": { ...tool parameters... }\n}\n\nIMPORTANT: Call exactly one tool per response. The only way to do multiple things in one iteration is the parallel_calls tool, which fans out up to 8 INDEPENDENT read-only calls (reads, OpenBB fetches, bundles) in parallel. Use parallel_calls whenever you would otherwise emit multiple consecutive read-only tool calls — it cuts those N iterations down to 1. Mutations and writes still run sequentially, one per iteration.\n\nEXCEL AGENT WORKFLOW:\n- For complex workbook work, inspect the workbook first, build_workbook_graph for multi-sheet dependency context, create a brief task list, then execute in small visible chunks.\n- Prefer set_cell_range for each logical section instead of many single-cell writes.\n- **BATCH RULE (critical for speed):** when you are about to write to 2+ different sheets or 2+ different sections, you MUST use bulk_set_cell_ranges with all of them in a single call instead of consecutive set_cell_range calls. Same rule for formatting: 2+ formats → bulk_set_format. Issuing N consecutive single-write tools when bulk_* would have worked is the #1 source of slow runs.\n- **FORMATTING RULE:** use set_format / bulk_set_format for colors, number formats, borders, widths — they size number-format matrices to multi-cell ranges automatically. Do NOT hand-write numberFormat arrays in execute_office_js (a 1x1 matrix on a multi-cell range throws and wastes iterations). Reserve execute_office_js for what structured tools can't do (cell merges, freeze panes, pivots).\n- **VERIFY FORMATTING:** after a formatting pass, call read_format_summary on the key blocks to confirm styling actually landed (inputs colored, headers bold/filled, assumptions carry notes) — plain reads can't see colors or notes. If something's off, issue ONE targeted bulk_set_format / bulk_set_notes repair; do NOT loop re-reading.\n- After important writes, verify touched ranges or formulas before calling done.\n- Report only changes you actually made and checked, with sheet names and ranges.\n- Use allow_overwrite:false when exploring a new range. Use allow_overwrite:true only when the user asked to replace or the target sheet was just created by you.\n\nWHEN THE TASK IS COMPLETE: You MUST call the tool "done" with a summary. Do NOT keep calling other tools after the work is finished. Calling "done" ends the session.\n\nPYTHON RULES:\n- execute_python is ONLY for mathematical calculations on data provided as variables in the code string.\n- execute_python does NOT have access to the Excel workbook file system. Do NOT use openpyxl, xlrd, or any file paths like /tmp/current.xlsx, /files/input/workbook.xlsx, etc.\n- To read or write Excel, always use the dedicated Excel tools (set_cell_range, create_sheet, execute_excel_formula, etc.).\n\nDATA RULES:\n- For public-company valuation work, use available finance tools first (OpenBB/Yahoo, treasury/macro tools when relevant), then visible workbook data.\n- Do not invent live market data. If a value is from training memory or a heuristic, label it as an assumption in the workbook.\n- Annotate assumption INPUT cells and key outputs with notes: use the per-cell \"note\" field in set_cell_range / bulk_set_cell_ranges, or bulk_set_notes for many at once. Notes apply as native Excel comments (with an Assumption_Notes sheet fallback) and never block your data writes — add them generously for any externally sourced or assumed value.\n- Search/fetch the web only when the user asks for current source material or when a required data point is unavailable from the provided finance tools.\n\nASK_USER_QUESTION RULES (CRITICAL):\n- The tool ask_user_question is an EMERGENCY BREAK. Use it ONLY when a truly critical piece of information is missing AND cannot be inferred from the workbook context or the user's original request.\n- NEVER ask the user for confirmation before proceeding (e.g. "Should I proceed?", "Continue?", "Go ahead?"). Just DO the work.\n- NEVER ask which sheet to use — the active sheet is provided in the context. If unspecified, default to the active sheet.\n- NEVER ask for a ticker/company name if the user already mentioned it in the original request.\n- NEVER ask for data that is already visible in the workbook context preview. Reference those cells directly.\n- If you are unsure about a minor assumption, make a reasonable default choice and proceed. Do NOT pause the flow.
+const AGENT_SYSTEM_PROMPT_SUFFIX = `\n\n---\n\nOUTPUT FORMAT: Respond with a JSON object containing:\n{\n  "thought": "Your reasoning about what to do next",\n  "tool": "tool_name",\n  "params": { ...tool parameters... }\n}\n\nIMPORTANT: Call exactly one tool per response. The only way to do multiple things in one iteration is the parallel_calls tool, which fans out up to 8 INDEPENDENT read-only calls (reads, OpenBB fetches, bundles) in parallel. Use parallel_calls whenever you would otherwise emit multiple consecutive read-only tool calls — it cuts those N iterations down to 1. Mutations and writes still run sequentially, one per iteration.\n\nEXCEL AGENT WORKFLOW:\n- For complex workbook work, inspect the workbook first, build_workbook_graph for multi-sheet dependency context, create a brief task list, then execute in small visible chunks.\n- Prefer set_cell_range for each logical section instead of many single-cell writes.\n- **BATCH RULE (critical for speed):** when you are about to write to 2+ different sheets or 2+ different sections, you MUST use bulk_set_cell_ranges with all of them in a single call instead of consecutive set_cell_range calls. Same rule for formatting: 2+ formats → bulk_set_format. Issuing N consecutive single-write tools when bulk_* would have worked is the #1 source of slow runs.\n- **ATOMIC WRITE+FORMAT (critical for quality):** every write MUST carry its formatting in the same call via the per-cell \`style_preset\` field — one of: header, subheader, input, input_pct, input_int, formula, formula_pct, total, subtotal, currency, percent, date, year, label, assumption. Splitting "first write, then format in a separate pass" is forbidden: in production the separate format pass routinely never lands and the output looks unstyled. Example: \`{ "B5": { "formula": "=SUM(B2:B4)", "style_preset": "total" } }\`. Use cellStyles on top of style_preset only for one-off overrides.\n- **FORMATTING RULE:** use set_format / bulk_set_format ONLY for the things style_preset can't reach: column widths, freeze panes, full-row top/bottom borders. Numbers, colors, bold belong inside style_preset on the write itself. Never hand-write numberFormat arrays in execute_office_js (a 1x1 matrix on a multi-cell range throws and wastes iterations).\n- **VERIFY FORMATTING:** at the END of the build (not after every sheet), call read_format_summary ONCE on the most important block per sheet to confirm styling landed. If something's off, issue ONE targeted bulk_set_format repair; do NOT loop re-reading. Plain get_cell_ranges does NOT see colors or notes — read_format_summary is the only way.\n- **VERIFY DATA (anti-loop):** when a formula looks wrong, read the BLOCK (e.g. \`A1:F60\`) with get_cell_ranges or get_range_as_csv — not individual cells one at a time. After at MOST 2 verify reads on a section, either fix in one bulk write or call done. Do not keep re-reading the same area.\n- After important writes, verify touched ranges or formulas before calling done.\n- Report only changes you actually made and checked, with sheet names and ranges.\n- Use allow_overwrite:false when exploring a new range. Use allow_overwrite:true only when the user asked to replace or the target sheet was just created by you.\n\nWHEN THE TASK IS COMPLETE: You MUST call the tool "done" with a summary. Do NOT keep calling other tools after the work is finished. Calling "done" ends the session.\n\nPYTHON RULES:\n- execute_python is ONLY for mathematical calculations on data provided as variables in the code string.\n- execute_python does NOT have access to the Excel workbook file system. Do NOT use openpyxl, xlrd, or any file paths like /tmp/current.xlsx, /files/input/workbook.xlsx, etc.\n- To read or write Excel, always use the dedicated Excel tools (set_cell_range, create_sheet, execute_excel_formula, etc.).\n\nDATA RULES:\n- For public-company valuation work, use available finance tools first (OpenBB/Yahoo, treasury/macro tools when relevant), then visible workbook data.\n- Do not invent live market data. If a value is from training memory or a heuristic, label it as an assumption in the workbook.\n- Annotate assumption INPUT cells and key outputs with notes: use the per-cell \"note\" field in set_cell_range / bulk_set_cell_ranges, or bulk_set_notes for many at once. Notes apply as native Excel comments (with an Assumption_Notes sheet fallback) and never block your data writes — add them generously for any externally sourced or assumed value.\n- Search/fetch the web only when the user asks for current source material or when a required data point is unavailable from the provided finance tools.\n\nASK_USER_QUESTION RULES (CRITICAL):\n- The tool ask_user_question is an EMERGENCY BREAK. Use it ONLY when a truly critical piece of information is missing AND cannot be inferred from the workbook context or the user's original request.\n- NEVER ask the user for confirmation before proceeding (e.g. "Should I proceed?", "Continue?", "Go ahead?"). Just DO the work.\n- NEVER ask which sheet to use — the active sheet is provided in the context. If unspecified, default to the active sheet.\n- NEVER ask for a ticker/company name if the user already mentioned it in the original request.\n- NEVER ask for data that is already visible in the workbook context preview. Reference those cells directly.\n- If you are unsure about a minor assumption, make a reasonable default choice and proceed. Do NOT pause the flow.
 
 CITATION RULES:
 - Every action explanation MUST include a citation in the format: [A1:D1](<citation:SheetName!A1:D1>)
@@ -531,7 +626,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'set_cell_range',
-      description: `Write cells using a map of A1 addresses to {value, formula, note, cellStyles, borderStyles}. Supports copyToRange for pattern fill. Supports allow_overwrite for overwrite protection. This is the PRIMARY write tool.\n\nFor MULTIPLE sheets / sections in one shot, prefer bulk_set_cell_ranges (1 iteration vs N).\n\nExample:\n{\n  "sheet": "Sheet1",\n  "cells": {\n    "A1": { "value": "Revenue" },\n    "B1": { "value": 100, "cellStyles": { "fontColor": "#0000FF" } },\n    "B2": { "formula": "=B1*1.05" }\n  },\n  "copyToRange": "B2:B10",\n  "allow_overwrite": false\n}`,
+      description: `Write cells using a map of A1 addresses to {value, formula, note, cellStyles, borderStyles, style_preset}. Supports copyToRange for pattern fill. Supports allow_overwrite for overwrite protection. This is the PRIMARY write tool.\n\nFor MULTIPLE sheets / sections in one shot, prefer bulk_set_cell_ranges (1 iteration vs N).\n\n**style_preset** — ATOMIC IB-grade formatting in one token. Use this on EVERY cell instead of splitting "write" and "format" into two iterations. Available presets: header, subheader, input, input_pct, input_int, formula, formula_pct, total, subtotal, currency, percent, date, year, label, assumption. You can still add cellStyles on top; they override the preset.\n\nExample (write + format atomic):\n{\n  "sheet": "DCF",\n  "cells": {\n    "A1": { "value": "Revenue Build",            "style_preset": "header" },\n    "A2": { "value": "Base revenue",               "style_preset": "label" },\n    "B2": { "value": 100,                          "style_preset": "input" },\n    "B3": { "value": 0.05,                         "style_preset": "input_pct" },\n    "B4": { "formula": "=B2*(1+B3)",               "style_preset": "formula" },\n    "B5": { "formula": "=SUM(B2:B4)",              "style_preset": "total" }\n  },\n  "copyToRange": "B4:F4",\n  "allow_overwrite": false\n}`,
       // Schema sourced from server/tools/schemas.js (single source of truth, also used by registry.js)
       parameters: SHARED_SCHEMAS.SET_CELL_RANGE
     }
@@ -540,7 +635,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'bulk_set_cell_ranges',
-      description: `Write MANY independent ranges (across the same or different sheets) in ONE iteration. Each entry has the same shape as a set_cell_range call. Use this when you would otherwise issue N consecutive set_cell_range calls — typical pattern when populating multiple sections of a model (Assumptions + Sources&Uses + Debt Schedule + ...). Saves N-1 LLM round-trips. Hard cap 16 writes per call.\n\nExample:\n{\n  "writes": [\n    { "sheet": "Assumptions", "cells": { "A1": { "value": "Driver" }, "B1": { "value": "Value" } } },\n    { "sheet": "Sources & Uses", "cells": { "A1": { "value": "Sources" }, "A2": { "value": "Equity" }, "B2": { "value": 100 } } },\n    { "sheet": "Debt Schedule", "cells": { "A1": { "value": "Year" } }, "copyToRange": "A2:A6" }\n  ]\n}\n\nEach write may include copyToRange and allow_overwrite, identical to set_cell_range semantics. Failures on individual writes do NOT abort the batch; they surface under "errors" in the result.`,
+      description: `Write MANY independent ranges (across the same or different sheets) in ONE iteration. Each entry has the same shape as a set_cell_range call. Use this when you would otherwise issue N consecutive set_cell_range calls — typical pattern when populating multiple sections of a model (Assumptions + Sources&Uses + Debt Schedule + ...). Saves N-1 LLM round-trips. Hard cap 16 writes per call.\n\nEach cell spec supports the same style_preset tag as set_cell_range (header/input/formula/total/percent/date/...). USE IT — atomic write+format is much cheaper than write-then-format.\n\nExample (3 sheets, fully formatted in 1 iteration):\n{\n  "writes": [\n    { "sheet": "Assumptions", "cells": {\n        "A1": { "value": "Driver",            "style_preset": "header" },\n        "B1": { "value": "Value",             "style_preset": "header" },\n        "A2": { "value": "Revenue growth %",  "style_preset": "label" },\n        "B2": { "value": 0.08,                 "style_preset": "input_pct" }\n    } },\n    { "sheet": "Sources & Uses", "cells": {\n        "A1": { "value": "Sources",            "style_preset": "header" },\n        "A2": { "value": "Equity",             "style_preset": "label" },\n        "B2": { "value": 100,                   "style_preset": "input" },\n        "A3": { "value": "Total Sources",      "style_preset": "label" },\n        "B3": { "formula": "=SUM(B2:B2)",      "style_preset": "total" }\n    } },\n    { "sheet": "Debt Schedule", "cells": {\n        "A1": { "value": "Year",               "style_preset": "year" }\n    }, "copyToRange": "A2:A6" }\n  ]\n}\n\nEach write may include copyToRange and allow_overwrite, identical to set_cell_range semantics. Failures on individual writes do NOT abort the batch; they surface under "errors" in the result.`,
       parameters: {
         type: 'object',
         required: ['writes'],
@@ -554,7 +649,7 @@ const TOOL_DEFINITIONS = [
               required: ['sheet', 'cells'],
               properties: {
                 sheet: { type: 'string', description: 'Sheet name' },
-                cells: { type: 'object', description: 'A1 address -> {value | formula, note?, cellStyles?, borderStyles?}' },
+                cells: { type: 'object', description: 'A1 address -> {value | formula, note?, cellStyles?, borderStyles?, style_preset?}. style_preset is one of: header, subheader, input, input_pct, input_int, formula, formula_pct, total, subtotal, currency, percent, date, year, label, assumption.' },
                 copyToRange: { type: 'string', description: 'Optional range to copy the pattern to (e.g. "B2:B100")' },
                 allow_overwrite: { type: 'boolean', description: 'If false, fail when target cells are non-empty (default true)' }
               }
@@ -591,7 +686,8 @@ const TOOL_DEFINITIONS = [
               rowHeight: { type: 'number' },
               borderBottomColor: { type: 'string' },
               borderTopColor: { type: 'string' },
-              borders: { type: 'object' }
+              borders: { type: 'object' },
+              style_preset: { type: 'string', description: 'IB-grade shortcut: header, subheader, input, input_pct, input_int, formula, formula_pct, total, subtotal, currency, percent, date, year, label, assumption. Any explicit fields you pass override the preset.' }
             }
           }
         },
@@ -1496,7 +1592,13 @@ function summarizeActionsForCritic(actions) {
       const cells = a.cells || {};
       const sample = Object.entries(cells).slice(0, 24).map(([addr, spec]) => {
         if (!spec || typeof spec !== 'object') return `${addr}=${JSON.stringify(spec).slice(0, 60)}`;
-        if (spec.formula) return `${addr}=${String(spec.formula).slice(0, 120)}`;
+        if (spec.formula) {
+          // Render with a space so a formula like "=SUM(A1:A5)" reads as
+          // "C10 =SUM(A1:A5)" — NOT "C10==SUM(A1:A5)", which the critic
+          // LLM kept misreading as a double-equals typo and flagging.
+          const f = String(spec.formula).slice(0, 120);
+          return `${addr} ${f}`;
+        }
         if (spec.value !== undefined) return `${addr}:${JSON.stringify(spec.value).slice(0, 60)}`;
         return addr;
       });
@@ -2034,11 +2136,11 @@ async function runAgentLoop(objective, context, options = {}) {
         const lastN = recentToolTrail.slice(-BULK_TRIGGER_RUN).map(e => e.toolName);
         if (lastN.length === BULK_TRIGGER_RUN && lastN.every(n => n === 'set_cell_range')) {
           messages.push(makeUserMessage(
-            'BATCH HINT: you just called set_cell_range twice in a row. If the next write is also a different sheet/section, consolidate the upcoming writes into ONE bulk_set_cell_ranges call instead of issuing them one at a time.'
+            'BATCH HINT: you just called set_cell_range twice in a row. Consolidate the upcoming writes into ONE bulk_set_cell_ranges call. ALSO: include style_preset on each cell (header/input/formula/total/percent/date/...) so write and format happen in the same iteration — do NOT plan a separate format pass.'
           ));
         } else if (lastN.length === BULK_TRIGGER_RUN && lastN.every(n => n === 'set_format')) {
           messages.push(makeUserMessage(
-            'BATCH HINT: you just called set_format twice in a row. Consolidate the next formats into ONE bulk_set_format call.'
+            'BATCH HINT: you just called set_format twice in a row. Consolidate the next formats into ONE bulk_set_format call. Better still: most of those formats belong INSIDE the original writes via style_preset — restructure so future sections format themselves at write time.'
           ));
         } else if (lastN.length === BULK_TRIGGER_RUN && lastN.every(n => n === 'create_sheet')) {
           messages.push(makeUserMessage(
@@ -2755,7 +2857,7 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
         actions: [{
           type: 'setCellRange',
           sheet: targetSheet,
-          cells: params.cells,
+          cells: expandPresetsInCells(params.cells),
           copyToRange: copyToRange,
           allow_overwrite: params.allow_overwrite,
           explanation: `Write ${Object.keys(params.cells || {}).length} cells to ${targetSheet}`
@@ -2770,7 +2872,7 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
           type: 'setCellFormat',
           sheet: targetSheet,
           target: params.target,
-          options: params.options
+          options: expandPresetInOptions(params.options)
         }]
       };
     }
@@ -2804,7 +2906,7 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
         actions.push({
           type: 'setCellRange',
           sheet,
-          cells: w.cells,
+          cells: expandPresetsInCells(w.cells),
           copyToRange,
           allow_overwrite: w.allow_overwrite,
           explanation: `Write ${Object.keys(w.cells).length} cells to ${sheet}`
@@ -2853,7 +2955,7 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
           type: 'setCellFormat',
           sheet,
           target: f.target,
-          options: f.options
+          options: expandPresetInOptions(f.options)
         });
       }
       if (actions.length === 0) {
@@ -2948,11 +3050,22 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       // RPC path: wait for the client to execute and return real values/logs/errors.
       // This avoids the legacy fire-and-forget echo, which forced the LLM to spend
       // extra iterations on read-after-write verification.
+      // Accept common alias names for the code param — the LLM kept calling with
+      // `params`, `script`, `js`, `source`, `body` and burning an iteration on
+      // "wrong parameter name". Normalize them here.
+      let code = params.code;
+      if (code == null) code = params.script || params.js || params.source || params.body;
+      // params.params is rare but appeared in prod logs (loops 17/21/25/43/62).
+      // Only accept it when it's a string of code, not a nested object.
+      if (code == null && typeof params.params === 'string') code = params.params;
+      if (!code || typeof code !== 'string' || code.trim().length === 0) {
+        return {
+          error: 'execute_office_js: missing "code" param (string of JS to run). Accepted aliases: code, script, js, source, body. Do NOT pass the code inside a "params" object.'
+        };
+      }
       if (requestClientTool) {
         try {
-          const rpc = await requestClientTool('runJavaScript', {
-            code: params.code
-          });
+          const rpc = await requestClientTool('runJavaScript', { code });
           // rpc shape from client: { ok, value, logs, error }
           if (rpc && rpc.error) {
             return {
