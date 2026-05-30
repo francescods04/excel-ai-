@@ -360,11 +360,15 @@ async function runFormulaAgent(params, memory) {
 async function runFormatAgent(params, memory) {
   logger.info('[FormatAgent] Avvio formattazione');
   const fallback = buildProfessionalFormatPlan(params, memory);
+
+  // Deterministic path: for routine formatting, skip LLM entirely.
+  // LLM formatting is ONLY used for explicit style/palette/color/look changes.
   if (!shouldUseFormatLLM(params)) {
-    logger.info(`[FormatAgent] Piano adattivo: ${fallback.actions.length} azioni su ${fallback.data.sheetCount} fogli (${fallback.data.strategy})`);
+    logger.info(`[FormatAgent] Piano deterministico: ${fallback.actions.length} azioni su ${fallback.data.sheetCount} fogli (${fallback.data.strategy}, palette ${fallback.data.theme})`);
     return fallback;
   }
 
+  // AI-assisted path: style/color/theme change detected — enhance with LLM.
   const context = JSON.stringify(compactResultsForPrompt(memory.results, params.usesResults), null, 2);
 
   // Inject relevant wiki knowledge for formatting
@@ -382,7 +386,7 @@ ${JSON.stringify(intent, null, 2)}
 Analyst-depth playbook:
 ${formatDepthForPrompt(analystDepth)}
 
-Deterministic fallback plan summary:
+Deterministic base plan (use as starting point, enhance or override for style-specific changes):
 ${JSON.stringify({ data: fallback.data, sampleActions: fallback.actions.slice(0, 24) }, null, 2)}
 
 Previous task results:
@@ -417,7 +421,7 @@ ${wikiContext}`;
       actions
     };
   } catch (error) {
-    logger.warn(`[FormatAgent] LLM fallback to adaptive format: ${error.message}`);
+    logger.warn(`[FormatAgent] LLM failed, using deterministic plan: ${error.message}`);
     return {
       ...fallback,
       data: {
