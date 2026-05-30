@@ -2566,10 +2566,18 @@ function initStepwiseAgentLoop(turnId, strategy) {
   turn.agentStepSeq = 0;
   turn.agentCollectedActions = [];
   turn.executionEngine = 'stepwise';
-  saveTurn(turn);
-  // Emit AFTER agentState is set + persisted so the first client /step finds it.
-  // Replayable, so a late/reconnected SSE client still picks it up.
-  streaming.sendEvent(turnId, 'stepwiseReady', { turnId, engine: 'stepwise' });
+  // Durable save (await Supabase) BEFORE the SSE event. Without the await
+  // the next /step can land on a fresh instance, hydrate stale state, and
+  // see no agentState yet — replying "non in modalità stepwise" until the
+  // background upsert eventually catches up.
+  (async () => {
+    try {
+      await saveTurnDurable(turn);
+    } catch (err) {
+      logger.warn(`[Turn] initStepwiseAgentLoop durable save failed: ${err.message}`);
+    }
+    streaming.sendEvent(turnId, 'stepwiseReady', { turnId, engine: 'stepwise' });
+  })();
   return turn;
 }
 
@@ -2618,9 +2626,18 @@ function initStepwiseArchitectParallel(turnId, strategy) {
   turn.agentStepSeq = 0;
   turn.agentCollectedActions = [];
   turn.executionEngine = 'stepwise';
-  saveTurn(turn);
-
-  streaming.sendEvent(turnId, 'stepwiseReady', { turnId, engine: 'architect_parallel' });
+  // Durable save (await Supabase) BEFORE the SSE event. On Vercel the next
+  // /step almost always lands on a different instance — without the commit
+  // it reads stale state and rejects every step with "non in modalità
+  // stepwise". The save+emit run async; approveTurn does not need to wait.
+  (async () => {
+    try {
+      await saveTurnDurable(turn);
+    } catch (err) {
+      logger.warn(`[Turn] initStepwiseArchitectParallel durable save failed: ${err.message}`);
+    }
+    streaming.sendEvent(turnId, 'stepwiseReady', { turnId, engine: 'architect_parallel' });
+  })();
   return turn;
 }
 
@@ -2818,17 +2835,19 @@ function resolveStaleStep(turn, clientSeq) {
 
 async function stepTurn(turnId, clientResult, clientSeq) {
   let turn = _getTurnRef(turnId);
-  // Cold-instance recovery: if this Vercel instance has no in-memory copy of
-  // the turn (just spun up after a previous instance's FUNCTION_INVOCATION_TIMEOUT),
-  // hydrate from Supabase. Without this, /step returns "Turn non è in modalità
-  // stepwise" forever and the client retry loop wedges. Same for the case
-  // where we know the client is ahead of us (staleness guard below).
-  if (!turn) {
+  // Cold-instance recovery: hydrate from Supabase whenever the in-memory
+  // copy is missing OR is still in a pre-stepwise state. This happens when
+  // approveTurn ran on a different instance and the current instance hasn't
+  // received the Supabase upsert yet. Without hydration here we throw "non
+  // in modalità stepwise" and the client retry loop wedges.
+  const inMemoryStale = turn && !turn.agentState && !turn.architectState;
+  if (!turn || inMemoryStale) {
     try {
       const fresh = await hydrateTurnFromSupabase(turnId);
       if (fresh) turn = fresh;
     } catch (_) { /* fall through to the not-found error below */ }
   }
+  // Multi-instance staleness guard: client knows about a step beyond ours.
   if (turn && clientSeq != null && Number(clientSeq) > (turn.agentStepSeq || 0)) {
     const fresh = await hydrateTurnFromSupabase(turnId);
     if (fresh) turn = fresh;
