@@ -1,349 +1,346 @@
-# AI Agent for Excel
+# Excel AI Agent
 
-Un add-in per Microsoft Excel che permette di controllare il foglio di calcolo tramite linguaggio naturale, sfruttando modelli AI.
+Add-in per Microsoft Excel che permette di controllare il foglio di calcolo tramite linguaggio naturale (italiano o inglese), con AI multi-agente specializzata in modellistica finanziaria (DCF, LBO, WACC, Comps, Business Plan).
 
-## Funzionalità
+---
 
-- **Controllo naturale**: Scrivi in italiano o inglese cosa vuoi fare su Excel
-- **Formattazione intelligente**: Cambia colori, font, allineamenti delle celle
-- **Formule e calcoli**: Inserisci somme, medie, forecast e formule complesse
-- **Inserimento dati**: Riempi range con dati strutturati
-- **Grafici**: Crea chart direttamente dai comandi AI
-- **Contesto aware**: L'AI sa qual è il foglio attivo e il range selezionato
+## Indice
 
-## Architettura
+- [Panoramica](#panoramica)
+- [Prerequisiti](#prerequisiti)
+- [Installazione rapida](#installazione-rapida)
+- [Configurazione AI](#configurazione-ai)
+- [Utilizzo](#utilizzo)
+- [Struttura del progetto](#struttura-del-progetto)
+- [Sviluppo](#sviluppo)
+- [Testing](#testing)
+- [Deploy](#deploy)
+- [Documentazione](#documentazione)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Panoramica
+
+L'add-in si installa nella barra multifunzione di Excel e apre un task panel laterale con interfaccia chat. L'utente scrive cosa vuole fare; l'AI:
+
+1. Analizza il foglio attivo e il contesto (contenuto celle, range selezionato, formule)
+2. Genera un piano di azioni (modello finanziario, formattazione, formule)
+3. Chiede conferma prima di scrivere sul workbook
+4. Esegue le azioni approvate e mostra i risultati
+
+### Architettura (alto livello)
 
 ```
-┌──────────────┐      ┌──────────────┐      ┌──────────────┐
-│   Excel      │◄────►│  Task Pane   │◄────►│   Backend    │
-│  (Desktop/   │      │  (Office.js) │      │   (Node.js)  │
-│   Online)    │      │              │      │              │
-└──────────────┘      └──────────────┘      └──────┬───────┘
-                                                    │
-              ┌─────────────────────────────────────┘
-              │
-    ┌─────────▼──────────┐     ┌──────────▼─────────┐
-    │   OpenCode Server  │     │   OpenRouter API   │
-    │   (locale)         │     │   (online)         │
-    │   opencode-go      │     │   kimi-k2.6        │
-    └────────────────────┘     └────────────────────┘
+Excel (Desktop/Online)  ←→  Task Pane (Office.js)  ←→  Backend Node.js (Express)
+                                                           │
+                              ┌─────────────────────────────┤
+                              ▼                             ▼
+                      LLM API (DeepSeek, OpenRouter,    Python Bridge (OpenBB,
+                      Xiaomi, OpenAI-compatibile)       BrowserUse, Yahoo Finance)
 ```
 
-### Runtime agentico
+### Cosa sa fare
 
-La codebase supporta due runtime:
+| Categoria | Esempi |
+|-----------|--------|
+| **Modelli finanziari** | DCF, LBO, WACC, Comps, 3-Statement, Business Plan |
+| **Formattazione** | Colori, font, bordi, allineamenti, number format, conditional formatting |
+| **Formule** | SOMMA, MEDIA, CERCA.VERT, forecast, array formulas |
+| **Dati** | Riempimento range, import dati strutturati, pulizia dati |
+| **Grafici** | Chart da comando AI, aggiornamento dinamico |
+| **Analisi** | Sensitivity tables, scenario analysis, auditing formule |
 
-- **Legacy job runtime**: `planner -> executor -> SSE`, mantenuto per retrocompatibilità.
-- **Nuovo turn/item runtime**: ispirato a Codex, con turn espliciti, item streammati e approvazione del piano prima dell'esecuzione.
+### Runtime agentici
 
-Nel nuovo flusso agentico:
+Il backend supporta due modalità operative:
 
-1. La UI apre un turn con `POST /api/turn/start`
-2. Il backend genera un `plan` item
-3. L'utente approva il piano
-4. Durante l'esecuzione il runtime puo' chiedere:
-   - letture strutturate del workbook (`workbook.readWorkbook`, `workbook.readSheet`, `workbook.readRange`)
-   - input utente (`requestUserInput`)
-   - conferme/preview prima delle scritture Excel
-5. Il backend esegue i `taskExecution` item e streamma lo stato via SSE
+- **Architect + Agent Loop** (default) — Un "architect" decompone la richiesta in slice, ogni slice viene eseguita da uno specialista. Supporta esecuzione parallela e stepwise.
+- **Legacy Planner → Executor** — Flusso sequenziale planner/executor, mantenuto per retrocompatibilità.
 
-Endpoint principali:
-
-```bash
-POST /api/turn/start
-POST /api/turn/approve
-POST /api/turn/respond
-GET  /api/turn/stream/:turnId
-GET  /api/turn/:turnId
-```
+---
 
 ## Prerequisiti
 
-- Node.js 18+
-- Microsoft Excel (Desktop 2016+ o Excel Online)
-- **Per OpenCode**: `opencode` CLI installato e configurato
-- **Per OpenRouter**: API key da [openrouter.ai](https://openrouter.ai/keys) (alternativa online)
+- **Node.js** ≥ 18.17
+- **Microsoft Excel** Desktop 2016+ o Excel Online
+- **Chiave API LLM** (DeepSeek raccomandato) — vedi [Configurazione AI](#configurazione-ai)
+- (Opzionale) **OpenBB** Python environment per dati finanziari avanzati
 
-## Installazione
+---
 
-1. **Clona o scarica il progetto** nella cartella corrente.
+## Installazione rapida
 
-2. **Installa le dipendenze**:
-   ```bash
-   npm install
-   ```
+```bash
+# 1. Clona il progetto
+git clone <repo-url> && cd excel
 
-3. **Configura l'AI** scegliendo un provider (vedi sezione [Configurazione AI](#configurazione-ai)).
+# 2. Installa dipendenze
+npm install
 
-4. **Avvia tutto con uno script** (raccomandato):
-   ```bash
-   ./start-dev.sh
-   ```
-   Questo script:
-   - Verifica le dipendenze (Node.js, opencode CLI)
-   - Avvia automaticamente `opencode serve` (se necessario)
-   - Avvia il server Node.js con HTTPS
-   - Apre Microsoft Excel
-   - Mostra le istruzioni per caricare il manifest
+# 3. Configura l'AI
+cp .env.example .env
+# Edita .env con le tue API key (vedi sezione successiva)
 
-   Per fermare tutto:
-   ```bash
-   ./stop-dev.sh
-   ```
+# 4. Avvia ambiente di sviluppo
+./start-dev.sh
+```
 
-   Oppure avvia manualmente:
-   ```bash
-   npm run dev
-   ```
-   Il server girerà su `http://localhost:3000` e `https://localhost:3443`.
+Lo script `start-dev.sh` avvia automaticamente: server Node.js con HTTPS, Excel, e tutti i servizi necessari.
 
-5. **Installa l'add-in in Excel**:
-   - Apri Excel
-   - Vai su **Inserisci** > **Componenti aggiuntivi** > **Carica componente aggiuntivo personalizzato**
-   - Seleziona il file `manifest.xml` dalla cartella del progetto
-   - Se usi Excel Online, carica il manifest tramite il tool [Office Add-ins sideload](https://docs.microsoft.com/en-us/office/dev/add-ins/testing/sideload-office-add-ins-for-testing)
+Per fermare tutto: `./stop-dev.sh`
 
-## Uso
+### Avvio manuale
 
-1. Apri il pannello laterale cliccando su **AI Agent** nella barra Home.
-2. Scrivi un comando nella chat, ad esempio:
-   - *"Colora di rosso le celle con valori negativi"*
-   - *"Fai la somma della colonna A"*
-   - *"Crea un forecast per i prossimi 3 mesi basato sui dati in B1:B12"*
-   - *"Formatta il range A1:D10 come tabella con bordi e intestazioni in grassetto"*
-3. L'agente genera un piano, chiede conferma per le modifiche al workbook e poi applica le azioni approvate.
+```bash
+npm run dev          # Server con hot-reload (nodemon)
+npm start            # Server in produzione
+npm run build        # Rigenera il bundle frontend (src/taskpane.bundle.js)
+```
+
+### Caricare l'add-in in Excel
+
+1. Apri Excel → **Inserisci** → **Componenti aggiuntivi** → **Carica componente aggiuntivo personalizzato**
+2. Seleziona `manifest.xml` dalla root del progetto
+3. Per Excel Online: usa lo [sideload](https://docs.microsoft.com/en-us/office/dev/add-ins/testing/sideload-office-add-ins-for-testing) o esponi il server con ngrok
+
+---
 
 ## Configurazione AI
 
-Il backend supporta **tre provider AI**. Copia `.env.example` in `.env` e scegli una configurazione:
+Il backend supporta 5 provider LLM. Copia `.env.example` in `.env` e scegli:
 
-### Opzione 1 — OpenCode Go (raccomandata per sviluppo locale)
+### Provider raccomandati
 
-Usa il server locale di OpenCode con il modello `kimi-k2.6`.
+| Provider | Vantaggi | Svantaggi |
+|----------|----------|-----------|
+| **DeepSeek** (v4-pro) | Context caching automatico, reasoning nativo, API diretta | Serve API key separata |
+| **OpenRouter** | Velocissimo (10-15s), accesso a molti modelli | Costo per token |
+| **OpenCode Go** (locale) | Nessun costo API se hai già abbonamento | Più lento (1-2 min) |
 
-```env
-AI_PROVIDER=opencode
-OPENCODE_SERVER_URL=http://127.0.0.1:4096
-OPENCODE_PROVIDER=opencode-go
-OPENCODE_MODEL=kimi-k2.6
-```
+### Provider opzionali
 
-**Requisiti aggiuntivi**:
-- Assicurati che `opencode` CLI sia installato: `which opencode`
-- Configura la tua key OpenCode Go in `~/.local/share/opencode/auth.json`:
-  ```json
-  {
-    "opencode-go": {
-      "type": "api",
-      "key": "sk-..."
-    }
-  }
-  ```
-- Avvia il server OpenCode in background: `opencode serve --port 4096`
+| Provider | Configurazione |
+|----------|---------------|
+| **Xiaomi MiMo** | Token subscription con crediti inclusi, API OpenAI-compatibile |
+| **OpenAI-compatibile** | Qualsiasi endpoint `/v1/chat/completions` (Together AI, Azure, etc.) |
 
-**Pro**: nessun costo aggiuntivo se hai già OpenCode Go
-**Contro**: più lento (~1-2 min per risposta con kimi-k2.6)
+Per i dettagli di configurazione di ogni provider, vedi `.env.example`.
 
-### Opzione 2 — OpenRouter (raccomandata per velocità)
+### Tuning performance
 
-Usa l'API online di OpenRouter con il modello `moonshotai/kimi-k2.6`.
+Per rendere il loop agentico più veloce:
 
 ```env
-AI_PROVIDER=openrouter
-OPENROUTER_API_KEY=sk-or-v1-...
-OPENROUTER_MODEL=moonshotai/kimi-k2.6
-OPENROUTER_FALLBACK_MODEL=openai/gpt-4o-mini
-LLM_TIMEOUT_MS=90000
-LLM_FALLBACK_TIMEOUT_MS=45000
-PLANNER_TIMEOUT_MS=150000
-PLANNER_FALLBACK_TIMEOUT_MS=60000
-PLANNER_THINKING_ENABLED=false
-TRIAGE_THINKING_ENABLED=false
+AGENT_LOOP_MODEL=deepseek-v4-flash      # Modello più veloce per il loop
+AGENT_THINKING_EVERY_ITER=false         # Disabilita reasoning su ogni iterazione
+AGENT_THINKING_INTERVAL=6               # Riabilita reasoning ogni N iterazioni
+AGENT_FORCE_THINKING_AFTER_ERROR=true   # Forza reasoning dopo errori
+ARCHITECT_THINKING_ENABLED=true         # Reasoning attivo solo per architect
 ```
 
-**Pro**: molto più veloce (~10-15s), nessun server locale da gestire
-**Contro**: costo per token utilizzato (vedi tariffe OpenRouter)
+---
 
-### Opzione 3 — OpenAI-compatible generico
+## Utilizzo
 
-Usa qualsiasi provider compatibile con l'API OpenAI (Together AI, Fireworks, Azure, ecc.).
+1. Apri il task panel cliccando su **AI Agent** nella barra Home di Excel
+2. Scrivi un comando nella chat:
 
-```env
-AI_PROVIDER=openai
-AI_API_URL=https://api.openai.com/v1/chat/completions
-AI_API_KEY=sk-...
-AI_MODEL=gpt-4o
+```
+"Crea un DCF a 5 anni per AAPL con WACC 9% e terminal growth 2.5%"
+"Colora di rosso tutte le celle con valori negativi nella colonna F"
+"Fai un'analisi di sensitività sul DCF variando WACC tra 8% e 12%"
+"Formatta il range A1:D20 come tabella professionale con header in grassetto"
 ```
 
-### Opzione 4 — Xiaomi MiMo Direct (token subscription)
+3. L'AI genera un piano → confermi le modifiche → esecuzione con feedback live
 
-Usa l'API diretta Xiaomi MiMo con token di abbonamento (crediti inclusi). OpenAI-compatibile nativamente.
+### Flusso di un turn
 
-```env
-AI_PROVIDER=xiaomi
-XIAOMI_API_URL=https://token-plan-ams.xiaomimimo.com/v1/chat/completions
-XIAOMI_API_KEY=tp-...
-XIAOMI_MODEL=mimo-v2.5-pro
-XIAOMI_FALLBACK_MODEL=deepseek/deepseek-v4-flash
+```
+User message  →  Triage (classificazione)  →  Architect (piano a slice)
+  →  Esecuzione slice (parallela o sequenziale)  →  Critic (validazione)
+  →  Azioni Excel (via SSE)  →  Narrazione risultati
 ```
 
-**Pro**: crediti gratis con abbonamento, API diretta (senza passare da OpenRouter), supporta streaming e JSON mode
-**Contro**: solo modelli Xiaomi MiMo disponibili
+Endpoint API principali:
 
-### Opzione 5 — DeepSeek API diretta (raccomandata per reasoning + context caching)
-
-Usa l'API nativa DeepSeek con il modello `deepseek-v4-pro`. Supporta **Context Caching automatico su disco**, **reasoning avanzato** (`thinking`) e **streaming**.
-
-```env
-AI_PROVIDER=deepseek
-DEEPSEEK_API_URL=https://api.deepseek.com/chat/completions
-DEEPSEEK_API_KEY=sk-...
-DEEPSEEK_MODEL=deepseek-v4-pro
-DEEPSEEK_FALLBACK_MODEL=deepseek-chat
-DEEPSEEK_REASONING_EFFORT=high
-DEEPSEEK_THINKING_ENABLED=true
+```
+POST /api/turn/start       Inizia un turn
+POST /api/turn/approve     Approva il piano
+POST /api/turn/respond     Rispondi a richiesta input
+GET  /api/turn/stream/:id   SSE stream stato turn
+GET  /api/turn/:id          Stato turn corrente
+GET  /api/health            Health check (tool count, provider)
 ```
 
-**Pro**: Context Caching automatico riduce costi e latenza su conversazioni ripetute; reasoning nativo migliora la qualità dei piani DCF/WACC; API diretta senza intermediari.
-**Contro**: necessita chiave API DeepSeek separata.
+---
 
-#### Ottimizzare il Context Caching DeepSeek
+## Struttura del progetto
 
-DeepSeek costruisce automaticamente una cache su disco quando rileva prefissi di messaggi ripetuti. Per massimizzare i *cache hit*:
+```
+excel/
+├── src/                    # Frontend — Office.js task pane
+│   ├── main.js             # Entry point (bundlato via esbuild)
+│   ├── taskpane.{html,css,js}  # Task pane UI
+│   ├── api/                # Client API (agent, config, turn)
+│   ├── excel/              # Interazione con Excel (context, readers, writers, sheetOps)
+│   ├── ui/                 # Componenti UI (chat, approval, code panel, steps, tabs)
+│   ├── store/              # Stato client (state, turnMemory)
+│   └── auth/               # Autenticazione
+│
+├── server/                 # Backend — Node.js + Express
+│   ├── server.js           # Entry point server
+│   ├── agents/             # Agenti AI (architect, conductor, critic, planner, triage, ...)
+│   ├── runtime/            # Runtime turn-based (turns, undo, safety, prefetch, ...)
+│   ├── tools/              # Integrazioni esterne (LLM, web, yahoo, openbb, browser, ...)
+│   ├── models/             # Modelli finanziari (DCF, LBO, format templates, workbook graph)
+│   ├── utils/              # Utility (trace, logger, metrics, pricing, instructions, ...)
+│   ├── wiki/               # Caricamento knowledge base
+│   ├── skills/             # Loader delle skill definitions
+│   └── supabase/           # Client Supabase per auth/database
+│
+├── skills/                 # Skill definitions in Markdown (dcf, lbo, wacc, comps, ...)
+├── docs/                   # Documentazione
+│   ├── architecture/       # Architettura multi-agente, SaaS roadmap
+│   └── wiki/               # Knowledge base (accounting, excel, finance)
+├── test/                   # Test (unitari in test/unit/, E2E in root)
+├── api/                    # Vercel serverless entry point
+├── bench/                  # Benchmark e confronto modelli
+├── supabase/               # Migrazioni SQL
+├── public/                 # Landing page, video, installer
+└── scripts/                # Script utility (build manifest, analisi trace)
+```
 
-1. **Mantieni stabile il system prompt**: non inserire timestamp, ID casuali o testo variabile nel system prompt del planner o degli specialisti.
-2. **Appendi messaggi nelle conversazioni multi-turn**: quando passi la history a `callLLM`, aggiungi i nuovi messaggi in coda invece di ricostruire l'array da zero.
-3. **Riusa il contesto del workbook**: se leggi lo stesso foglio in turn successivi, includi i dati nello stesso formato per sfruttare il prefisso comune.
-4. **Monitora la cache**: nei log del server cerca `cache_pct=XX%` per ogni risposta DeepSeek. Valori alti (>50%) indicano prefissi ben riutilizzati.
+Vedi [`docs/PROJECT_STRUCTURE.md`](docs/PROJECT_STRUCTURE.md) per una mappa dettagliata.
 
-### Modalità demo
+---
 
-Se non configuri nessuna API key e lasci `AI_PROVIDER=openai` senza key, l'add-in funziona in **modalità demo** con risposte predefinite per testare l'interfaccia.
+## Sviluppo
 
-## Trace LLM
+### Script npm
 
-Il backend ora salva trace strutturati delle chiamate LLM in `data/llm-traces/YYYY-MM-DD.jsonl`, con:
+```bash
+npm run dev              # Server con nodemon (hot reload)
+npm start                # Server in produzione
+npm run build            # Rigenera src/taskpane.bundle.js
+npm test                 # Esegue tutti i test unitari (22 file)
+npm run check            # Test + build frontend
+npm run logs:llm         # Analizza trace LLM
+npm run manifest:prod    # Genera manifest per produzione
+npm run validate:manifest:prod  # Valida il manifest di produzione
+```
 
-- prompt/messages completi per call
-- risposta raw + payload JSON parsato
-- `turnId`, fase (`planning` / `execution`), label logica e modello
-- token usage, latenza, errori e fallback
+### Build frontend
 
-Env utili:
+Il frontend è scritto in vanilla JS (ES modules) e bundlato con **esbuild**:
+
+```bash
+npm run build            # src/main.js → src/taskpane.bundle.js
+```
+
+Il bundle è committato in git per consentire il deploy senza step di build.
+
+### Manifest
+
+`manifest.xml` è configurato per sviluppo locale (`localhost`). Per produzione:
+
+```bash
+ADDIN_BASE_URL=https://app.example.com npm run manifest:prod
+# Output: dist/manifest.xml
+```
+
+### Trace LLM
+
+Il backend salva trace strutturati delle chiamate LLM in `data/llm-traces/YYYY-MM-DD.jsonl`. Config:
 
 ```env
 LLM_TRACE_ENABLED=true
 LLM_TRACE_CAPTURE_CONTENT=true
 LLM_TRACE_DIR=data/llm-traces
-LLM_TRACE_MAX_STRING_CHARS=50000
 ```
 
-## Tuning velocita loop AI
-
-Per rendere il path agentico molto piu rapido senza perdere la capacita' di recupero:
-
-```env
-AGENT_LOOP_FAST_MODEL=deepseek-v4-flash
-AGENT_LOOP_MODEL=deepseek-v4-flash
-AGENT_THINKING_EVERY_ITER=false
-AGENT_THINKING_INTERVAL=6
-AGENT_FORCE_THINKING_AFTER_ERROR=true
-PLANNER_WEAK_FINANCE_FALLBACK=true
-```
-
-Idea pratica:
-
-- `flash` come default per il loop riduce molto la latenza per iterazione
-- il `thinking` resta attivo alla prima iterazione, poi solo ogni `N` step
-- dopo parse error o tool error il loop riabilita una singola iterazione con `thinking`
-- se il planner LLM produce un piano finance troppo debole, il runtime puo' saltare subito sul playbook deterministico invece di sprecare retry costosi
-
-## Benchmark mode-vs-mode
-
-Per confrontare lo stesso task forzato su `planned_dag` e `agent_loop`:
+### Benchmark modelli
 
 ```bash
-npm run bench:modes -- 1 dcf_institutional,complex_model_repair planned_dag,agent_loop
+npm run bench:modes -- 1 dcf_institutional planned_dag,agent_loop
+npm run bench:cost
+npm run bench:cost:report
 ```
 
-Il benchmark salva un file `bench/runtime-mode-compare-<timestamp>.jsonl` e riporta:
+---
 
-- tempo totale
-- costo di planning vs execution
-- task completati
-- azioni generate
-- iterazioni loop usate
-
-Per una vista rapida locale:
+## Testing
 
 ```bash
-npm run logs:llm -- --since=2026-05-27 --limit=30
+npm test          # Esegue tutti i 22 test unitari in sequenza
+npm run check     # Test + build frontend (CI pre-commit)
 ```
 
-Esempi:
+I test coprono:
+- Agenti (architect, triage, stepwise, parallel orchestrator)
+- Runtime (safety, undo, turns, action preview, client read cache)
+- Modelli (DCF backend, workbook graph, finance bundle)
+- Strumenti (LLM trace, execute RPC, tool result cap, parallel calls)
+- Infrastruttura (preflight, schema drift, production manifest)
 
-- solo summary: `npm run logs:llm -- --summary-only`
-- filtrare un turn: `npm run logs:llm -- --turn=turn-123`
+Vedi [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) per le convenzioni di test.
 
-## Azioni supportate
+---
 
-L'AI può generare questi tipi di azioni:
+## Deploy
 
-| Azione | Descrizione |
-|--------|-------------|
-| `setCellValue` | Imposta un valore in una cella o range |
-| `runFormula` | Inserisce una formula Excel |
-| `setCellFormat` | Cambia formattazione (colori, font, numeri) |
-| `fillRange` | Riempie un range con dati (array 2D) |
-| `writeRange` | Scrive valori o formule in un range specifico |
-| `createChart` | Crea un grafico dai dati selezionati |
-| `getSelectedRange` | Richiede informazioni sul range selezionato |
+### Vercel (serverless)
 
-## Sviluppo
-
-- **Frontend attivo**: `src/taskpane.html`, `src/main.js`, moduli in `src/ui`, `src/excel`, `src/api`
-- **Backend**: `server/server.js`
-- **Runtime agentico nuovo**: `server/runtime/turns.js`
-- **Manifest**: `manifest.xml`
-
-### Script disponibili
+Il progetto include `vercel.json` e l'entry point `api/index.js` per deploy serverless.
 
 ```bash
-npm run dev     # Avvia server con nodemon (hot reload)
-npm start       # Avvia server in produzione
-npm run build   # Rigenera src/taskpane.bundle.js da src/main.js
-npm test        # Esegue i test unitari principali
-npm run check   # Test + build frontend
-npm run serve   # Alias di npm start: avvia il backend completo
-npm run serve:static  # Solo file statici; non usare per l'add-in agentico
+vercel deploy --prod
 ```
 
-### Manifest production
-
-`manifest.xml` resta configurato per sviluppo locale. Per generare un manifest HTTPS pronto per validazione/deploy:
+### VPS (tradizionale)
 
 ```bash
-ADDIN_BASE_URL=https://app.example.com npm run manifest:prod
-ADDIN_BASE_URL=https://app.example.com npm run validate:manifest:prod
+make deploy     # rsync + pm2 restart
 ```
 
-Il file generato finisce in `dist/manifest.xml` e sostituisce gli URL `localhost` con l'origine pubblica indicata.
+### Excel Online
 
-## Troubleshooting
-
-- Se il task pane si apre ma compare `Cannot POST /api/turn/start` oppure il messaggio `Errore avvio turn`, molto probabilmente `localhost:3000` e' occupato da un server statico o non aggiornato.
-- In quel caso esegui `./stop-dev.sh` e poi `./start-dev.sh`.
-- Il backend corretto espone `GET /api/health` e `POST /api/turn/start`.
-
-## Note su Excel Online
-
-Se usi Excel Online, assicurati che il server sia raggiungibile pubblicamente o usa `ngrok` per esporre localhost:
+Se usi Excel Online, il server deve essere raggiungibile pubblicamente:
 
 ```bash
 npx ngrok http 3000
+# Aggiorna manifest.xml con l'URL ngrok
 ```
 
-Poi aggiorna gli URL in `manifest.xml` con l'URL di ngrok.
+---
+
+## Documentazione
+
+| Documento | Descrizione |
+|-----------|-------------|
+| [`CONTRIBUTING.md`](docs/CONTRIBUTING.md) | Guida per contribuire al progetto |
+| [`PROJECT_STRUCTURE.md`](docs/PROJECT_STRUCTURE.md) | Mappa dettagliata della codebase |
+| [`architecture/multi-agent-conductor.md`](docs/architecture/multi-agent-conductor.md) | Architettura multi-agente |
+| [`architecture/saas-roadmap.md`](docs/architecture/saas-roadmap.md) | Roadmap SaaS |
+| [`deepseek-context-caching.md`](docs/deepseek-context-caching.md) | Ottimizzazione context caching DeepSeek |
+| [`wiki/`](docs/wiki/) | Knowledge base (contabilità, Excel, finanza) |
+| [`AGENTS.md`](AGENTS.md) | Istruzioni per AI agents (Claude, OpenCode) |
+
+---
+
+## Troubleshooting
+
+| Problema | Soluzione |
+|----------|-----------|
+| `Cannot POST /api/turn/start` | Server statico in esecuzione su porta 3000. Esegui `./stop-dev.sh && ./start-dev.sh` |
+| Task pane vuoto / errore caricamento | Verifica che il server sia in ascolto su HTTPS (`https://localhost:3443`) |
+| L'add-in non compare in Excel | Carica manualmente `manifest.xml` da Inserisci → Componenti aggiuntivi |
+| Certificati SSL non validi | Esegui `make certs` (richiede `mkcert`) per rigenerare i certificati locali |
+| Errore API key LLM | Verifica `.env` — il server logga il provider attivo all'avvio |
+| Timeout chiamate AI | Aumenta `LLM_TIMEOUT_MS` in `.env` o verifica la connessione al provider |
+
+---
 
 ## Licenza
 

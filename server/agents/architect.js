@@ -179,12 +179,42 @@ function extractFormulaSheetRefs(formula) {
     const name = normalizeFormulaSheetName(`'${match[1]}'`);
     if (name) refs.add(name);
   }
-  const unquoted = /(^|[^A-Za-z0-9_.'\]])([A-Za-z_][A-Za-z0-9_.]*)!/g;
+  // Excluded from the "separator" class: A-Za-z0-9_.'] AND now &- because those
+  // chars are valid inside sheet names. Past failure: formula "=P&L!B5" was
+  // unquoted (architect bug) and the regex matched "&L!" extracting "L" as a
+  // fake sheet ref, producing the cryptic 'references sheet "L"' validation
+  // error. Now we skip such broken refs here and let the dedicated
+  // detectUnquotedSheetNamesWithSpecialChars check emit a clearer error.
+  const unquoted = /(^|[^A-Za-z0-9_.'\]&-])([A-Za-z_][A-Za-z0-9_.]*)!/g;
   while ((match = unquoted.exec(text))) {
     const name = normalizeFormulaSheetName(match[2]);
     if (name) refs.add(name);
   }
   return [...refs];
+}
+
+// Catch the actual bug: architect emitted "=P&L!B5" / "=Cash-Flow!A1" instead
+// of the quoted "='P&L'!B5" / "='Cash-Flow'!A1". Walk the formula outside any
+// single-quoted segment and look for "name<&|-|space>name!" patterns.
+function detectUnquotedSheetNamesWithSpecialChars(formula) {
+  if (formula == null) return [];
+  const text = String(formula);
+  if (!text.trim().startsWith('=')) return [];
+  const quotedSpans = [];
+  const quotedRe = /'(?:[^']|'')+'/g;
+  let qm;
+  while ((qm = quotedRe.exec(text))) {
+    quotedSpans.push([qm.index, qm.index + qm[0].length]);
+  }
+  const isInsideQuotes = (idx) => quotedSpans.some(([s, e]) => idx >= s && idx < e);
+  const out = [];
+  const susp = /([A-Za-z_][A-Za-z0-9_]*(?:[\s&-][A-Za-z_][A-Za-z0-9_]*)+)\s*!/g;
+  let m;
+  while ((m = susp.exec(text))) {
+    if (isInsideQuotes(m.index)) continue;
+    out.push(m[1].trim());
+  }
+  return out;
 }
 
 function collectActionSheetNames(action, out) {
@@ -280,7 +310,18 @@ function validateDeterministicFormulaReferences(slices, context = {}) {
   for (const slice of slices) {
     const refs = [];
     for (const action of slice.actions || []) collectActionFormulaRefs(action, refs);
+    const seenUnquoted = new Set();
     for (const item of refs) {
+      const unquoted = detectUnquotedSheetNamesWithSpecialChars(item.formula);
+      for (const name of unquoted) {
+        const key = `${slice.id}:${name}`;
+        if (seenUnquoted.has(key)) continue;
+        seenUnquoted.add(key);
+        errors.push(
+          `slice ${slice.id}: formula contains unquoted sheet reference "${name}!" with a special character ('&', '-', or space). Excel requires single-quote wrapping: use '${name}'! instead.`
+        );
+      }
+      if (unquoted.length > 0) continue;
       if (!allowedSheets.has(item.ref)) {
         errors.push(
           `slice ${slice.id}: formula references sheet "${item.ref}" but no slice scope/action declares that exact sheet name`
@@ -695,7 +736,7 @@ async function generateBlueprint({ objective, context = {}, triage = null, callL
   }
   const validation = validateBlueprint(parsed, { workbookSheets: context.workbookSheets || [], objective });
   if (!validation.ok) {
-    const retryable = validation.errors.some(err => /verbatim menu coverage|formula references sheet/i.test(err));
+    const retryable = validation.errors.some(err => /verbatim menu coverage|formula references sheet|unquoted sheet reference/i.test(err));
     if (retryable) {
       const repairUserContent = `${userContent}\n\nVALIDATION FAILED. Regenerate the full JSON blueprint fixing these errors:\n- ${validation.errors.join('\n- ')}\n\nFor menu coverage errors, add a deterministic Menu/Menu Detail slice whose actions write every extracted item and price exactly, then build revenue formulas from that sheet.`;
       let retryRaw;
@@ -960,6 +1001,7 @@ module.exports = {
   validateBlueprint,
   validateSliceActions,
   extractFormulaSheetRefs,
+  detectUnquotedSheetNamesWithSpecialChars,
   validateDeterministicFormulaReferences,
   extractVerbatimMenuFacts,
   validateVerbatimSourceFacts,

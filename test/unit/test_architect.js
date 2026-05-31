@@ -314,6 +314,30 @@ function test_extractVerbatimMenuFacts_reads_menu_items_and_prices() {
   console.log('  ✓ menu fact extractor reads verbatim items and prices');
 }
 
+function test_extractFormulaSheetRefs_ignores_unquoted_special_char_false_positive() {
+  const { extractFormulaSheetRefs, detectUnquotedSheetNamesWithSpecialChars } = require('../../server/agents/architect');
+  // Quoted P&L: should extract "P&L".
+  const quoted = extractFormulaSheetRefs("='P&L'!B5");
+  assert.deepStrictEqual(quoted, ['P&L'], `quoted P&L extraction broken, got: ${JSON.stringify(quoted)}`);
+  assert.deepStrictEqual(detectUnquotedSheetNamesWithSpecialChars("='P&L'!B5"), [], 'quoted P&L must NOT trigger unquoted warning');
+
+  // Unquoted P&L (broken): should NOT extract "L" as a phantom sheet, and the
+  // unquoted detector must flag "P&L".
+  const refs = extractFormulaSheetRefs('=P&L!B5');
+  assert.ok(!refs.includes('L'), `phantom "L" extracted from unquoted P&L: ${JSON.stringify(refs)}`);
+  const flagged = detectUnquotedSheetNamesWithSpecialChars('=P&L!B5');
+  assert.ok(flagged.includes('P&L'), `unquoted detector should flag "P&L", got: ${JSON.stringify(flagged)}`);
+
+  // Unquoted Cash-Flow (broken): similar story.
+  const dashFlagged = detectUnquotedSheetNamesWithSpecialChars('=Cash-Flow!A1');
+  assert.ok(dashFlagged.includes('Cash-Flow'), `unquoted detector should flag "Cash-Flow", got: ${JSON.stringify(dashFlagged)}`);
+
+  // Plain sheet ref unchanged.
+  const plain = extractFormulaSheetRefs('=Assumptions!$B$5*2');
+  assert.deepStrictEqual(plain, ['Assumptions'], `plain ref extraction broken, got: ${JSON.stringify(plain)}`);
+  console.log('  ✓ formula sheet ref extraction handles &/- in sheet names without phantom matches');
+}
+
 function test_extractVerbatimMenuFacts_strips_menu_non_disponibile_annotation() {
   // Regression: the "(Menu non disponibile)" annotation between items used to
   // bleed across the next item's name via the \bMenu\b split, producing
@@ -487,6 +511,7 @@ function test_buildSliceWorkerPrompt_contains_scope_and_instructions() {
   test_validateBlueprint_rejects_invalid_slice_actions();
   test_validateBlueprint_accepts_declared_formula_sheet_refs();
   test_validateBlueprint_rejects_undeclared_formula_sheet_refs();
+  test_extractFormulaSheetRefs_ignores_unquoted_special_char_false_positive();
   test_extractVerbatimMenuFacts_reads_menu_items_and_prices();
   test_extractVerbatimMenuFacts_strips_menu_non_disponibile_annotation();
   test_validateBlueprint_rejects_menu_category_summary_without_line_items();

@@ -4167,10 +4167,33 @@ async function finishToolExecution(state, toolName, params, thought, toolResult,
 
   const stagnation = detectToolStagnation(state.recentToolTrail);
   if (stagnation) {
+    state.stagnationStrikes = Number(state.stagnationStrikes || 0) + 1;
+    // First strike: steer instead of aborting. Past failure: an institutional
+    // fast-food run hit stagnation_repeat:execute_office_js:x4 and killed the
+    // whole turn at iteration 37 even though the agent had already written
+    // ~30 successful batches. Give one rescue chance: clear the trail, force
+    // thinking on the next call, and push a loud corrective message.
+    if (state.stagnationStrikes < 2) {
+      const reason = formatToolStagnationReason(stagnation);
+      const tools = stagnation.entries.map(e => e.toolName).join(' → ');
+      const nudge = [
+        `STAGNATION DETECTED: ${reason}. You just called the same tool ${stagnation.entries.length} times in a row (${tools}) without making progress.`,
+        `STOP. Do NOT call ${stagnation.entries[stagnation.entries.length - 1].toolName} again with the same parameters.`,
+        `Reset: think about what you actually need to do next. If you were verifying / reading, that's done — make the next WRITE. If you were trying to format, switch to bulk_set_format with explicit ranges. If execute_office_js keeps failing, abandon it and use the structured tools (set_cell_range / bulk_set_cell_ranges / bulk_set_format / get_cell_ranges) which have schema validation.`,
+        `This is your ONE rescue. The next stagnation will abort the run.`
+      ].join('\n');
+      state.messages.push(makeUserMessage(nudge));
+      state.recentToolTrail.length = 0;
+      state.forceThinkingNext = true;
+      onProgress('agentStagnationNudge', { iteration: state.iteration, pattern: stagnation.pattern, reason, strikes: state.stagnationStrikes });
+      autoCompactMessages(state);
+      if (actions) return { state, control: 'emit_actions', payload: { thought, actions } };
+      return { state, control: 'continue', payload: { thought } };
+    }
     state.status = 'aborted';
     state.abortReason = formatToolStagnationReason(stagnation);
-    state.results.push({ type: 'error', error: state.abortReason, stagnation: true, pattern: stagnation.pattern, tools: stagnation.entries.map(e => e.toolName) });
-    onProgress('iterationError', { iteration: state.iteration, error: state.abortReason, stagnation: true, pattern: stagnation.pattern });
+    state.results.push({ type: 'error', error: state.abortReason, stagnation: true, pattern: stagnation.pattern, tools: stagnation.entries.map(e => e.toolName), strikes: state.stagnationStrikes });
+    onProgress('iterationError', { iteration: state.iteration, error: state.abortReason, stagnation: true, pattern: stagnation.pattern, strikes: state.stagnationStrikes });
     return { state, control: 'aborted', payload: { reason: state.abortReason } };
   }
 
