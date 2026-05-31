@@ -1,5 +1,10 @@
 const assert = require('assert');
-const { formatToolResultForMessages, trimDeepArrays, compactMessagesToSummary } = require('../../server/agents/agentLoop.js');
+const {
+  formatToolResultForMessages,
+  trimDeepArrays,
+  compactMessagesToSummary,
+  shouldAutoCompactMessages
+} = require('../../server/agents/agentLoop.js');
 
 (function main() {
   // 1) Small result -> indented JSON, no truncation marker
@@ -96,6 +101,25 @@ const { formatToolResultForMessages, trimDeepArrays, compactMessagesToSummary } 
     assert.ok(messages[1].content.includes('created assumptions'), 'previous summary survives second compaction');
     assert.ok(messages[1].content.includes('added audit checks'), 'newer progress included in second compaction');
     console.log('OK auto-compaction writes durable summary and omits tool-result noise');
+  }
+
+  // 8) Auto-compaction defaults to history size, while message-count compaction is opt-in
+  {
+    const manySmallMessages = [
+      { role: 'system', content: 'system prompt' },
+      ...Array.from({ length: 90 }, (_, i) => ({ role: 'user', content: `short ${i}` }))
+    ];
+    const defaultDecision = shouldAutoCompactMessages(manySmallMessages, { maxChars: 1000000 });
+    assert.strictEqual(defaultDecision.shouldCompact, false, 'message count alone does not compact by default');
+
+    const messageLimitDecision = shouldAutoCompactMessages(manySmallMessages, { messageLimit: 80, maxChars: 1000000 });
+    assert.strictEqual(messageLimitDecision.shouldCompact, true, 'explicit message limit still compacts');
+    assert.strictEqual(messageLimitDecision.reason, 'message_count');
+
+    const largeHistoryDecision = shouldAutoCompactMessages(manySmallMessages, { maxChars: 100, messageLimit: 0 });
+    assert.strictEqual(largeHistoryDecision.shouldCompact, true, 'large history compacts by char threshold');
+    assert.strictEqual(largeHistoryDecision.reason, 'char_count');
+    console.log('OK auto-compaction is size-aware and keeps message-count limit opt-in');
   }
 
   console.log('\ntool result size cap tests completed.');

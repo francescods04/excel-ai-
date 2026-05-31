@@ -437,9 +437,42 @@ function stripMsgId(content) {
   return String(content).replace(/^\[id:[a-z0-9]{6}\]\s*/, '');
 }
 
+const DEFAULT_AUTO_COMPACT_KEEP_MESSAGES = 32;
+const DEFAULT_AUTO_COMPACT_MAX_CHARS = 2500000;
+
+function messageCharCount(messages) {
+  if (!Array.isArray(messages)) return 0;
+  return messages.reduce((sum, message) => sum + String(message?.content || '').length, 0);
+}
+
+function getAutoCompactPolicy(options = {}) {
+  const rawMessageLimit = options.messageLimit ?? process.env.AGENT_AUTO_COMPACT_LIMIT;
+  const messageLimit = rawMessageLimit == null || rawMessageLimit === '' ? 0 : Number(rawMessageLimit) || 0;
+  return {
+    keepCount: Number(options.keepCount) || Number(process.env.AGENT_AUTO_COMPACT_KEEP) || DEFAULT_AUTO_COMPACT_KEEP_MESSAGES,
+    maxChars: Number(options.maxChars) || Number(process.env.AGENT_AUTO_COMPACT_MAX_CHARS) || DEFAULT_AUTO_COMPACT_MAX_CHARS,
+    messageLimit
+  };
+}
+
+function shouldAutoCompactMessages(messages, options = {}) {
+  const policy = getAutoCompactPolicy(options);
+  const messageCount = Array.isArray(messages) ? messages.length : 0;
+  const charCount = messageCharCount(messages);
+  const base = { shouldCompact: false, reason: null, messageCount, charCount, ...policy };
+  if (!Array.isArray(messages) || messageCount <= policy.keepCount + 2) return base;
+  if (policy.messageLimit > 0 && messageCount > policy.messageLimit) {
+    return { ...base, shouldCompact: true, reason: 'message_count' };
+  }
+  if (charCount > policy.maxChars) {
+    return { ...base, shouldCompact: true, reason: 'char_count' };
+  }
+  return base;
+}
+
 function compactMessagesToSummary(messages, options = {}) {
   if (!Array.isArray(messages) || messages.length === 0) return { applied: false, removed: 0 };
-  const keepCount = Number(options.keepCount) || Number(process.env.AGENT_AUTO_COMPACT_KEEP) || 12;
+  const { keepCount } = getAutoCompactPolicy(options);
   if (messages.length <= keepCount + 2) return { applied: false, removed: 0 };
 
   const toCompact = messages.slice(1, messages.length - keepCount);
@@ -2610,12 +2643,11 @@ async function runAgentLoop(objective, context, options = {}) {
         break;
       }
 
-      // Auto-compact context if too large (LLM should also call context_snip explicitly)
-      const AUTO_COMPACT_LIMIT = Number(process.env.AGENT_AUTO_COMPACT_LIMIT) || 80;
-      if (messages.length > AUTO_COMPACT_LIMIT) {
+      const autoCompact = shouldAutoCompactMessages(messages);
+      if (autoCompact.shouldCompact) {
         const compacted = compactMessagesToSummary(messages);
         if (compacted.applied) {
-          logger.info(`[AgentLoop] Auto-compacted ${compacted.removed} messages into durable summary. New length: ${messages.length}`);
+          logger.info(`[AgentLoop] Auto-compacted ${compacted.removed} messages into durable summary (${autoCompact.reason}, chars=${autoCompact.charCount}). New length: ${messages.length}`);
         }
       }
 
@@ -3969,11 +4001,10 @@ function bulkNudgeFor(lastN) {
   return null;
 }
 
-// Mirror of runAgentLoop's auto-compaction (2006-2051), operating on state.messages.
 function autoCompactMessages(state) {
   const messages = state.messages;
-  const AUTO_COMPACT_LIMIT = Number(process.env.AGENT_AUTO_COMPACT_LIMIT) || 80;
-  if (messages.length <= AUTO_COMPACT_LIMIT) return;
+  const autoCompact = shouldAutoCompactMessages(messages);
+  if (!autoCompact.shouldCompact) return;
   compactMessagesToSummary(messages);
 }
 
@@ -4507,5 +4538,7 @@ module.exports = {
   formatToolResultForMessages,
   trimDeepArrays,
   compactMessagesToSummary,
+  shouldAutoCompactMessages,
+  messageCharCount,
   detectScalarTextFloodFill
 };
