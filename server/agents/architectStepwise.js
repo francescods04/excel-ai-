@@ -211,6 +211,59 @@ function hasDeterministicActions(slice) {
   return Array.isArray(slice?.actions) && slice.actions.length > 0;
 }
 
+// When a deterministic slice's pre-baked actions get rejected at execution
+// time ("no valid writes", flood-fill rejection on copyToRange, banned param,
+// etc.) we used to mark the slice failed and cascade-skip every downstream
+// slice. That kills 70-80% of a 10-slice blueprint on ONE bad architect
+// action. Instead, swap the deterministic agent for a legacy LLM worker with
+// the same scope + instructions, plus a corrective preface that quotes the
+// rejection so the worker fixes the failure mode rather than repeating it.
+function recoverDeterministicSliceAsLLMWorker(state, slice, context, originalError, onEvent) {
+  try {
+    const userObjective = context.userObjective || context.objective || '';
+    const sliceTier = slice.tier === 'flash' ? 'flash' : 'pro';
+    const slicePrompt = buildSliceWorkerPrompt(slice, state.blueprint, userObjective);
+    const sliceObjective = `${slice.title}\n\n${slice.instructions || ''}`;
+    const workerContext = { ...context, _sliceId: slice.id, _sliceScope: slice.scope };
+    const workerState = initAgentRun(sliceObjective, workerContext, {
+      promptVariant: sliceTier === 'pro' ? 'default' : 'fast',
+      modelOverride: sliceTier === 'pro' ? PRO_MODEL : undefined,
+      maxIterations: Math.min(SLICE_HARD_ITER_CAP, Math.max(20, Math.ceil(Number(slice.estimated_iters || 10) * 2.5))),
+      autoFormatOnDone: false,
+      disabledTools: ['execute_office_js'],
+      systemPromptAddendum: slicePrompt
+    });
+    if (workerState && Array.isArray(workerState.messages)) {
+      workerState.messages.push({
+        role: 'user',
+        content: [
+          `DETERMINISTIC SLICE RECOVERY: the architect pre-baked ${slice.actions ? slice.actions.length : 0} tool call(s) for this slice but the executor rejected them. You are taking over from the architect — read what's already on the sheets if useful, then emit corrected writes via the structured tools (bulk_set_cell_ranges with copyToRange for dense schedules, bulk_set_format for styling).`,
+          `Do NOT replay the architect's broken JSON verbatim — diagnose the rejection below and write something that passes validation.`,
+          ``,
+          `ORIGINAL EXECUTOR ERROR: ${originalError}`,
+          ``,
+          `ARCHITECT INTENT (slice instructions): ${slice.instructions || '(none provided)'}`
+        ].join('\n')
+      });
+    }
+    state.sliceAgents[slice.id] = workerState;
+    state.sliceStates[slice.id] = 'running';
+    if (!state.metrics) state.metrics = {};
+    state.metrics.deterministicRecoveries = Number(state.metrics.deterministicRecoveries || 0) + 1;
+    onEvent('sliceStarted', {
+      sliceId: slice.id,
+      title: slice.title,
+      estimatedIters: slice.estimated_iters,
+      tier: sliceTier,
+      recovery: true,
+      recoveryReason: originalError
+    });
+    return true;
+  } catch (initErr) {
+    return false;
+  }
+}
+
 async function materializeDeterministicSliceActions(slice, context = {}) {
   const actions = [];
   const toolResults = [];
@@ -497,12 +550,17 @@ async function advanceRunningSlices(state, {
         elapsedMs: null
       });
     } catch (err) {
+      const errorMessage = err && err.message ? err.message : String(err);
+      const slice = sliceById(state, sliceId) || { id: sliceId, title: sliceId, actions: [] };
+      const recovered = recoverDeterministicSliceAsLLMWorker(state, slice, context, errorMessage, onEvent);
+      if (recovered) continue;
+
       state.sliceStates[sliceId] = 'failed';
       state.sliceResults[sliceId] = {
         ok: false,
         status: 'deterministic_action_failed',
         deterministic: true,
-        error: err && err.message ? err.message : String(err),
+        error: errorMessage,
         iteration: 0
       };
       delete state.sliceAgents[sliceId];
