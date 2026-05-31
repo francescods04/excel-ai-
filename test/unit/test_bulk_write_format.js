@@ -49,12 +49,12 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     console.log('OK bulk_set_cell_ranges surfaces per-entry errors and continues');
   }
 
-  // 3) Over-cap (>16) rejected
+  // 3) Over-cap (>32) rejected
   {
-    const writes = Array.from({ length: 17 }, () => ({ sheet: 'X', cells: { A1: { value: 1 } } }));
+    const writes = Array.from({ length: 33 }, () => ({ sheet: 'X', cells: { A1: { value: 1 } } }));
     const r = await executeAgentTool('bulk_set_cell_ranges', { writes }, { messages: [], iteration: 0 }, null);
-    assert.match(r.error, /max 16/);
-    console.log('OK bulk_set_cell_ranges enforces max 16 writes');
+    assert.match(r.error, /max 32/);
+    console.log('OK bulk_set_cell_ranges enforces max 32 writes');
   }
 
   // 4) Empty / missing -> soft error

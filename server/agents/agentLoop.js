@@ -437,6 +437,67 @@ function stripMsgId(content) {
   return String(content).replace(/^\[id:[a-z0-9]{6}\]\s*/, '');
 }
 
+function compactMessagesToSummary(messages, options = {}) {
+  if (!Array.isArray(messages) || messages.length === 0) return { applied: false, removed: 0 };
+  const keepCount = Number(options.keepCount) || Number(process.env.AGENT_AUTO_COMPACT_KEEP) || 12;
+  if (messages.length <= keepCount + 2) return { applied: false, removed: 0 };
+
+  const toCompact = messages.slice(1, messages.length - keepCount);
+  if (toCompact.length === 0) return { applied: false, removed: 0 };
+
+  const compacted = toCompact.filter(m => {
+    const content = stripMsgId(m.content || '');
+    if (m.role === 'assistant') {
+      try {
+        const parsed = JSON.parse(content);
+        return parsed.tool && !['done', 'todo_write', 'context_snip'].includes(parsed.tool);
+      } catch (_) {
+        return content.length > 50;
+      }
+    }
+    if (m.role !== 'user') return false;
+    if (content.startsWith('Tool result')) return false;
+    if (content.startsWith('CONVERSATION SUMMARY')) return false;
+    if (content.startsWith('[snipped:')) return false;
+    return content.trim().length > 0;
+  });
+
+  const compactLines = compacted.map(m => {
+    const content = stripMsgId(m.content || '');
+    if (m.role === 'assistant') {
+      try {
+        const parsed = JSON.parse(content);
+        const tool = parsed.tool || parsed.action || 'step';
+        const thought = parsed.thought || parsed.reasoning || '';
+        return `[${tool}] ${String(thought).slice(0, 120)}`;
+      } catch (_) {
+        return content.slice(0, 120);
+      }
+    }
+    if (content.startsWith('AUTO-COMPACTED HISTORY')) {
+      return `Previous ${content.slice(0, 1200)}`;
+    }
+    return content.slice(0, 160);
+  }).filter(Boolean);
+
+  if (compactLines.length === 0) return { applied: false, removed: 0 };
+
+  const summary = [
+    `AUTO-COMPACTED HISTORY (${toCompact.length} msgs):`,
+    compactLines.join('\n').slice(0, 4000),
+    '',
+    'Continue from where you left off. The compacted notes above are durable in this message history; do not rely on retrieve_snipped for auto-compacted content.'
+  ].join('\n');
+  const newMessages = [
+    messages[0],
+    makeUserMessage(summary),
+    ...messages.slice(messages.length - keepCount)
+  ];
+  messages.length = 0;
+  messages.push(...newMessages);
+  return { applied: true, removed: toCompact.length };
+}
+
 /* ---------- Snipped content store (global, per-process) ---------- */
 const snippedStore = new Map(); // key: "from_id:to_id" -> { summary, content, timestamp }
 const MAX_SNIP_AGE_MS = 30 * 60 * 1000; // 30 min
@@ -2202,6 +2263,9 @@ async function runAgentLoop(objective, context, options = {}) {
         messages.push(makeUserMessage(
           `Your previous response was not valid JSON (${llmResult.jsonError}). Reply with ONLY a single JSON object {"thought","tool","params"} — no extra text, no trailing characters. Continue the task from where you left off.`
         ));
+        if (parseFailureStreak <= 2) {
+          iteration = Math.max(0, iteration - 1);
+        }
         continue;
       }
       parseFailureStreak = 0;
@@ -2549,47 +2613,9 @@ async function runAgentLoop(objective, context, options = {}) {
       // Auto-compact context if too large (LLM should also call context_snip explicitly)
       const AUTO_COMPACT_LIMIT = Number(process.env.AGENT_AUTO_COMPACT_LIMIT) || 80;
       if (messages.length > AUTO_COMPACT_LIMIT) {
-        const keepCount = Number(process.env.AGENT_AUTO_COMPACT_KEEP) || 12;
-        const toCompact = messages.slice(1, messages.length - keepCount);
-        // Find first and last user message IDs in the range for snipContext
-        const userMsgs = toCompact.filter(m => m.role === 'user');
-        let snipApplied = false;
-        if (userMsgs.length >= 2) {
-          const firstId = extractMsgId(userMsgs[0].content);
-          const lastId = extractMsgId(userMsgs[userMsgs.length - 1].content);
-          if (firstId && lastId) {
-            const snipResult = snipContext(messages, firstId, lastId, 'Auto-compacted history');
-            if (snipResult.ok) {
-              logger.info(`[AgentLoop] Auto-snipped ${snipResult.removed} messages (${firstId}..${lastId}). New length: ${messages.length}`);
-              snipApplied = true;
-            }
-          }
-        }
-        // Fallback to old text summary if snipContext failed
-        if (!snipApplied) {
-          const compacted = toCompact.filter(m => {
-            if (m.role === 'assistant') {
-              try { const p = JSON.parse(m.content); return p.tool && !['done','todo_write','context_snip'].includes(p.tool); }
-              catch (_) { return m.content.length > 50; }
-            }
-            return m.role === 'user' && !m.content.startsWith('Tool result') && !m.content.startsWith('CONVERSATION SUMMARY');
-          });
-          const compactLines = compacted.map(m => {
-            if (m.role === 'assistant') {
-              try { const p = JSON.parse(m.content); return `[${p.tool}] ${(p.thought||'').slice(0,100)}`; }
-              catch (_) { return m.content.slice(0,100); }
-            }
-            return m.content.slice(0,100);
-          });
-          if (compactLines.length > 0) {
-            const summary = 'AUTO-COMPACTED HISTORY (' + toCompact.length + ' msgs):\n' + compactLines.join('\n').slice(0, 3000);
-            const newMsgs = [messages[0]];
-            newMsgs.push(makeUserMessage(summary + '\n\nContinue from where you left off.'));
-            newMsgs.push(...messages.slice(messages.length - keepCount));
-            messages.length = 0;
-            messages.push(...newMsgs);
-            logger.info(`[AgentLoop] Auto-compacted ${toCompact.length} messages. New length: ${messages.length}`);
-          }
+        const compacted = compactMessagesToSummary(messages);
+        if (compacted.applied) {
+          logger.info(`[AgentLoop] Auto-compacted ${compacted.removed} messages into durable summary. New length: ${messages.length}`);
         }
       }
 
@@ -3948,38 +3974,7 @@ function autoCompactMessages(state) {
   const messages = state.messages;
   const AUTO_COMPACT_LIMIT = Number(process.env.AGENT_AUTO_COMPACT_LIMIT) || 80;
   if (messages.length <= AUTO_COMPACT_LIMIT) return;
-  const keepCount = Number(process.env.AGENT_AUTO_COMPACT_KEEP) || 12;
-  const toCompact = messages.slice(1, messages.length - keepCount);
-  const userMsgs = toCompact.filter(m => m.role === 'user');
-  let snipApplied = false;
-  if (userMsgs.length >= 2) {
-    const firstId = extractMsgId(userMsgs[0].content);
-    const lastId = extractMsgId(userMsgs[userMsgs.length - 1].content);
-    if (firstId && lastId) {
-      const snipResult = snipContext(messages, firstId, lastId, 'Auto-compacted history');
-      if (snipResult.ok) snipApplied = true;
-    }
-  }
-  if (snipApplied) return;
-  const compacted = toCompact.filter(m => {
-    if (m.role === 'assistant') {
-      try { const p = JSON.parse(m.content); return p.tool && !['done', 'todo_write', 'context_snip'].includes(p.tool); }
-      catch (_) { return m.content.length > 50; }
-    }
-    return m.role === 'user' && !m.content.startsWith('Tool result') && !m.content.startsWith('CONVERSATION SUMMARY');
-  });
-  const compactLines = compacted.map(m => {
-    if (m.role === 'assistant') {
-      try { const p = JSON.parse(m.content); return `[${p.tool}] ${(p.thought || '').slice(0, 100)}`; }
-      catch (_) { return m.content.slice(0, 100); }
-    }
-    return m.content.slice(0, 100);
-  });
-  if (compactLines.length === 0) return;
-  const summary = 'AUTO-COMPACTED HISTORY (' + toCompact.length + ' msgs):\n' + compactLines.join('\n').slice(0, 3000);
-  const newMsgs = [messages[0], makeUserMessage(summary + '\n\nContinue from where you left off.'), ...messages.slice(messages.length - keepCount)];
-  messages.length = 0;
-  messages.push(...newMsgs);
+  compactMessagesToSummary(messages);
 }
 
 async function callStepLLM(state, deps) {
@@ -4511,5 +4506,6 @@ module.exports = {
   executeAgentTool,
   formatToolResultForMessages,
   trimDeepArrays,
+  compactMessagesToSummary,
   detectScalarTextFloodFill
 };

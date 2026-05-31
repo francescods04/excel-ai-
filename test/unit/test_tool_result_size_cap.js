@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { formatToolResultForMessages, trimDeepArrays } = require('../../server/agents/agentLoop.js');
+const { formatToolResultForMessages, trimDeepArrays, compactMessagesToSummary } = require('../../server/agents/agentLoop.js');
 
 (function main() {
   // 1) Small result -> indented JSON, no truncation marker
@@ -61,6 +61,41 @@ const { formatToolResultForMessages, trimDeepArrays } = require('../../server/ag
     const out = formatToolResultForMessages(obj, 'circular', { maxChars: 500 });
     assert.ok(typeof out === 'string' && out.length > 0, 'returns a string instead of throwing');
     console.log('OK circular references degrade gracefully');
+  }
+
+  // 7) Auto-compaction keeps a durable semantic summary, not a process-local snip placeholder
+  {
+    const messages = [
+      { role: 'system', content: 'system prompt' },
+      { role: 'user', content: '[id:aaaaaa] Goal: build long model' },
+      { role: 'assistant', content: JSON.stringify({ thought: 'created assumptions', tool: 'bulk_set_cell_ranges', params: {} }) },
+      { role: 'user', content: '[id:bbbbbb] Tool result for bulk_set_cell_ranges:\n{"ok":true}' },
+      { role: 'assistant', content: JSON.stringify({ thought: 'built revenue schedule', tool: 'bulk_set_cell_ranges', params: {} }) },
+      { role: 'user', content: '[id:cccccc] POST-WRITE CRITIC clean' },
+      { role: 'assistant', content: JSON.stringify({ thought: 'formatted model', tool: 'bulk_set_format', params: {} }) },
+      { role: 'user', content: '[id:dddddd] recent keep 1' },
+      { role: 'user', content: '[id:eeeeee] recent keep 2' }
+    ];
+    const result = compactMessagesToSummary(messages, { keepCount: 2 });
+    assert.strictEqual(result.applied, true, 'compaction applied');
+    assert.ok(messages[1].content.includes('AUTO-COMPACTED HISTORY'), 'summary message inserted');
+    assert.ok(!messages[1].content.includes('[snipped:'), 'no process-local snip placeholder');
+    assert.ok(messages[1].content.includes('created assumptions'), 'assistant progress preserved');
+    assert.ok(messages[1].content.includes('built revenue schedule'), 'later progress preserved');
+    assert.ok(!messages[1].content.includes('Tool result for bulk_set_cell_ranges'), 'tool-result noise omitted');
+    assert.strictEqual(messages[messages.length - 1].content, '[id:eeeeee] recent keep 2');
+
+    messages.push(
+      { role: 'assistant', content: JSON.stringify({ thought: 'added audit checks', tool: 'bulk_set_cell_ranges', params: {} }) },
+      { role: 'user', content: '[id:ffffff] recent keep 3' },
+      { role: 'assistant', content: JSON.stringify({ thought: 'finalized dashboard', tool: 'bulk_set_format', params: {} }) },
+      { role: 'user', content: '[id:gggggg] recent keep 4' }
+    );
+    const second = compactMessagesToSummary(messages, { keepCount: 2 });
+    assert.strictEqual(second.applied, true, 'second compaction applied');
+    assert.ok(messages[1].content.includes('created assumptions'), 'previous summary survives second compaction');
+    assert.ok(messages[1].content.includes('added audit checks'), 'newer progress included in second compaction');
+    console.log('OK auto-compaction writes durable summary and omits tool-result noise');
   }
 
   console.log('\ntool result size cap tests completed.');

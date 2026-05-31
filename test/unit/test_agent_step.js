@@ -103,6 +103,7 @@ function assertSerializable(state, label) {
     const { state: s, control } = await runAgentStep(state, null, deps);
     assert.strictEqual(control, 'continue', 'parse fail → continue');
     assert.strictEqual(s.parseFailureStreak, 1, 'streak incremented');
+    assert.strictEqual(s.iteration, 0, 'first parse failure is refunded');
     console.log('OK parse failure → control=continue (streak=1)');
   }
 
