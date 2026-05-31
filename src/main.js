@@ -785,7 +785,7 @@ async function applyStepActions(actions) {
   enqueueActions(
     { actions, meta: { turnId: state.currentTurnId, taskId: 'agent-loop' } },
     state.excelActionQueue, showActionsPreview, hideActionsPreview,
-    (acts) => execActions(acts, updateStepsPanel)
+    (acts) => execActions(acts, updateStepsPanel), acknowledgeTurnActionBatch
   );
   // Wait for the queue to drain so the next read/iteration sees the writes.
   await waitForPendingExcelActions('step apply');

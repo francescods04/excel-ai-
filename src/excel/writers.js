@@ -790,26 +790,34 @@ async function captureSnapshot(context, targets) {
     const ranges = [];
     for (const t of sheetTargets) {
       const range = worksheet.getRange(t.target);
+      let props = null;
       if (t.isFormat) {
-        range.load('format/fill/color,format/font/color,format/font/bold,numberFormat');
+        props = range.getCellProperties({
+          format: { font: { color: true, bold: true }, fill: { color: true } },
+          numberFormat: true
+        });
       } else {
         range.load('values,formulas');
       }
-      ranges.push({ target: t.target, range, isFormat: t.isFormat });
+      ranges.push({ target: t.target, range, isFormat: t.isFormat, props });
     }
     await context.sync();
 
     for (const r of ranges) {
+      const formatCell = r.isFormat
+        ? (((r.props && r.props.value) || [])[0] || [])[0] || {}
+        : null;
+      const formatInfo = formatCell?.format || {};
       snapshot.entries.push({
         sheet: sheetName === '__default__' ? null : sheetName,
         target: r.target,
         previousValues: r.isFormat ? null : r.range.values,
         previousFormulas: r.isFormat ? null : r.range.formulas,
         previousFormat: r.isFormat ? {
-          fillColor: r.range.format.fill.color,
-          fontColor: r.range.format.font.color,
-          bold: r.range.format.font.bold,
-          numberFormat: r.range.numberFormat
+          fillColor: formatInfo.fill?.color || null,
+          fontColor: formatInfo.font?.color || null,
+          bold: formatInfo.font?.bold,
+          numberFormat: formatCell.numberFormat || null
         } : null
       });
     }
