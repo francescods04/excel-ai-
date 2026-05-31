@@ -142,8 +142,8 @@ const MAX_QUEUE_GROUP_CELLS = MAX_EXCEL_CHUNK_CELLS;
 const BASE_EXCEL_CHUNK_COST = 220;
 const MIN_EXCEL_CHUNK_COST = 90;
 const MAX_EXCEL_CHUNK_COST = 340;
-const SLOW_CHUNK_MS = 700;
-const FAST_CHUNK_MS = 220;
+const SLOW_CHUNK_MS = 5000;
+const FAST_CHUNK_MS = 800;
 const UI_YIELD_MS = 16;
 const MAX_NATIVE_NOTE_ATTEMPTS_PER_BATCH = 8;
 const QUEUE_BATCH_KEY = '__excelQueueBatchKey';
@@ -523,8 +523,7 @@ function recordChunkTiming(durationMs, actions = []) {
 
   if (durationMs > SLOW_CHUNK_MS) {
     addLog(
-      `Chunk Excel lento: ${Math.round(durationMs)}ms, ${actions.length} azioni, ~${estimateBatchCells(actions)} celle. ` +
-      `Prossima finestra ~${adaptiveChunkCostLimit}.`,
+      `Chunk lento: ${Math.round(durationMs / 1000)}s, ${actions.length} azioni, ~${estimateBatchCells(actions)} celle → adatto finestra a ~${adaptiveChunkCostLimit}.`,
       'warn'
     );
   }
@@ -882,30 +881,37 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
   if (!actions || actions.length === 0) return { actionCount: 0, errorCount: 0, errors: [] };
 
   if (_attempt === 0) {
-    const chunks = splitActionsIntoSafeChunks(actions);
-    if (chunks.length > 1) {
-      addLog(`Batch Excel diviso in ${chunks.length} chunk sicuri (${actions.length} azioni).`, 'warn');
-      const aggregate = {
-        actionCount: actions.length,
-        errorCount: 0,
-        errors: []
-      };
-      for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
-        addLog(`Chunk Excel ${i + 1}/${chunks.length}: ${chunk.length} azioni, ~${estimateBatchCells(chunk)} celle, costo ~${Math.round(estimateBatchCost(chunk))}.`);
-        const started = nowMs();
-        const result = await executeActions(chunk, updateStepsPanel, 1);
-        const durationMs = nowMs() - started;
-        recordChunkTiming(durationMs, chunk);
-        const errors = Array.isArray(result?.errors) ? result.errors : [];
-        aggregate.errorCount += Number(result?.errorCount) || errors.length || 0;
-        aggregate.errors.push(...errors);
-        if (i < chunks.length - 1) {
-          await yieldToHost(yieldDelayForChunk(durationMs));
+      const chunks = splitActionsIntoSafeChunks(actions);
+      if (chunks.length > 1) {
+        const aggregate = {
+          actionCount: actions.length,
+          errorCount: 0,
+          errors: []
+        };
+        const totalCells = chunks.reduce((sum, c) => sum + estimateBatchCells(c), 0);
+        let snapshotsTaken = 0;
+        let slowChunks = 0;
+        for (let i = 0; i < chunks.length; i++) {
+          const chunk = chunks[i];
+          const started = nowMs();
+          const result = await executeActions(chunk, updateStepsPanel, 1);
+          const durationMs = nowMs() - started;
+          const prevCost = adaptiveChunkCostLimit;
+          recordChunkTiming(durationMs, chunk);
+          if (adaptiveChunkCostLimit < prevCost) slowChunks++;
+          const errors = Array.isArray(result?.errors) ? result.errors : [];
+          aggregate.errorCount += Number(result?.errorCount) || errors.length || 0;
+          aggregate.errors.push(...errors);
+          if (result && result._snapshotsTaken) snapshotsTaken += result._snapshotsTaken;
+          if (i < chunks.length - 1) {
+            await yieldToHost(yieldDelayForChunk(durationMs));
+          }
         }
+        const slowNote = slowChunks > 0 ? ` (${slowChunks} lenti)` : '';
+        addLog(`Batch Excel: ${actions.length} azioni in ${chunks.length} chunk (~${totalCells} celle)${slowNote}.`);
+        aggregate._snapshotsTaken = snapshotsTaken;
+        return aggregate;
       }
-      return aggregate;
-    }
   }
 
   let focusLost = false;
@@ -1101,9 +1107,7 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
     if (snapshot && snapshot.entries.length > 0) {
       if (!state.undoStack) state.undoStack = [];
       state.undoStack.push(snapshot);
-      // Keep only last 10 snapshots to avoid memory bloat
       if (state.undoStack.length > 10) state.undoStack.shift();
-      addLog(`Snapshot salvato: ${snapshot.entries.length} celle (undo stack: ${state.undoStack.length})`);
     }
 
     // 4. Apply notes in an isolated phase AFTER the data sync. Never lets a bad

@@ -570,6 +570,23 @@ SCALE AND DENSITY (CRITICAL — prior failure mode):
 - Slice count scales with density: <200 rows → 5-8 slices; 200-1000 rows → 8-12 slices; >1000 rows → 10-15 slices with explicit per-period / per-unit detail.
 - When the SCALE TARGETS section below contains a row count, period count, or unit count, you MUST allocate that volume across slices. Half-density blueprints will be rejected downstream as "missed the brief".
 
+CRITICAL — HOW TO ACHIEVE DENSITY (anti-loop pattern):
+- DO NOT enumerate individual rows as separate actions. Writing 1000 rows as 1000 individual JSON cell objects is NOT how you achieve density — it will cause the slice worker to hit max iterations (30 cap) after ~300 rows, fail, and skip every dependent slice. This is a KNOWN FAILURE MODE.
+- INSTEAD, use formula patterns + copyToRange + aggregation:
+  * Cost Breakdown: write 30-50 CATEGORY headers with subtotal formulas (=SUMIF, =SUMPRODUCT referencing a compact data table). Do NOT write 200 individual cost line items as deterministic actions. Leave the detailed line items to the legacy worker IF the user genuinely needs per-item granularity, but set estimated_iters high (15-20) and include instructions like "write 10-15 representative items per category, then summarize with subtotals."
+  * Revenue Schedule: write month/year headers in row 1 and use ONE formula row + copyToRange for the time axis (60 months). Revenue per unit can be =Assumptions!$B$X * units_sold_by_month. Do NOT write 40 individual unit rows with 60 columns each.
+  * Cash Flow: use cross-sheet formulas (=CostBreakdown!B100, =RevenueSchedule!B50). One formula row + copyToRange for the time axis.
+  * Debt Schedule: use Excel PMT/IPMT/PPMT functions. One formula row + copyToRange.
+- A slice that writes 50 well-structured rows with formulas is BETTER than one that writes 300 hardcoded rows and crashes. The formulas compute the remaining detail automatically in Excel.
+- For ANY slice targeting >200 rows, the deterministic actions MUST use copyToRange with formula patterns. If the data is truly unique per row (like a menu), make it a legacy worker slice with estimated_iters ≥ 15.
+
+PARALLELISM MAXIMIZATION:
+- The DAG should maximize wave parallelism. A blueprint where every slice depends only on assumptions (root slice) is valid and FASTER than a deep sequential chain.
+- Cost breakdown, revenue schedule, and financing schedule can ALL run in parallel in wave 2 (all depend only on assumptions). They do NOT depend on each other.
+- Cash flow depends on cost+revenue+financing → wave 3. Valuation depends on cash flow → wave 4. Format at the end.
+- Target: 3-4 waves total, not 6-7. Every extra wave adds a client round-trip and Vercel cold-start latency.
+- When in doubt, remove a dependency. Two slices that both read Assumptions but don't write to each other's sheets are INDEPENDENT — put them in the same wave.
+
 FORMULAS AND CELL MAPS:
 - The architect is the single source of truth for cell addresses. Every formula written in actions[] must be a literal Excel formula string.
 - Every cross-sheet reference in actions[] must exactly match a sheet declared in scope.sheets_owned, scope.may_read_from, or bulk_create_sheets.names. Never use shortened aliases: if the sheet is "Cash Flow - Single Location", formulas must use ='Cash Flow - Single Location'!B5, not =Cash Flow!B5.
