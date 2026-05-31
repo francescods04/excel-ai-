@@ -158,6 +158,8 @@ async function test_worker_receives_slice_prompt() {
 }
 
 async function test_pro_tier_routes_to_pro_model() {
+  // Tier default is now 'pro' (build slices). 'flash' must be explicit and is
+  // reserved for format_and_verify-style deterministic passes.
   const received = {};
   async function spy(objective, context, opts) {
     const sliceId = (opts.systemPromptAddendum.match(/SLICE: (\S+)/) || [])[1];
@@ -169,15 +171,15 @@ async function test_pro_tier_routes_to_pro_model() {
     global_layout_notes: 'none',
     slices: [
       { id: 'build', title: 'Build', deps: [], scope: { sheets_owned: ['S1'], may_read_from: [] }, instructions: 'x', estimated_iters: 5 },
-      { id: 'audit', title: 'Audit', deps: ['build'], scope: { sheets_owned: [], may_read_from: ['S1'] }, instructions: 'x', estimated_iters: 5, tier: 'pro' }
+      { id: 'format', title: 'Format', deps: ['build'], scope: { sheets_owned: [], may_read_from: ['S1'] }, instructions: 'x', estimated_iters: 5, tier: 'flash' }
     ]
   }).blueprint;
   await runParallelBlueprint({ blueprint: bp, turnId: 't1', context: {}, runAgentLoopFn: spy, maxParallel: 2 });
-  assert.strictEqual(received.build.modelOverride, undefined, 'flash worker must not override model');
-  assert.strictEqual(received.build.promptVariant, 'fast', 'flash worker uses fast variant');
-  assert.ok(received.audit.modelOverride && /pro/.test(received.audit.modelOverride), `pro slice should route to a pro model, got ${received.audit.modelOverride}`);
-  assert.strictEqual(received.audit.promptVariant, 'default', 'pro slice uses default variant');
-  console.log('  ✓ tier:pro routes worker to pro model, flash stays fast');
+  assert.ok(received.build.modelOverride && /pro/.test(received.build.modelOverride), `default-tier build slice should route to pro, got ${received.build.modelOverride}`);
+  assert.strictEqual(received.build.promptVariant, 'default', 'pro slice uses default variant');
+  assert.strictEqual(received.format.modelOverride, undefined, 'flash worker must not override model');
+  assert.strictEqual(received.format.promptVariant, 'fast', 'flash worker uses fast variant');
+  console.log('  ✓ default tier=pro for build, explicit flash for format');
 }
 
 (async () => {

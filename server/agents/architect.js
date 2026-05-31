@@ -27,7 +27,7 @@ KEY PRINCIPLES:
 - Slices should be COHERENT units of work (e.g., "build the Assumptions sheet", "build IS revenue & EBITDA rows", "build Debt Schedule"), not micro-steps.
 - Cross-sheet circular dependencies (e.g., LBO Debt Schedule ↔ IS Interest ↔ Cash Flow) cannot be parallelized — put them in the same sequential slice, OR split into an explicit first-pass and a second-pass slice.
 - ALWAYS end with a dedicated final slice (id like "format_and_verify", deps = ALL other slices) that runs alone in the LAST wave. It chooses formatting from the user's request and the workbook structure created by previous slices, applies it across every sheet with explicit bulk_set_format actions, adds notes to assumption/input cells (bulk_set_notes), then verifies with read_format_summary and issues at most ONE targeted repair batch. Formatting and notes belong in THIS final wave — do NOT interleave them into data-build slices (it slows workers and risks write conflicts). Because it runs alone, this slice may list ALL sheets in sheets_owned.
-- MODEL TIER: set "tier":"flash" for every build and formatting worker (fast — this is the default). Use "tier":"pro" ONLY for a final audit/verification slice that needs deep cross-checking. Routine formatting is flash. Most blueprints are flash for everything.
+- MODEL TIER: set "tier":"pro" for every BUILD slice (Assumptions, Revenue, COGS, OpEx, P&L, Cash Flow, Balance Sheet, any data/formula slice). Build workers reason over long prompts + upstream layouts and need the pro model for reliable formula placement and bulk batching. Use "tier":"flash" ONLY for the final format_and_verify slice (formatting + notes + one read-back pass — deterministic work, flash is fast enough). If you omit tier, the default is pro.
 
 CANONICAL ASSUMPTIONS LAYOUT (mandatory — schema ambiguity has cascade-killed every multi-sheet run that didn't follow this):
 - The Assumptions slice MUST output a flat 2-column table: column A = driver label (string), column B = driver value (number or %). No "Unit" column, no "Section" column. One driver per row, grouped by blank rows between sections (Section headers go in column A only with no value in B).
@@ -205,7 +205,10 @@ function validateBlueprint(raw) {
     const rangesOwned = Array.isArray(scope.ranges_owned) ? scope.ranges_owned.map(String) : [];
     const mayReadFrom = Array.isArray(scope.may_read_from) ? scope.may_read_from.map(String) : [];
     const estIters = Number(s.estimated_iters);
-    const tier = s.tier === 'pro' ? 'pro' : 'flash';
+    // Default tier is now 'pro'. Flash is opt-in (typically only format_and_verify).
+    // Build slices have long prompts + multi-step reasoning over upstream layouts;
+    // flash collapses on them (see 5 bandaid commits on 2026-05-30).
+    const tier = s.tier === 'flash' ? 'flash' : 'pro';
 
     normalizedSlices.push({
       id: s.id,

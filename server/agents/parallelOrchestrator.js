@@ -91,7 +91,7 @@ async function runParallelBlueprint({
     const slice = sliceMap.get(sliceId);
     state.set(sliceId, 'running');
     startedAt.set(sliceId, Date.now());
-    const sliceTier = slice.tier === 'pro' ? 'pro' : 'flash';
+    const sliceTier = slice.tier === 'flash' ? 'flash' : 'pro';
     onEvent('sliceStarted', { sliceId, title: slice.title, estimatedIters: slice.estimated_iters, tier: sliceTier });
     logger.info(`[Orchestrator] slice "${sliceId}" started (${slice.title}) [tier=${sliceTier}]`);
 
@@ -101,7 +101,7 @@ async function runParallelBlueprint({
       // Build a derived context the worker can use. Don't mutate the parent context.
       const workerContext = { ...context, _sliceId: sliceId, _sliceScope: slice.scope };
 
-      const tier = slice.tier === 'pro' ? 'pro' : 'flash';
+      const tier = slice.tier === 'flash' ? 'flash' : 'pro';
       const workerOpts = {
         turnId,
         promptVariant: tier === 'pro' ? 'default' : 'fast',
@@ -321,7 +321,7 @@ async function stepBlueprintWave(state, {
 
   const promises = toLaunch.map(sliceId => {
     const slice = sliceMap.get(sliceId);
-    const sliceTier = slice.tier === 'pro' ? 'pro' : 'flash';
+    const sliceTier = slice.tier === 'flash' ? 'flash' : 'pro';
     state.sliceStates[sliceId] = 'running';
     const startedAt = Date.now();
     onEvent('sliceStarted', {

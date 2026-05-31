@@ -218,7 +218,7 @@ function initReadySlices(state, {
   onEvent('waveStarted', { waveIndex: state.roundIndex, sliceIds: toStart.map(s => s.id) });
 
   for (const slice of toStart) {
-    const sliceTier = slice.tier === 'pro' ? 'pro' : 'flash';
+    const sliceTier = slice.tier === 'flash' ? 'flash' : 'pro';
     const slicePrompt = buildSliceWorkerPrompt(slice, state.blueprint);
     const sliceObjective = `${slice.title}\n\n${slice.instructions}`;
     const workerContext = { ...context, _sliceId: slice.id, _sliceScope: slice.scope };
