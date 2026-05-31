@@ -1089,6 +1089,11 @@ function openTurnEventStream(turnId, planMsgId) {
 
     src.addEventListener('log', (e) => {
       try {
+        // Suppress log re-emission during SSE history replay (post Vercel
+        // 5-min SSE reconnect). The log entries were already shown the first
+        // time around — replaying them spams the execution log with duplicate
+        // "[slice X] avviato/completato" lines for work that already finished.
+        if (inReplay) return;
         const data = JSON.parse(e.data);
         addLog(data.message, data.level);
       } catch (err) {}
