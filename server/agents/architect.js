@@ -291,6 +291,183 @@ function validateDeterministicFormulaReferences(slices, context = {}) {
   return errors;
 }
 
+function normalizeFactText(value) {
+  return String(value || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[’‘]/g, "'")
+    .replace(/[“”]/g, '"')
+    .toLowerCase()
+    .replace(/[^a-z0-9+&.'/%\s-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function parseEuroPrice(raw) {
+  if (raw == null) return null;
+  const cleaned = String(raw).replace(/[^\d,.-]/g, '').replace(',', '.');
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : null;
+}
+
+function cleanMenuItemName(prefix) {
+  let name = String(prefix || '').replace(/\s+/g, ' ').trim();
+  const categorySplit = name.split(/(?:🍟|🍔|🥪|🌭|🌱|🍰|🥤|⚠️|Starters|Burger & Smash|Sandwiches|Hot Dogs|Beyond Meat(?: \(Plant Based\))?|Sides|Sweets & Milkshakes|Dolci|Milkshakes|Drinks)/i);
+  name = categorySplit[categorySplit.length - 1].trim();
+  const menuTitleSplit = name.split(/\bMenu\b/i);
+  name = menuTitleSplit[menuTitleSplit.length - 1].trim();
+  const sentenceSplit = name.split(/\.\s+(?=[A-ZÀ-Ý0-9])/);
+  name = sentenceSplit[sentenceSplit.length - 1].trim();
+  const priorPriceSplit = name.split(/€\s*/);
+  name = priorPriceSplit[priorPriceSplit.length - 1].trim();
+  name = name
+    .replace(/^(?:I prezzi sono indicati.*?|Prezzo fisso:?|Menu non disponibile\)?|Extra \/ Top:?)\s*/i, '')
+    .replace(/\((?:Menu non disponibile|Plant Based)\)\s*$/i, '')
+    .replace(/^[^\p{L}\p{N}+]+/u, '')
+    .replace(/[^\p{L}\p{N}+&.'’‘/\s-]+$/u, '')
+    .trim();
+  return name;
+}
+
+function extractVerbatimMenuFacts(objective) {
+  const text = String(objective || '');
+  if (!/[€]|menu|burger|fast food/i.test(text)) return [];
+  const facts = [];
+  const seen = new Set();
+  const pricePattern = /[—–-]\s*(\+?\d{1,3}(?:[,.]\d{2})?)\s*€/g;
+  let match;
+  let boundary = 0;
+  while ((match = pricePattern.exec(text))) {
+    const prefix = text.slice(boundary, match.index);
+    const name = cleanMenuItemName(prefix);
+    if (!name || name.length < 2 || name.length > 48) continue;
+    if (/^(?:m|menu|singola|prezzo fisso)$/i.test(name)) continue;
+    const basePrice = parseEuroPrice(match[1]);
+    if (basePrice == null) continue;
+    const after = text.slice(pricePattern.lastIndex, pricePattern.lastIndex + 40);
+    const menuMatch = after.match(/^\s*\|\s*M\s*(\d{1,3}(?:[,.]\d{2})?)\s*€/i);
+    const menuPrice = menuMatch ? parseEuroPrice(menuMatch[1]) : null;
+    boundary = pricePattern.lastIndex + (menuMatch ? menuMatch[0].length : 0);
+    pricePattern.lastIndex = boundary;
+    const key = `${normalizeFactText(name)}|${basePrice}|${menuPrice == null ? '' : menuPrice}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    facts.push({
+      name,
+      basePrice,
+      menuPrice,
+      basePriceText: match[1],
+      menuPriceText: menuMatch ? menuMatch[1] : null
+    });
+  }
+
+  const fixedMilkshake = text.match(/Milkshakes\s+Prezzo\s+fisso:\s*(\d{1,3}(?:[,.]\d{2})?)\s*€/i);
+  if (fixedMilkshake) {
+    const basePrice = parseEuroPrice(fixedMilkshake[1]);
+    const key = `milkshakes|${basePrice}`;
+    if (basePrice != null && !seen.has(key)) {
+      facts.push({
+        name: 'Milkshakes',
+        basePrice,
+        menuPrice: null,
+        basePriceText: fixedMilkshake[1],
+        menuPriceText: null
+      });
+    }
+  }
+  return facts.slice(0, 80);
+}
+
+function collectActionLiteralCorpus(slices) {
+  const textParts = [];
+  const numbers = [];
+  function addValue(value) {
+    if (value == null) return;
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      numbers.push(value);
+      textParts.push(String(value));
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach(addValue);
+      return;
+    }
+    if (typeof value === 'object') {
+      textParts.push(JSON.stringify(value));
+      return;
+    }
+    const str = String(value);
+    textParts.push(str);
+    const matches = str.match(/\+?\d{1,3}(?:[,.]\d{1,2})?/g) || [];
+    for (const m of matches) {
+      const n = parseEuroPrice(m);
+      if (n != null) numbers.push(n);
+    }
+  }
+  for (const slice of slices || []) {
+    textParts.push(slice.title || '', slice.instructions || '');
+    for (const action of slice.actions || []) {
+      textParts.push(action.tool || '');
+      const p = action.params || {};
+      if (action.tool === 'bulk_create_sheets') (p.names || []).forEach(addValue);
+      if (action.tool === 'set_cell_range') {
+        addValue(p.sheet);
+        for (const [addr, spec] of Object.entries(p.cells || {})) {
+          addValue(addr);
+          addValue(spec?.value);
+          addValue(spec?.formula);
+          addValue(spec?.note);
+        }
+      }
+      if (action.tool === 'bulk_set_cell_ranges') {
+        for (const write of p.writes || []) {
+          addValue(write.sheet);
+          for (const [addr, spec] of Object.entries(write.cells || {})) {
+            addValue(addr);
+            addValue(spec?.value);
+            addValue(spec?.formula);
+            addValue(spec?.note);
+          }
+        }
+      }
+      if (action.tool === 'bulk_set_notes') {
+        for (const note of p.notes || []) {
+          addValue(note.sheet);
+          addValue(note.cell || note.addr);
+          addValue(note.note || note.text);
+        }
+      }
+    }
+  }
+  return { text: normalizeFactText(textParts.join(' ')), numbers };
+}
+
+function hasApproxNumber(numbers, expected) {
+  return numbers.some(n => Math.abs(Number(n) - Number(expected)) < 0.005);
+}
+
+function validateVerbatimSourceFacts(slices, context = {}) {
+  const facts = extractVerbatimMenuFacts(context.objective || context.sourceObjective || '');
+  if (facts.length < 5) return [];
+  const corpus = collectActionLiteralCorpus(slices);
+  const missing = [];
+  for (const fact of facts) {
+    const nameOk = corpus.text.includes(normalizeFactText(fact.name));
+    const baseOk = hasApproxNumber(corpus.numbers, fact.basePrice);
+    const menuOk = fact.menuPrice == null || hasApproxNumber(corpus.numbers, fact.menuPrice);
+    if (!nameOk || !baseOk || !menuOk) {
+      const priceBits = [`€${fact.basePriceText}`];
+      if (fact.menuPriceText) priceBits.push(`M €${fact.menuPriceText}`);
+      missing.push(`${fact.name} (${priceBits.join(', ')})`);
+    }
+  }
+  if (missing.length === 0) return [];
+  const preview = missing.slice(0, 12).join('; ');
+  return [
+    `verbatim menu coverage failed: ${missing.length}/${facts.length} menu price item(s) from the user objective are not written in deterministic action literals. Missing: ${preview}`
+  ];
+}
+
 const ARCHITECT_SYSTEM_PROMPT = `You are an architect and deterministic action compiler for Excel workbook builds.
 Given a user objective and current workbook state, produce one BLUEPRINT: a directed acyclic graph (DAG) of slices.
 
@@ -329,6 +506,8 @@ ACTION JSON RULES:
 PRESERVE USER DATA VERBATIM:
 - If the user objective contains domain-specific lists, names, menu items, prices, specific counts, regions, asset categories, or account names, write those exact values in actions cells. Do not invent generic substitutes.
 - If a deterministic slice cannot fit every exact item in actions[], make it legacy and include the full verbatim data in instructions.
+- If the objective contains a restaurant menu with prices, create a dedicated "Menu" or "Menu Detail" sheet and write one row per item with the exact item name, base price, and menu price when present. Revenue can aggregate from that Menu sheet, but category-only summaries are not enough.
+- Never replace the user's menu with invented category mix percentages unless the exact line-item menu is also present in the workbook.
 
 FORMULAS AND CELL MAPS:
 - The architect is the single source of truth for cell addresses. Every formula written in actions[] must be a literal Excel formula string.
@@ -400,6 +579,7 @@ Reply with ONLY the JSON object. No markdown fences. No prose outside JSON.`;
 function buildArchitectUserContent({ objective, context = {}, triage = null }) {
   const sheetNames = (context.workbookSheets || context.allSheets || (context.allSheetsData ? Object.keys(context.allSheetsData) : [])).slice(0, 30);
   const activeSheet = context.activeSheet || 'unknown';
+  const menuFacts = extractVerbatimMenuFacts(objective);
   const sheetSummaries = [];
   if (context.allSheetsData && typeof context.allSheetsData === 'object') {
     for (const [name, data] of Object.entries(context.allSheetsData).slice(0, 8)) {
@@ -417,6 +597,12 @@ function buildArchitectUserContent({ objective, context = {}, triage = null }) {
 
   const lines = [
     `OBJECTIVE: ${String(objective || '').slice(0, 4000)}`,
+    menuFacts.length >= 5 ? [
+      '',
+      'VERBATIM MENU FACTS (hard requirement: write every row into workbook actions; category-only summaries fail validation):',
+      'Item | Base price | Menu price',
+      ...menuFacts.map(f => `${f.name} | ${f.basePriceText} EUR | ${f.menuPriceText ? `${f.menuPriceText} EUR` : ''}`)
+    ].join('\n') : null,
     ``,
     `WORKBOOK STATE:`,
     `- sheets present (${sheetNames.length}): ${sheetNames.join(', ') || '(empty)'}`,
@@ -466,8 +652,38 @@ async function generateBlueprint({ objective, context = {}, triage = null, callL
   if (!parsed) {
     throw new Error('Architect produced unparseable JSON');
   }
-  const validation = validateBlueprint(parsed, { workbookSheets: context.workbookSheets || [] });
+  const validation = validateBlueprint(parsed, { workbookSheets: context.workbookSheets || [], objective });
   if (!validation.ok) {
+    const retryable = validation.errors.some(err => /verbatim menu coverage|formula references sheet/i.test(err));
+    if (retryable) {
+      const repairUserContent = `${userContent}\n\nVALIDATION FAILED. Regenerate the full JSON blueprint fixing these errors:\n- ${validation.errors.join('\n- ')}\n\nFor menu coverage errors, add a deterministic Menu/Menu Detail slice whose actions write every extracted item and price exactly, then build revenue formulas from that sheet.`;
+      let retryRaw;
+      try {
+        retryRaw = await callLLMFn({
+          system: ARCHITECT_SYSTEM_PROMPT,
+          userText: repairUserContent,
+          timeoutMs: ARCHITECT_DEFAULT_TIMEOUT_MS,
+          fallbackTimeoutMs: ARCHITECT_DEFAULT_TIMEOUT_MS,
+          modelOverride: modelOverride || undefined,
+          role: 'architect',
+          label: 'Architect blueprint retry'
+        });
+      } catch (err) {
+        throw new Error(`Architect blueprint validation failed and retry failed: ${validation.errors.join('; ')}; retry error: ${err.message}`);
+      }
+      const retryParsed = extractArchitectJson(retryRaw);
+      if (!retryParsed) throw new Error(`Architect blueprint validation failed and retry produced unparseable JSON: ${validation.errors.join('; ')}`);
+      const retryValidation = validateBlueprint(retryParsed, { workbookSheets: context.workbookSheets || [], objective });
+      if (!retryValidation.ok) {
+        throw new Error(`Architect blueprint validation failed after retry: ${retryValidation.errors.join('; ')}`);
+      }
+      retryValidation.blueprint._meta = {
+        latencyMs: Date.now() - start,
+        model: retryRaw?._model || null,
+        repaired: true
+      };
+      return retryValidation.blueprint;
+    }
     throw new Error(`Architect blueprint validation failed: ${validation.errors.join('; ')}`);
   }
   validation.blueprint._meta = {
@@ -625,6 +841,7 @@ function validateBlueprint(raw, context = {}) {
   if (errors.length) return { ok: false, errors };
 
   errors.push(...validateDeterministicFormulaReferences(normalizedSlices, context));
+  errors.push(...validateVerbatimSourceFacts(normalizedSlices, context));
   if (errors.length) return { ok: false, errors };
 
   return {
@@ -703,5 +920,7 @@ module.exports = {
   validateSliceActions,
   extractFormulaSheetRefs,
   validateDeterministicFormulaReferences,
+  extractVerbatimMenuFacts,
+  validateVerbatimSourceFacts,
   buildSliceWorkerPrompt
 };

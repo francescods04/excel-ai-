@@ -3,6 +3,7 @@ const {
   generateBlueprint,
   validateBlueprint,
   validateSliceActions,
+  extractVerbatimMenuFacts,
   extractArchitectJson,
   buildSliceWorkerPrompt
 } = require('../../server/agents/architect');
@@ -303,6 +304,96 @@ function test_validateBlueprint_rejects_undeclared_formula_sheet_refs() {
   console.log('  ✓ deterministic formula refs to undeclared sheets rejected');
 }
 
+const SAMPLE_MENU_OBJECTIVE = 'MEAT CREW menu: MOCHO’S BITES — 6,90 € CHICKEN TENDERS — 6,90 € L.A. — 14,50 € | M 21,90 € CRISPY — 14,50 € | M 21,90 € PASTRAMI — 19,00 € | M 26,40 € FREE REFILL — 4,50 €';
+
+function test_extractVerbatimMenuFacts_reads_menu_items_and_prices() {
+  const facts = extractVerbatimMenuFacts(SAMPLE_MENU_OBJECTIVE);
+  assert.ok(facts.some(f => f.name === 'MOCHO’S BITES' && f.basePrice === 6.9), 'extracts starter price');
+  assert.ok(facts.some(f => f.name === 'L.A.' && f.basePrice === 14.5 && f.menuPrice === 21.9), 'extracts menu price');
+  assert.ok(facts.some(f => f.name === 'PASTRAMI' && f.menuPrice === 26.4), 'extracts sandwich menu price');
+  console.log('  ✓ menu fact extractor reads verbatim items and prices');
+}
+
+function test_validateBlueprint_rejects_menu_category_summary_without_line_items() {
+  const blueprint = {
+    slices: [
+      {
+        id: 'revenue',
+        title: 'Revenue',
+        deps: [],
+        scope: { sheets_owned: ['Revenue'], ranges_owned: [], may_read_from: [] },
+        instructions: 'Category revenue summary',
+        actions: [
+          { tool: 'bulk_create_sheets', params: { names: ['Revenue'] } },
+          {
+            tool: 'bulk_set_cell_ranges',
+            params: {
+              writes: [
+                {
+                  sheet: 'Revenue',
+                  cells: {
+                    A1: { value: 'Revenue Breakdown' },
+                    A5: { value: 'Starters' },
+                    A6: { value: 'Burgers' },
+                    B5: { value: 106560 },
+                    B6: { value: 599400 }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  };
+  const r = validateBlueprint(blueprint, { objective: SAMPLE_MENU_OBJECTIVE });
+  assert.ok(!r.ok, 'category-only menu summary should fail verbatim source validation');
+  assert.ok(
+    r.errors.some(e => /verbatim menu coverage failed/i.test(e)),
+    `expected verbatim menu coverage error, got: ${r.errors.join('; ')}`
+  );
+  console.log('  ✓ category-only menu summaries fail source-fidelity validation');
+}
+
+function test_validateBlueprint_accepts_menu_line_item_actions() {
+  const blueprint = {
+    slices: [
+      {
+        id: 'menu',
+        title: 'Menu Detail',
+        deps: [],
+        scope: { sheets_owned: ['Menu'], ranges_owned: [], may_read_from: [] },
+        instructions: 'Write menu line items exactly.',
+        actions: [
+          { tool: 'bulk_create_sheets', params: { names: ['Menu'] } },
+          {
+            tool: 'bulk_set_cell_ranges',
+            params: {
+              writes: [
+                {
+                  sheet: 'Menu',
+                  cells: {
+                    A1: { value: 'Item' }, B1: { value: 'Base Price' }, C1: { value: 'Menu Price' },
+                    A2: { value: 'MOCHO’S BITES' }, B2: { value: 6.9 },
+                    A3: { value: 'CHICKEN TENDERS' }, B3: { value: 6.9 },
+                    A4: { value: 'L.A.' }, B4: { value: 14.5 }, C4: { value: 21.9 },
+                    A5: { value: 'CRISPY' }, B5: { value: 14.5 }, C5: { value: 21.9 },
+                    A6: { value: 'PASTRAMI' }, B6: { value: 19 }, C6: { value: 26.4 },
+                    A7: { value: 'FREE REFILL' }, B7: { value: 4.5 }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  };
+  const r = validateBlueprint(blueprint, { objective: SAMPLE_MENU_OBJECTIVE });
+  assert.ok(r.ok, `expected menu line items to pass source validation, got: ${(r.errors || []).join('; ')}`);
+  console.log('  ✓ menu line-item actions satisfy source-fidelity validation');
+}
+
 function test_validateSliceActions_rejects_extra_action_fields() {
   const r = validateSliceActions('x', [
     { tool: 'bulk_create_sheets', params: { names: ['X'] }, thought: 'hidden prose' }
@@ -374,6 +465,9 @@ function test_buildSliceWorkerPrompt_contains_scope_and_instructions() {
   test_validateBlueprint_rejects_invalid_slice_actions();
   test_validateBlueprint_accepts_declared_formula_sheet_refs();
   test_validateBlueprint_rejects_undeclared_formula_sheet_refs();
+  test_extractVerbatimMenuFacts_reads_menu_items_and_prices();
+  test_validateBlueprint_rejects_menu_category_summary_without_line_items();
+  test_validateBlueprint_accepts_menu_line_item_actions();
   test_validateSliceActions_rejects_extra_action_fields();
   test_extractArchitectJson_handles_fences();
   await test_generateBlueprint_happy_path();
