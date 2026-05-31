@@ -73,7 +73,10 @@ const STAGNATION_WATCH_TOOLS = new Set([
   'get_cell_ranges',
   'build_workbook_graph',
   'execute_office_js',
-  'read_format_summary'
+  'read_format_summary',
+  'delete_sheet',
+  'create_sheet',
+  'bulk_create_sheets'
 ]);
 const STAGNATION_MAX_REPEAT = Math.max(3, Number(process.env.AGENT_STAGNATION_MAX_REPEAT) || 4);
 const STAGNATION_ALT_CYCLES = Math.max(2, Number(process.env.AGENT_STAGNATION_ALT_CYCLES) || 3);
@@ -1728,8 +1731,18 @@ function extractSheetHint(params) {
   if (!params || typeof params !== 'object') return null;
   if (typeof params.sheet === 'string' && params.sheet) return params.sheet;
   if (typeof params.sheetName === 'string' && params.sheetName) return params.sheetName;
+  if (typeof params.name === 'string' && params.name) return params.name;
+  if (Array.isArray(params.names) && params.names.length > 0) return String(params.names[0]);
   if (typeof params.target === 'string' && params.target.includes('!')) {
     return params.target.split('!')[0].replace(/'/g, '');
+  }
+  if (Array.isArray(params.ranges)) {
+    const first = params.ranges.find(r => typeof r === 'string' && r.includes('!'));
+    if (first) return first.split('!')[0].replace(/'/g, '');
+  }
+  if (Array.isArray(params.calls)) {
+    const sheets = params.calls.map(c => c && extractSheetHint(c.params || c)).filter(Boolean);
+    if (sheets.length > 0) return sheets.join(',');
   }
   if (Array.isArray(params.ranges)) {
     const first = params.ranges.find(r => typeof r === 'string' && r.includes('!'));
@@ -1822,6 +1835,30 @@ function detectToolStagnation(trail, maxRepeat = STAGNATION_MAX_REPEAT, altCycle
     }
   }
 
+  // Destructive loop: delete_sheet → create_sheet/bulk_create_sheets for the
+  // same sheet, repeated ≥2 times. Indicates the agent is stuck in a
+  // "delete and start over" cycle instead of fixing the data in place.
+  const destructiveWindow = 8;
+  if (trail.length >= destructiveWindow) {
+    const window = trail.slice(-destructiveWindow);
+    const deleteOps = window.filter(e => e.toolName === 'delete_sheet');
+    if (deleteOps.length >= 2) {
+      const deletedSheets = new Set(deleteOps.map(e => e.sheetHint).filter(Boolean));
+      const createdSheets = new Set(
+        window.filter(e => e.toolName === 'create_sheet' || e.toolName === 'bulk_create_sheets')
+          .map(e => e.sheetHint).filter(Boolean)
+      );
+      const overlapping = [...deletedSheets].filter(s => createdSheets.has(s));
+      if (overlapping.length >= 1) {
+        return {
+          pattern: 'destructive_loop',
+          entries: window,
+          sheet: overlapping[0]
+        };
+      }
+    }
+  }
+
   return null;
 }
 
@@ -1840,6 +1877,9 @@ function formatToolStagnationReason(stagnation) {
   if (stagnation.pattern === 'read_thrash') {
     const tools = stagnation.entries.map(e => e.toolName).join(',');
     return `stagnation_read_thrash:${stagnation.entries.length}_reads_no_write:[${tools}]`;
+  }
+  if (stagnation.pattern === 'destructive_loop') {
+    return `stagnation_destructive_loop:${stagnation.sheet || 'unknown_sheet'}`;
   }
   return `stagnation_${stagnation.pattern}`;
 }
@@ -4177,12 +4217,22 @@ async function finishToolExecution(state, toolName, params, thought, toolResult,
     if (state.stagnationStrikes < 2) {
       const reason = formatToolStagnationReason(stagnation);
       const tools = stagnation.entries.map(e => e.toolName).join(' → ');
-      const nudge = [
-        `STAGNATION DETECTED: ${reason}. You just called the same tool ${stagnation.entries.length} times in a row (${tools}) without making progress.`,
-        `STOP. Do NOT call ${stagnation.entries[stagnation.entries.length - 1].toolName} again with the same parameters.`,
-        `Reset: think about what you actually need to do next. If you were verifying / reading, that's done — make the next WRITE. If you were trying to format, switch to bulk_set_format with explicit ranges. If execute_office_js keeps failing, abandon it and use the structured tools (set_cell_range / bulk_set_cell_ranges / bulk_set_format / get_cell_ranges) which have schema validation.`,
-        `This is your ONE rescue. The next stagnation will abort the run.`
-      ].join('\n');
+      let nudge;
+      if (stagnation.pattern === 'destructive_loop') {
+        nudge = [
+          `STAGNATION DETECTED: ${reason}. You are stuck in a delete → recreate loop on sheet "${stagnation.sheet}". You just deleted and recreated the same sheet multiple times without making progress.`,
+          `STOP. Do NOT delete "${stagnation.sheet}" again. The data is already there — read what you have and fix issues in place with set_cell_range / bulk_set_cell_ranges.`,
+          `If copyToRange is failing, write cells individually or use a formula reference pattern. Do not start over from scratch.`,
+          `This is your ONE rescue. The next stagnation will abort the run.`
+        ].join('\n');
+      } else {
+        nudge = [
+          `STAGNATION DETECTED: ${reason}. You just called the same tool ${stagnation.entries.length} times in a row (${tools}) without making progress.`,
+          `STOP. Do NOT call ${stagnation.entries[stagnation.entries.length - 1].toolName} again with the same parameters.`,
+          `Reset: think about what you actually need to do next. If you were verifying / reading, that's done — make the next WRITE. If you were trying to format, switch to bulk_set_format with explicit ranges. If execute_office_js keeps failing, abandon it and use the structured tools (set_cell_range / bulk_set_cell_ranges / bulk_set_format / get_cell_ranges) which have schema validation.`,
+          `This is your ONE rescue. The next stagnation will abort the run.`
+        ].join('\n');
+      }
       state.messages.push(makeUserMessage(nudge));
       state.recentToolTrail.length = 0;
       state.forceThinkingNext = true;
