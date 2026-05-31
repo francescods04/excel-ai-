@@ -26,11 +26,8 @@ const DEFAULT_MAX_PARALLEL = Number(process.env.PARALLEL_ORCHESTRATOR_MAX || 4);
 // (reserved by the architect for a final audit/verification slice, not routine formatting).
 const PRO_MODEL = process.env.AGENT_LOOP_PRO_MODEL || process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro';
 
-// Per-slice iteration ceiling. Each iteration is ~2-5s, so 12 iter ≈ 60s and
-// gives a wave-of-4 a comfortable margin under Vercel's 300s function cap.
-// Architect-suggested estimated_iters still scales it (max 2x), so smaller
-// slices stay smaller; this only clamps the architect's optimism.
-const SLICE_HARD_ITER_CAP = Number(process.env.SLICE_HARD_ITER_CAP) || 12;
+// Bumped 12 → 30 to match architectStepwise (2026-05-31 Revenue slice cap-hit).
+const SLICE_HARD_ITER_CAP = Number(process.env.SLICE_HARD_ITER_CAP) || 30;
 // Wall-clock budget for an entire wave's Promise.allSettled. If the longest
 // slice in the wave exceeds this, we cut it off and mark every still-running
 // slice as failed_timeout so the wave returns to the client and the next
@@ -107,7 +104,7 @@ async function runParallelBlueprint({
         turnId,
         promptVariant: tier === 'pro' ? 'default' : 'fast',
         modelOverride: tier === 'pro' ? PRO_MODEL : undefined,
-        maxIterations: Math.max(6, Math.min(SLICE_HARD_ITER_CAP, slice.estimated_iters * 2)),
+        maxIterations: Math.min(SLICE_HARD_ITER_CAP, Math.max(20, Math.ceil(Number(slice.estimated_iters || 10) * 2.5))),
         systemPromptAddendum: slicePrompt,
         onEvent: (evt, data) => {
           onEvent('sliceEvent', { sliceId, event: evt, data });

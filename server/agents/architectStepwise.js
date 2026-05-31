@@ -17,12 +17,13 @@ const { buildSliceWorkerPrompt } = require('./architect');
 // and 4 forced them into two sequential LLM batches. Six fits the common 5-7 slice
 // shape in one batch and roughly halves wall-clock time on build-heavy turns.
 const DEFAULT_MAX_PARALLEL = Number(process.env.PARALLEL_ORCHESTRATOR_MAX || 6);
-// Bumped from 12 → 20: the 2026-05-30 fast-food run hit 12 on the P&L slice
-// after 5 sequential set_cell_range calls + 1 blocked execute_office_js attempt,
-// which cascade-failed waves 4-7 (cash flow, balance sheet, scalability, format).
-// 20 gives complex P&L / cash-flow slices room for read-before-write + 8-10
-// structured writes + 1 format pass without starving downstream waves.
-const SLICE_HARD_ITER_CAP = Number(process.env.SLICE_HARD_ITER_CAP) || 20;
+// Bumped 20 → 30: the 2026-05-31 fast-food run #3 had Revenue slice succeed
+// at iter 15 (3 layout-discovery iters + 5 write/rewrite + 1 format + 1 verify)
+// but cap=16 (from estimated_iters=8 * 2) hit before the slice could finish a
+// layout-drift recovery. 30 gives a build slice room for: 1 read upstream, 1
+// re-read if drift, 1 create_sheet, 3-5 writes, 1 format, 1 verify, plus ~5
+// iter cushion for tool param glitches and JSON parse retries.
+const SLICE_HARD_ITER_CAP = Number(process.env.SLICE_HARD_ITER_CAP) || 30;
 const PRO_MODEL = process.env.AGENT_LOOP_PRO_MODEL || process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro';
 
 function initArchitectRun(blueprint) {
@@ -228,7 +229,10 @@ function initReadySlices(state, {
     const workerState = initAgentRunFn(sliceObjective, workerContext, {
       promptVariant: sliceTier === 'pro' ? 'default' : 'fast',
       modelOverride: sliceTier === 'pro' ? PRO_MODEL : undefined,
-      maxIterations: Math.max(6, Math.min(SLICE_HARD_ITER_CAP, Number(slice.estimated_iters || 6) * 2)),
+      // Floor maxIterations at 20 so a slice with low estimated_iters still
+      // gets a usable budget. Cap at SLICE_HARD_ITER_CAP. Multiplier 2.5x to
+      // give layout-discovery + drift recovery + verify some room.
+      maxIterations: Math.min(SLICE_HARD_ITER_CAP, Math.max(20, Math.ceil(Number(slice.estimated_iters || 10) * 2.5))),
       autoFormatOnDone: false,
       // Block execute_office_js for slice workers. In prod logs a single bad JS
       // call would burn 4-6 iters debugging itself (numberFormat 1x1 throws,
