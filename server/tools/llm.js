@@ -171,12 +171,13 @@ function readBooleanEnv(name, defaultValue) {
 const PLANNER_THINKING_DEFAULT = readBooleanEnv('PLANNER_THINKING_ENABLED', false);
 const TRIAGE_THINKING_DEFAULT = readBooleanEnv('TRIAGE_THINKING_ENABLED', false);
 const ARCHITECT_THINKING_DEFAULT = readBooleanEnv('ARCHITECT_THINKING_ENABLED', false);
+const ARCHITECT_MAX_TOKENS = Number(process.env.ARCHITECT_MAX_TOKENS) || 32768;
 
 /* ---------- Role-based routing ---------- */
 const ROLE_CONFIG = {
   planner:            { modelTier: 'flash', thinking: PLANNER_THINKING_DEFAULT, effort: process.env.PLANNER_REASONING_EFFORT || 'medium' },
   triage:             { modelTier: 'flash', thinking: TRIAGE_THINKING_DEFAULT, effort: process.env.TRIAGE_REASONING_EFFORT || 'low' },
-  architect:          { modelTier: 'flash', thinking: ARCHITECT_THINKING_DEFAULT, effort: process.env.ARCHITECT_REASONING_EFFORT || 'medium' },
+  architect:          { modelTier: 'flash', thinking: ARCHITECT_THINKING_DEFAULT, effort: process.env.ARCHITECT_REASONING_EFFORT || 'medium', maxTokens: ARCHITECT_MAX_TOKENS },
   builder_hard:       { modelTier: 'pro',   thinking: true,  effort: 'high' },
   builder_analytical: { modelTier: 'flash', thinking: true,  effort: 'medium' },
   builder_structural: { modelTier: 'flash', thinking: false, effort: null },
@@ -199,6 +200,7 @@ function resolveRoleConfig(role) {
     model: tierToModel(base.modelTier),
     thinkingDisabled: !base.thinking,
     reasoningEffort: base.effort,
+    maxTokens: base.maxTokens || null,
   };
 }
 
@@ -270,8 +272,9 @@ async function callDeepSeek(messages, options = {}) {
   const model = options.model || DEEPSEEK_MODEL;
   const requestTimeoutMs = safeTimeoutMs(options.requestTimeoutMs, 120000);
   const jsonMode = options.jsonMode !== undefined ? options.jsonMode : true;
+  const maxTokens = Number(options.maxTokens) > 0 ? Number(options.maxTokens) : MAX_TOKENS;
 
-  const body = { model, messages, temperature: 0.2, max_tokens: MAX_TOKENS };
+  const body = { model, messages, temperature: 0.2, max_tokens: maxTokens };
   if (jsonMode) body.response_format = { type: 'json_object' };
 
   if (options.thinkingDisabled) {
@@ -354,10 +357,11 @@ async function callOpenRouter(messages, options = {}) {
   const model = options.model || OPENROUTER_MODEL;
   const requestTimeoutMs = safeTimeoutMs(options.requestTimeoutMs, 120000);
   const jsonMode = options.jsonMode !== undefined ? options.jsonMode : true;
+  const maxTokens = Number(options.maxTokens) > 0 ? Number(options.maxTokens) : MAX_TOKENS;
   logger.info(`[LLM] OpenRouter fallback → ${model}`);
   const start = Date.now();
 
-  const body = { model, messages, temperature: 0.2, max_tokens: MAX_TOKENS };
+  const body = { model, messages, temperature: 0.2, max_tokens: maxTokens };
   if (jsonMode) body.response_format = { type: 'json_object' };
 
   try {
@@ -422,17 +426,20 @@ async function callLLM({
   role = null,
   thinkingDisabled = false,
   reasoningEffort = null,
+  maxTokens = null,
   trace = null,
   jsonMode = true,
 }) {
   let effectiveThinkingDisabled = thinkingDisabled;
   let effectiveReasoningEffort = reasoningEffort;
+  let effectiveMaxTokens = maxTokens;
   if (role) {
     const roleCfg = resolveRoleConfig(role);
     if (roleCfg) {
       if (!modelOverride) modelOverride = roleCfg.model;
       effectiveThinkingDisabled = roleCfg.thinkingDisabled;
       effectiveReasoningEffort = roleCfg.reasoningEffort;
+      if (!effectiveMaxTokens && roleCfg.maxTokens) effectiveMaxTokens = roleCfg.maxTokens;
       label = `${label} [role=${role}]`;
     }
   }
@@ -481,8 +488,8 @@ async function callLLM({
     logger.info(`[LLM] ${label} → [${provider}] ${primaryModel}`);
     const response = await withTimeout(
       DEEPSEEK_API_KEY
-        ? callDeepSeek(msgs, { model: primaryModel, requestTimeoutMs: timeoutMs, thinkingDisabled: effectiveThinkingDisabled, reasoningEffort: effectiveReasoningEffort, jsonMode })
-        : callOpenRouter(msgs, { model: OPENROUTER_MODEL, requestTimeoutMs: timeoutMs, jsonMode }),
+        ? callDeepSeek(msgs, { model: primaryModel, requestTimeoutMs: timeoutMs, thinkingDisabled: effectiveThinkingDisabled, reasoningEffort: effectiveReasoningEffort, jsonMode, maxTokens: effectiveMaxTokens })
+        : callOpenRouter(msgs, { model: OPENROUTER_MODEL, requestTimeoutMs: timeoutMs, jsonMode, maxTokens: effectiveMaxTokens }),
       timeoutMs, label
     );
     const elapsed = Date.now() - start;
@@ -576,7 +583,7 @@ async function callLLM({
       logger.info(`[LLM] ${label} retry via OpenRouter → ${OPENROUTER_FALLBACK_MODEL}`);
       const rescueStart = Date.now();
       const rescueResponse = await withTimeout(
-        callOpenRouter(msgs, { model: OPENROUTER_FALLBACK_MODEL || rescueModel, requestTimeoutMs: fallbackTimeoutMs, jsonMode }),
+        callOpenRouter(msgs, { model: OPENROUTER_FALLBACK_MODEL || rescueModel, requestTimeoutMs: fallbackTimeoutMs, jsonMode, maxTokens: effectiveMaxTokens }),
         fallbackTimeoutMs, `${label} fallback`
       );
       const rescueElapsed = Date.now() - rescueStart;
@@ -620,7 +627,7 @@ async function callLLM({
     logger.info(`[LLM] ${label} retry → ${rescueModel}`);
     const rescueStart = Date.now();
     const rescueResponse = await withTimeout(
-      callDeepSeek(msgs, { model: rescueModel, requestTimeoutMs: fallbackTimeoutMs, thinkingDisabled: true, jsonMode }),
+      callDeepSeek(msgs, { model: rescueModel, requestTimeoutMs: fallbackTimeoutMs, thinkingDisabled: true, jsonMode, maxTokens: effectiveMaxTokens }),
       fallbackTimeoutMs, `${label} fallback`
     );
     const rescueElapsed = Date.now() - rescueStart;
@@ -668,8 +675,9 @@ async function callDeepSeekStream(messages, options = {}, onChunk) {
   const model = options.model || DEEPSEEK_MODEL;
   const requestTimeoutMs = safeTimeoutMs(options.requestTimeoutMs, 120000);
   const jsonMode = options.jsonMode !== undefined ? options.jsonMode : true;
+  const maxTokens = Number(options.maxTokens) > 0 ? Number(options.maxTokens) : MAX_TOKENS;
 
-  const body = { model, messages, temperature: 0.2, max_tokens: MAX_TOKENS, stream: true };
+  const body = { model, messages, temperature: 0.2, max_tokens: maxTokens, stream: true };
   if (jsonMode) body.response_format = { type: 'json_object' };
 
   if (options.thinkingDisabled) {
@@ -773,17 +781,20 @@ async function callLLMStreaming({
   role = null,
   thinkingDisabled = false,
   reasoningEffort = null,
+  maxTokens = null,
   trace = null,
   jsonMode = true,
 }) {
   let effectiveThinkingDisabled = thinkingDisabled;
   let effectiveReasoningEffort = reasoningEffort;
+  let effectiveMaxTokens = maxTokens;
   if (role) {
     const roleCfg = resolveRoleConfig(role);
     if (roleCfg) {
       if (!modelOverride) modelOverride = roleCfg.model;
       effectiveThinkingDisabled = roleCfg.thinkingDisabled;
       effectiveReasoningEffort = roleCfg.reasoningEffort;
+      if (!effectiveMaxTokens && roleCfg.maxTokens) effectiveMaxTokens = roleCfg.maxTokens;
       label = `${label} [role=${role}]`;
     }
   }
@@ -837,6 +848,7 @@ async function callLLMStreaming({
       requestTimeoutMs: maxStreamMs,
       thinkingDisabled: effectiveThinkingDisabled,
       reasoningEffort: effectiveReasoningEffort,
+      maxTokens: effectiveMaxTokens,
       jsonMode,
     }, onChunk);
     const elapsed = Date.now() - startedAt;

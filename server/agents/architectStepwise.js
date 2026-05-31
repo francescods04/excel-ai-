@@ -10,7 +10,7 @@
  * in process memory.
  */
 
-const { initAgentRun, runAgentStep } = require('./agentLoop');
+const { initAgentRun, runAgentStep, executeAgentTool } = require('./agentLoop');
 const { buildSliceWorkerPrompt } = require('./architect');
 
 // Bumped from 4 → 6: typical blueprints have 5-8 build slices in their first wave,
@@ -49,6 +49,7 @@ function initArchitectRun(blueprint) {
       clientRoundTrips: 0,
       actionBatches: 0,
       actionsEmitted: 0,
+      deterministicSlices: 0,
       peakActiveSlices: 0,
       firstActionAt: null
     }
@@ -73,6 +74,7 @@ function ensureArchitectRun(state) {
   state.metrics.actionBatches = Number(state.metrics.actionBatches || 0);
   state.metrics.actionsEmitted = Number(state.metrics.actionsEmitted || 0);
   state.metrics.peakActiveSlices = Number(state.metrics.peakActiveSlices || 0);
+  state.metrics.deterministicSlices = Number(state.metrics.deterministicSlices || 0);
   return state;
 }
 
@@ -205,6 +207,34 @@ function readyPendingSlices(state) {
   });
 }
 
+function hasDeterministicActions(slice) {
+  return Array.isArray(slice?.actions) && slice.actions.length > 0;
+}
+
+async function materializeDeterministicSliceActions(slice, context = {}) {
+  const actions = [];
+  const toolResults = [];
+  for (let index = 0; index < slice.actions.length; index++) {
+    const planned = slice.actions[index];
+    const result = await executeAgentTool(planned.tool, planned.params || {}, context, null);
+    toolResults.push({ tool: planned.tool, result });
+    if (result && result.error) {
+      throw new Error(`${planned.tool} failed: ${result.error}`);
+    }
+    const emitted = Array.isArray(result?.actions) ? result.actions : [];
+    if (emitted.length === 0) {
+      throw new Error(`${planned.tool} produced no Excel actions`);
+    }
+    actions.push(...emitted.map(action => ({
+      ...action,
+      _sliceId: slice.id,
+      _architectTool: planned.tool,
+      _architectActionIndex: index
+    })));
+  }
+  return { actions, toolResults };
+}
+
 function initReadySlices(state, {
   context = {},
   maxParallel = DEFAULT_MAX_PARALLEL,
@@ -222,6 +252,25 @@ function initReadySlices(state, {
 
   const userObjective = context.userObjective || context.objective || '';
   for (const slice of toStart) {
+    if (hasDeterministicActions(slice)) {
+      state.sliceAgents[slice.id] = {
+        sliceId: slice.id,
+        status: 'running',
+        pending: null,
+        iteration: 0,
+        deterministicActions: slice.actions
+      };
+      state.sliceStates[slice.id] = 'running';
+      onEvent('sliceStarted', {
+        sliceId: slice.id,
+        title: slice.title,
+        estimatedIters: slice.estimated_iters,
+        tier: 'deterministic',
+        deterministic: true,
+        actionCount: slice.actions.length
+      });
+      continue;
+    }
     const sliceTier = slice.tier === 'flash' ? 'flash' : 'pro';
     const slicePrompt = buildSliceWorkerPrompt(slice, state.blueprint, userObjective);
     const sliceObjective = `${slice.title}\n\n${slice.instructions}`;
@@ -404,6 +453,7 @@ async function resumePendingBatch(state, clientResult, {
 async function advanceRunningSlices(state, {
   maxParallel = DEFAULT_MAX_PARALLEL,
   runAgentStepFn = runAgentStep,
+  context = {},
   onEvent = () => {}
 } = {}) {
   const runnable = activeRunningSliceIds(state).filter(sliceId => {
@@ -413,21 +463,72 @@ async function advanceRunningSlices(state, {
 
   if (runnable.length === 0) return { actions: [] };
   state.metrics.peakActiveSlices = Math.max(state.metrics.peakActiveSlices || 0, activeRunningSliceIds(state).length);
-  state.metrics.llmRoundTrips += runnable.length;
-  state.metrics.sliceStepCalls += runnable.length;
+  const deterministic = runnable.filter(sliceId => state.sliceAgents[sliceId]?.deterministicActions);
+  const agentic = runnable.filter(sliceId => !state.sliceAgents[sliceId]?.deterministicActions);
+  state.metrics.llmRoundTrips += agentic.length;
+  state.metrics.sliceStepCalls += agentic.length;
 
-  const settled = await Promise.allSettled(runnable.map(sliceId =>
+  const sinks = { actions: [] };
+
+  for (const sliceId of deterministic) {
+    const slice = sliceById(state, sliceId) || { id: sliceId, title: sliceId };
+    try {
+      const materialized = await materializeDeterministicSliceActions(slice, context);
+      sinks.actions.push(...materialized.actions);
+      state.metrics.deterministicSlices = Number(state.metrics.deterministicSlices || 0) + 1;
+      state.sliceWriteCounts[sliceId] = materialized.actions.length;
+      state.sliceStates[sliceId] = 'succeeded';
+      state.sliceResults[sliceId] = {
+        ok: true,
+        status: 'completed',
+        deterministic: true,
+        summary: `${slice.title} emitted ${materialized.actions.length} deterministic action(s)`,
+        iteration: 0,
+        writes: materialized.actions.length,
+        toolActions: slice.actions.length
+      };
+      delete state.sliceAgents[sliceId];
+      onEvent('sliceCompleted', {
+        sliceId,
+        status: 'completed',
+        deterministic: true,
+        summary: state.sliceResults[sliceId].summary,
+        iteration: 0,
+        elapsedMs: null
+      });
+    } catch (err) {
+      state.sliceStates[sliceId] = 'failed';
+      state.sliceResults[sliceId] = {
+        ok: false,
+        status: 'deterministic_action_failed',
+        deterministic: true,
+        error: err && err.message ? err.message : String(err),
+        iteration: 0
+      };
+      delete state.sliceAgents[sliceId];
+      onEvent('sliceFailed', {
+        sliceId,
+        status: 'deterministic_action_failed',
+        error: state.sliceResults[sliceId].error,
+        iteration: 0,
+        elapsedMs: null
+      });
+    }
+  }
+
+  if (agentic.length === 0) return sinks;
+
+  const settled = await Promise.allSettled(agentic.map(sliceId =>
     runAgentStepFn(state.sliceAgents[sliceId], null, {
       onProgress: makeSliceProgress(onEvent, sliceId)
     }).then(result => ({ sliceId, result }))
   ));
 
-  const sinks = { actions: [] };
   for (const entry of settled) {
     if (entry.status === 'fulfilled') {
       ingestSliceStep(state, entry.value.sliceId, entry.value.result, sinks, onEvent);
     } else {
-      const sliceId = runnable[settled.indexOf(entry)];
+      const sliceId = agentic[settled.indexOf(entry)];
       state.sliceStates[sliceId] = 'failed';
       state.sliceResults[sliceId] = { ok: false, error: entry.reason?.message || String(entry.reason) };
       delete state.sliceAgents[sliceId];
@@ -479,7 +580,7 @@ async function advanceArchitectRun(state, {
   }
 
   initReadySlices(state, { context, maxParallel, initAgentRunFn, onEvent });
-  const stepped = await advanceRunningSlices(state, { maxParallel, runAgentStepFn, onEvent });
+  const stepped = await advanceRunningSlices(state, { maxParallel, runAgentStepFn, context, onEvent });
   while (cascadeSkips(state, onEvent)) {}
 
   const action = actionControl(state, stepped.actions);

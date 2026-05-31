@@ -14,66 +14,209 @@
  * before being returned to the executor.
  */
 
+const Ajv = require('ajv');
 const { callLLM } = require('../tools/llm');
+const { TOOL_DEFINITIONS } = require('./agentLoop');
 const logger = require('../utils/logger');
 
-const ARCHITECT_SYSTEM_PROMPT = `You are an architect for Excel financial models and workbook builds.
-Given a user objective and the current workbook state, produce a BLUEPRINT: a directed acyclic graph (DAG) of build slices that can be executed in parallel waves by independent agent workers.
+const ARCHITECT_ACTION_TOOLS = new Set([
+  'bulk_create_sheets',
+  'delete_sheet',
+  'set_cell_range',
+  'bulk_set_cell_ranges',
+  'bulk_set_format',
+  'bulk_set_notes',
+  'create_named_range',
+  'bulk_create_named_ranges',
+  'copy_range'
+]);
 
-KEY PRINCIPLES:
-- Each slice owns an EXCLUSIVE set of sheets/ranges. Two slices in the same dependency wave must NEVER overlap their sheets_owned or ranges_owned.
-- A slice may read from other slices' outputs via may_read_from, but only if those slices are in its deps[] (transitively).
-- Prefer 3-8 slices for complex tasks. Don't over-fragment.
-- Slices should be COHERENT units of work (e.g., "build the Assumptions sheet", "build IS revenue & EBITDA rows", "build Debt Schedule"), not micro-steps.
-- Cross-sheet circular dependencies (e.g., LBO Debt Schedule ↔ IS Interest ↔ Cash Flow) cannot be parallelized — put them in the same sequential slice, OR split into an explicit first-pass and a second-pass slice.
-- ALWAYS end with a dedicated final slice (id like "format_and_verify", deps = ALL other slices) that runs alone in the LAST wave. It chooses formatting from the user's request and the workbook structure created by previous slices, applies it across every sheet with explicit bulk_set_format actions, adds notes to assumption/input cells (bulk_set_notes), then verifies with read_format_summary and issues at most ONE targeted repair batch. Formatting and notes belong in THIS final wave — do NOT interleave them into data-build slices (it slows workers and risks write conflicts). Because it runs alone, this slice may list ALL sheets in sheets_owned.
-- MODEL TIER: set "tier":"pro" for every BUILD slice (Assumptions, Revenue, COGS, OpEx, P&L, Cash Flow, Balance Sheet, any data/formula slice). Build workers reason over long prompts + upstream layouts and need the pro model for reliable formula placement and bulk batching. Use "tier":"flash" ONLY for the final format_and_verify slice (formatting + notes + one read-back pass — deterministic work, flash is fast enough). If you omit tier, the default is pro.
+const ACTION_ALLOWED_KEYS = new Set(['tool', 'params']);
+const ACTION_BANNED_PARAM_KEYS = new Set(['control', 'message', 'thought', 'payload']);
+const actionAjv = new Ajv({ allErrors: true, strict: false, useDefaults: false, coerceTypes: false });
+const actionSchemaValidators = new Map();
 
-PRESERVE USER DATA VERBATIM (mandatory — past runs invented a generic burger menu when the user gave a specific MEAT CREW menu with exact items and prices):
-- If the user objective contains DOMAIN-SPECIFIC LISTS (menu items, asset categories, regions, account names, named line items, specific prices, specific numbers), the slice that builds that data MUST receive the FULL VERBATIM list in its instructions field — never paraphrase, never summarize to "create a typical X menu".
-- Format: paste the relevant chunk of the user's text inside the instructions field with a leading "VERBATIM USER DATA — write these exact items at these exact prices:" header. The worker also gets the full user request separately as ORIGINAL USER REQUEST, but architect-side faithful copying gives the worker an unambiguous source.
-- If a list has 30+ items, you may compress whitespace but NEVER drop items, rename them, or fabricate substitutes. Worker will fail the slice if forced to invent.
+function getAgentToolSchema(toolName) {
+  const def = (TOOL_DEFINITIONS || []).find(t => t?.function?.name === toolName);
+  return def?.function?.parameters || null;
+}
 
-LITERAL FORMULAS IN DEPENDENT SLICES (mandatory — past runs had workers hallucinate cell references: a revenue slice referenced "Working Capital" (€50,000) as the growth rate, producing Revenue 2027 = €69 BILLION):
-- For every slice that writes formulas referencing upstream sheets, the instructions field MUST contain a FORMULAS block listing every output cell with its LITERAL formula string. Workers are forbidden from composing formulas from prose descriptions.
-- Format:
-    FORMULAS:
-      Revenue!B6 = =Assumptions!$B$5*Assumptions!$B$6*Assumptions!$B$7
-      Revenue!C6 = =B6*(1+Assumptions!$B$8)
-      Revenue!D6:G6 = same pattern as C6, dragged right with copyToRange
-      P&L!B10 = =Revenue!B6
-      P&L!B11 = =Revenue!B6*Assumptions!$B$11
-      P&L!B12 = =B10-B11
-      ...
-- Every cell address referenced ($B$11 etc.) MUST match the CELL MAP in the Assumptions slice — never reference a row position the architect didn't pin down. If the dependent slice would need a driver that's not in the CELL MAP, add it to the CELL MAP and to the Assumptions slice instructions first.
-- Workers will not call done if they had to guess any formula. Saving you 1 architect token here costs hours of cascade failures downstream.
+function validateAgentToolParams(toolName, params) {
+  const schema = getAgentToolSchema(toolName);
+  if (!schema) return { ok: false, errors: [`tool "${toolName}" has no schema`] };
+  let validator = actionSchemaValidators.get(toolName);
+  if (!validator) {
+    validator = actionAjv.compile(schema);
+    actionSchemaValidators.set(toolName, validator);
+  }
+  const valid = validator(params);
+  if (!valid) {
+    return {
+      ok: false,
+      errors: (validator.errors || []).map(e => `${e.instancePath || '/'} ${e.message}`)
+    };
+  }
+  return { ok: true, errors: [] };
+}
 
-CELL MAP CONSISTENCY (mandatory cross-check — past runs had architect saying growth_rate=B20 in Revenue's FORMULAS while Assumptions worker actually put it at B25, burning 9 iters on layout discovery and cascade-killing 7 downstream slices):
-- The CELL MAP you write in the Assumptions slice instructions IS the authoritative layout. Every dependent slice's FORMULAS block MUST reference the IDENTICAL addresses — byte-for-byte the same row numbers.
-- Before emitting the blueprint, mentally walk through every address ($B$X) referenced in any dependent slice's FORMULAS and confirm it appears in the Assumptions CELL MAP with the same row X. If it doesn't, you have a bug — add the driver to the CELL MAP at a specific row, then update the dependent reference.
-- Account for SECTION HEADER rows and BLANK SEPARATOR rows when assigning addresses. If the CELL MAP has 3 operational drivers (rows 5-7), then a section header at row 9 + 3 cost % drivers at rows 10-12, then a blank, the next section starts at row 14. Be precise — Assumptions worker WILL follow the CELL MAP exactly, so if your row math is off, dependent formulas point to wrong cells.
+function validateActionSemanticShape(toolName, params) {
+  const errors = [];
+  if (toolName === 'set_cell_range') {
+    if (!params.cells || typeof params.cells !== 'object' || Array.isArray(params.cells) || Object.keys(params.cells).length === 0) {
+      errors.push('params.cells must be a non-empty object');
+    }
+  }
+  if (toolName === 'bulk_set_cell_ranges') {
+    const writes = Array.isArray(params.writes) ? params.writes : [];
+    writes.forEach((write, index) => {
+      if (!write.cells || typeof write.cells !== 'object' || Array.isArray(write.cells) || Object.keys(write.cells).length === 0) {
+        errors.push(`params.writes[${index}].cells must be a non-empty object`);
+      }
+    });
+  }
+  if (toolName === 'bulk_set_format') {
+    const formats = Array.isArray(params.formats) ? params.formats : [];
+    formats.forEach((format, index) => {
+      if (!format.options || typeof format.options !== 'object' || Array.isArray(format.options) || Object.keys(format.options).length === 0) {
+        errors.push(`params.formats[${index}].options must be a non-empty object`);
+      }
+    });
+  }
+  return errors;
+}
 
-ITER BUDGETS (be generous — slice failures cascade-kill 5-7 downstream slices):
-- For BUILD slices (Revenue, COGS, P&L, Cash Flow, Balance Sheet, Metrics): set "estimated_iters": 12-15. Worker needs 1 read + 1 create_sheet + 2-4 writes + 1 format + 1 verify + drift-recovery cushion.
-- For ASSUMPTIONS slice: 10-12 (1 create + 2 writes + 1 format + 1 verify + cushion).
-- For format_and_verify (final slice): 15-18 (touches every sheet, multiple bulk_set_format passes).
-- Do NOT set estimated_iters below 10 for any non-trivial slice. The slice cap is 30; a low estimate just artificially limits the slice and causes max-iter cascade failures.
+function validateSliceActions(sliceId, actions) {
+  const errors = [];
+  if (actions == null) return { ok: true, actions: [] };
+  if (!Array.isArray(actions)) {
+    return { ok: false, errors: [`slice ${sliceId}: actions must be an array when present`] };
+  }
+  if (actions.length === 0) return { ok: true, actions: [] };
 
-CANONICAL ASSUMPTIONS LAYOUT (mandatory — schema ambiguity has cascade-killed every multi-sheet run that didn't follow this):
-- The Assumptions slice MUST output a flat 2-column table: column A = driver label (string), column B = driver value (number or %). No "Unit" column, no "Section" column. One driver per row, grouped by blank rows between sections (Section headers go in column A only with no value in B).
-- Year header row (2025-2030) MUST NOT live on the Assumptions sheet. It belongs on Revenue / P&L / CF sheets at a fixed row (row 3 by convention).
-- The Assumptions slice instructions field MUST contain a CELL MAP block that lists every driver row by literal address, e.g.:
-    CELL MAP:
-      B5  daily_covers          200
-      B6  avg_check             18.5
-      B7  days_open             360
-      B9  food_cogs_pct         0.30
-      B14 rent_annual           120000
-      B20 capex_fitout          300000
-      ...
-  Every dependent slice's instructions field MUST reference these inputs by absolute cell address (e.g. "=Assumptions!$B$5" for daily covers, "=Assumptions!$B$9*RevenueRow" for food cost). NEVER reference by column-of-units, NEVER guess the row, NEVER write the driver value inline in dependent sheets.
-- Do NOT mandate Excel named ranges (=daily_covers). Past runs spent the whole iter budget calling create_named_range one-at-a-time and never reached the dependent slices. Absolute cell addresses from the CELL MAP are sufficient and reliable.
-- Format conventions are applied later by format_and_verify. Do NOT pre-format the Assumptions sheet as percent for cells that hold integers (in last run "Number of Employees: 15" rendered as "1500%" because the row was percent-formatted). Number-vs-percent typing belongs to the format slice and only on cells where the underlying value is a fraction.
+  const normalized = [];
+  actions.forEach((action, index) => {
+    const prefix = `slice ${sliceId} actions[${index}]`;
+    if (!action || typeof action !== 'object' || Array.isArray(action)) {
+      errors.push(`${prefix}: action must be an object`);
+      return;
+    }
+    const extraKeys = Object.keys(action).filter(key => !ACTION_ALLOWED_KEYS.has(key));
+    if (extraKeys.length > 0) {
+      errors.push(`${prefix}: unsupported field(s): ${extraKeys.join(', ')}`);
+    }
+    const tool = action.tool;
+    if (!tool || typeof tool !== 'string') {
+      errors.push(`${prefix}: tool must be a non-empty string`);
+      return;
+    }
+    if (!ARCHITECT_ACTION_TOOLS.has(tool)) {
+      errors.push(`${prefix}: tool "${tool}" is not allowed in deterministic slice actions`);
+      return;
+    }
+    const params = action.params;
+    if (!params || typeof params !== 'object' || Array.isArray(params)) {
+      errors.push(`${prefix} (${tool}): params must be an object`);
+      return;
+    }
+    for (const key of Object.keys(params)) {
+      if (ACTION_BANNED_PARAM_KEYS.has(key)) {
+        errors.push(`${prefix} (${tool}): params contains forbidden field "${key}"`);
+      }
+    }
+    const schemaValidation = validateAgentToolParams(tool, params);
+    if (!schemaValidation.ok) {
+      errors.push(...schemaValidation.errors.map(err => `${prefix} (${tool}): ${err}`));
+      return;
+    }
+    const semanticErrors = validateActionSemanticShape(tool, params);
+    if (semanticErrors.length > 0) {
+      errors.push(...semanticErrors.map(err => `${prefix} (${tool}): ${err}`));
+      return;
+    }
+    normalized.push({ tool, params: JSON.parse(JSON.stringify(params)) });
+  });
+
+  if (errors.length > 0) return { ok: false, errors };
+  return { ok: true, actions: normalized };
+}
+
+const ARCHITECT_SYSTEM_PROMPT = `You are an architect and deterministic action compiler for Excel workbook builds.
+Given a user objective and current workbook state, produce one BLUEPRINT: a directed acyclic graph (DAG) of slices.
+
+NEW EXECUTION MODEL:
+- Prefer deterministic slices: put the exact Excel tool calls in slice.actions[].
+- A slice with non-empty actions[] is executed by a pure server executor with ZERO LLM calls. It will not read, infer, repair, or interpret prose. The actions must be complete and valid.
+- A slice with missing or empty actions[] falls back to the legacy worker LLM. Use this only when the slice truly requires live read-back or reasoning after previous writes.
+- If actions[] is present, invalid JSON/tool params fail blueprint validation. Do not emit approximate actions.
+
+DAG RULES:
+- Each slice owns an exclusive set of sheets/ranges. Two slices in the same dependency wave must never overlap sheets_owned or ranges_owned.
+- A slice may read/reference upstream outputs only when those upstream slice ids are in deps[] transitively.
+- Prefer 3-8 coherent slices for complex tasks. Do not micro-slice.
+- Cross-sheet circular dependencies must be in one sequential slice, or split into explicit first-pass / second-pass slices.
+- Keep a final format_and_verify slice in the last wave. It may be deterministic if ranges are fully known. If it needs live read_format_summary or visual repair, leave actions[] empty and use legacy instructions.
+
+DETERMINISTIC ACTION TOOL ALLOWLIST:
+- bulk_create_sheets: {"names":["Assumptions","Revenue"]}
+- delete_sheet: {"name":"Old Sheet"}
+- set_cell_range: {"sheet":"S","cells":{"A1":{"value":"Label"},"B1":{"formula":"=A1*2"}}}
+- bulk_set_cell_ranges: {"writes":[{"sheet":"S","cells":{"A1":{"value":1}},"copyToRange":"B1:G1"}]}
+- bulk_set_format: {"formats":[{"sheet":"S","target":"A1:B2","options":{"bold":true,"backgroundColor":"#0D1F2D","fontColor":"#FFFFFF"}}]}
+- bulk_set_notes: {"notes":[{"sheet":"Assumptions","cell":"B5","note":"Rationale"}]}
+- create_named_range: {"name":"TaxRate","refers_to":"=Assumptions!$B$12"}
+- bulk_create_named_ranges: {"ranges":[{"name":"TaxRate","refers_to":"=Assumptions!$B$12"}]}
+- copy_range: {"from_sheet":"Source","from":"A1:B10","to_sheet":"Dest","to":"A1"}
+
+ACTION JSON RULES:
+- Each action is exactly {"tool":"<allowed_tool>","params":{...}}. No thought, message, control, payload, or client action types.
+- Tool names are the LLM-facing snake_case tools above, not client action names like setCellRange/createSheet.
+- Params must use canonical keys only. Do not use aliases like sheetName, ranges for writes, entries for formats, fromSheet, refersTo.
+- Use bulk_create_sheets even for one newly-created sheet so the action path stays uniform.
+- Do not put formatting inside cellStyles unless absolutely necessary. Prefer bulk_set_format as a separate action.
+- copyToRange is formulas only. Never use it when the source cell is a text label.
+
+PRESERVE USER DATA VERBATIM:
+- If the user objective contains domain-specific lists, names, menu items, prices, specific counts, regions, asset categories, or account names, write those exact values in actions cells. Do not invent generic substitutes.
+- If a deterministic slice cannot fit every exact item in actions[], make it legacy and include the full verbatim data in instructions.
+
+FORMULAS AND CELL MAPS:
+- The architect is the single source of truth for cell addresses. Every formula written in actions[] must be a literal Excel formula string.
+- For Assumptions, use a flat 2-column layout: column A = driver label, column B = driver value. Section headers may live in column A with blank B. Year headers belong on operating sheets, not Assumptions.
+- Before emitting dependent formulas, verify every Assumptions!$B$X reference points to the row you actually wrote in the Assumptions actions.
+- Do not write driver values inline on dependent sheets when they should reference Assumptions. Use absolute references like =Assumptions!$B$5.
+- For time series, write the first formula and use copyToRange only when relative references should drag correctly.
+
+EXAMPLE DETERMINISTIC SLICE:
+{
+  "id": "revenue",
+  "title": "Revenue build",
+  "deps": ["assumptions"],
+  "scope": {
+    "sheets_owned": ["Revenue"],
+    "ranges_owned": [],
+    "may_read_from": ["Assumptions!A1:B40"]
+  },
+  "instructions": "Deterministic revenue build. Actions are authoritative.",
+  "estimated_iters": 3,
+  "tier": "pro",
+  "actions": [
+    { "tool": "bulk_create_sheets", "params": { "names": ["Revenue"] } },
+    { "tool": "bulk_set_cell_ranges", "params": { "writes": [
+      { "sheet": "Revenue", "cells": {
+        "A1": { "value": "Revenue" },
+        "B3": { "value": 2025 },
+        "C3": { "value": 2026 },
+        "A5": { "value": "Net Revenue" },
+        "B5": { "formula": "=Assumptions!$B$5*Assumptions!$B$6*Assumptions!$B$7" },
+        "C5": { "formula": "=B5*(1+Assumptions!$B$8)" }
+      }, "copyToRange": "C5:G5" }
+    ] } },
+    { "tool": "bulk_set_format", "params": { "formats": [
+      { "sheet": "Revenue", "target": "A1:G1", "options": { "bold": true, "backgroundColor": "#0D1F2D", "fontColor": "#FFFFFF" } },
+      { "sheet": "Revenue", "target": "B5:G20", "options": { "numberFormat": "#,##0" } }
+    ] } }
+  ]
+}
 
 OUTPUT JSON SCHEMA (strict, no extras):
 {
@@ -89,9 +232,12 @@ OUTPUT JSON SCHEMA (strict, no extras):
         "ranges_owned": ["<sheet>!<A1 range>", ...],  // optional, use when slice shares a sheet with another slice (e.g., IS has multiple slices)
         "may_read_from": ["<sheet>!<A1 range or label>", ...]
       },
-      "instructions": "<concrete build instructions for the worker: which sections, which formulas at which cells, what data layout. The worker WILL follow these literally — be specific>",
-      "estimated_iters": <int 3-15>,
-      "tier": "flash"                              // "flash" (default — all build/format workers) or "pro" (reserve for a final audit slice only)
+      "instructions": "<legacy fallback instructions or concise deterministic summary>",
+      "estimated_iters": <int 3-20>,
+      "tier": "pro",
+      "actions": [
+        { "tool": "<allowed_tool>", "params": { } }
+      ]
     }
   ]
 }
@@ -239,6 +385,11 @@ function validateBlueprint(raw) {
     // Build slices have long prompts + multi-step reasoning over upstream layouts;
     // flash collapses on them (see 5 bandaid commits on 2026-05-30).
     const tier = s.tier === 'flash' ? 'flash' : 'pro';
+    const actionValidation = validateSliceActions(s.id, s.actions);
+    if (!actionValidation.ok) {
+      errors.push(...actionValidation.errors);
+      continue;
+    }
 
     normalizedSlices.push({
       id: s.id,
@@ -247,9 +398,11 @@ function validateBlueprint(raw) {
       scope: { sheets_owned: sheetsOwned, ranges_owned: rangesOwned, may_read_from: mayReadFrom },
       instructions: String(s.instructions || '').slice(0, 8000),
       estimated_iters: Number.isFinite(estIters) ? Math.max(3, Math.min(20, Math.round(estIters))) : 10,
-      tier
+      tier,
+      actions: actionValidation.actions
     });
   }
+  if (errors.length) return { ok: false, errors };
 
   // Cycle detection via Kahn's algorithm
   const indeg = new Map(normalizedSlices.map(s => [s.id, 0]));
@@ -391,5 +544,6 @@ module.exports = {
   buildArchitectUserContent,
   extractArchitectJson,
   validateBlueprint,
+  validateSliceActions,
   buildSliceWorkerPrompt
 };

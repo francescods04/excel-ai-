@@ -211,11 +211,85 @@ async function testSliceWorkerPromptForcesReadBeforeWriteAndBansOfficeJs() {
   console.log('OK slice worker prompt enforces read-before-write on dependents and bans execute_office_js');
 }
 
+async function testDeterministicSliceActionsBypassWorkerLlm() {
+  const state = initArchitectRun(blueprint([
+    {
+      id: 'det',
+      title: 'Deterministic',
+      deps: [],
+      scope: { sheets_owned: ['Deterministic'], may_read_from: [] },
+      instructions: 'Actions are authoritative',
+      estimated_iters: 3,
+      actions: [
+        { tool: 'bulk_create_sheets', params: { names: ['Deterministic'] } },
+        {
+          tool: 'bulk_set_cell_ranges',
+          params: {
+            writes: [
+              { sheet: 'Deterministic', cells: { A1: { value: 'Driver' }, B1: { value: 'Value' } } }
+            ]
+          }
+        }
+      ]
+    }
+  ]));
+
+  const first = await advanceArchitectRun(state, {
+    context: {},
+    initAgentRunFn: () => {
+      throw new Error('initAgentRun must not be called for deterministic slice');
+    },
+    runAgentStepFn: async () => {
+      throw new Error('runAgentStep must not be called for deterministic slice');
+    },
+    maxParallel: 1
+  });
+
+  assert.strictEqual(first.control, 'emit_actions');
+  assert.strictEqual(first.payload.actions.length, 2);
+  assert.deepStrictEqual(first.payload.actions.map(a => a.type), ['createSheet', 'setCellRange']);
+  assert.ok(first.payload.actions.every(a => a._sliceId === 'det'));
+  assert.strictEqual(first.state.sliceStates.det, 'succeeded');
+  assert.strictEqual(first.state.metrics.llmRoundTrips, 0);
+  assert.strictEqual(first.state.metrics.sliceStepCalls, 0);
+  assert.strictEqual(first.state.metrics.deterministicSlices, 1);
+
+  const second = await advanceArchitectRun(state, { context: {}, maxParallel: 1 });
+  assert.strictEqual(second.control, 'done');
+  console.log('OK deterministic slice actions bypass worker LLM and emit Excel actions directly');
+}
+
+async function testLegacySliceWithoutActionsUsesWorkerLlm() {
+  const state = initArchitectRun(blueprint([
+    { id: 'legacy', title: 'Legacy', deps: [], scope: { sheets_owned: ['Legacy'], may_read_from: [] }, instructions: 'Build via worker', estimated_iters: 4 }
+  ]));
+  const mock = makeStepMock((agent) => ({
+    state: { ...agent, status: 'completed', summary: 'legacy done', iteration: agent.iteration + 1 },
+    control: 'done',
+    payload: { summary: 'legacy done' }
+  }));
+
+  const result = await advanceArchitectRun(state, {
+    context: {},
+    initAgentRunFn: initAgentRunMock,
+    runAgentStepFn: mock.runAgentStepFn,
+    maxParallel: 1
+  });
+
+  assert.strictEqual(result.control, 'done');
+  assert.strictEqual(mock.calls.length, 1, 'legacy actionless slice should call runAgentStep');
+  assert.strictEqual(result.state.metrics.llmRoundTrips, 1);
+  assert.strictEqual(result.state.metrics.deterministicSlices, 0);
+  console.log('OK legacy slice without actions still uses worker LLM');
+}
+
 (async function main() {
   await testParallelRootsThenFinal();
   await testMultiSliceClientReadBatch();
   await testActionsTakePriorityOverReads();
   await testSliceWorkerPromptForcesReadBeforeWriteAndBansOfficeJs();
+  await testDeterministicSliceActionsBypassWorkerLlm();
+  await testLegacySliceWithoutActionsUsesWorkerLlm();
   console.log('\narchitect stepwise tests completed.');
 })().catch(err => {
   console.error('FAIL:', err && err.stack ? err.stack : err);

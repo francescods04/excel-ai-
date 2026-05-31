@@ -2,6 +2,7 @@ const assert = require('assert');
 const {
   generateBlueprint,
   validateBlueprint,
+  validateSliceActions,
   extractArchitectJson,
   buildSliceWorkerPrompt
 } = require('../../server/agents/architect');
@@ -143,6 +144,91 @@ function test_validateBlueprint_drops_self_dep() {
   console.log('  ✓ self-dep dropped');
 }
 
+function test_validateBlueprint_accepts_valid_slice_actions() {
+  const withActions = {
+    slices: [
+      {
+        id: 'assumptions',
+        title: 'Assumptions',
+        deps: [],
+        scope: { sheets_owned: ['Assumptions'], ranges_owned: [], may_read_from: [] },
+        instructions: 'Deterministic assumptions',
+        estimated_iters: 3,
+        actions: [
+          { tool: 'bulk_create_sheets', params: { names: ['Assumptions'] } },
+          {
+            tool: 'bulk_set_cell_ranges',
+            params: {
+              writes: [
+                {
+                  sheet: 'Assumptions',
+                  cells: {
+                    A1: { value: 'Driver' },
+                    B1: { value: 'Value' },
+                    A5: { value: 'Daily covers' },
+                    B5: { value: 200 }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            tool: 'bulk_set_format',
+            params: {
+              formats: [
+                { sheet: 'Assumptions', target: 'A1:B1', options: { bold: true, backgroundColor: '#0D1F2D' } }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  };
+  const r = validateBlueprint(withActions);
+  assert.ok(r.ok, `expected deterministic actions to validate, got: ${(r.errors || []).join('; ')}`);
+  assert.strictEqual(r.blueprint.slices[0].actions.length, 3);
+  assert.strictEqual(r.blueprint.slices[0].actions[1].tool, 'bulk_set_cell_ranges');
+  console.log('  ✓ valid deterministic slice actions accepted');
+}
+
+function test_validateBlueprint_rejects_invalid_slice_actions() {
+  const invalid = {
+    slices: [
+      {
+        id: 'bad',
+        title: 'Bad',
+        deps: [],
+        scope: { sheets_owned: ['Bad'], ranges_owned: [], may_read_from: [] },
+        instructions: 'Bad deterministic actions',
+        actions: [
+          {
+            tool: 'bulk_set_cell_ranges',
+            params: {
+              writes: [{ sheet: 'Bad' }]
+            }
+          }
+        ]
+      }
+    ]
+  };
+  const r = validateBlueprint(invalid);
+  assert.ok(!r.ok, 'invalid action shape should fail blueprint validation');
+  assert.ok(
+    r.errors.some(e => /bad actions\[0\].*cells/i.test(e)),
+    `expected clear action/cells error, got: ${r.errors.join('; ')}`
+  );
+  console.log('  ✓ invalid deterministic action shape rejected clearly');
+}
+
+function test_validateSliceActions_rejects_extra_action_fields() {
+  const r = validateSliceActions('x', [
+    { tool: 'bulk_create_sheets', params: { names: ['X'] }, thought: 'hidden prose' }
+  ]);
+  assert.ok(!r.ok, 'extra action fields should be rejected');
+  assert.ok(r.errors.some(e => /unsupported field.*thought/i.test(e)), `unexpected errors: ${r.errors.join('; ')}`);
+  console.log('  ✓ extra deterministic action fields rejected');
+}
+
 function test_extractArchitectJson_handles_fences() {
   const fenced = '```json\n' + JSON.stringify(SAMPLE_LBO_BLUEPRINT) + '\n```';
   const parsed = extractArchitectJson(fenced);
@@ -201,6 +287,9 @@ function test_buildSliceWorkerPrompt_contains_scope_and_instructions() {
   test_validateBlueprint_rejects_empty_slices();
   test_validateBlueprint_drops_phantom_deps();
   test_validateBlueprint_drops_self_dep();
+  test_validateBlueprint_accepts_valid_slice_actions();
+  test_validateBlueprint_rejects_invalid_slice_actions();
+  test_validateSliceActions_rejects_extra_action_fields();
   test_extractArchitectJson_handles_fences();
   await test_generateBlueprint_happy_path();
   await test_generateBlueprint_throws_on_invalid_dag();
