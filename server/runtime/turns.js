@@ -30,6 +30,10 @@ const {
   computeBlueprintSummary
 } = require('../agents/parallelOrchestrator');
 const {
+  validateOrchestratorResult,
+  buildValidationSummary
+} = require('../agents/backgroundValidator');
+const {
   initArchitectRun,
   advanceArchitectRun,
   computeArchitectSummary: computeDurableArchitectSummary
@@ -2487,6 +2491,22 @@ async function executeArchitectParallelTurn(turnId) {
   const turnRef = _getTurnRef(turnId);
   turnRef.orchestratorSummary = summary;
   saveTurn(turnRef);
+
+  if (summary && summary.perSlice) {
+    const sliceStates = {};
+    const sliceResults = {};
+    const sliceWriteCounts = {};
+    for (const [id, ps] of Object.entries(summary.perSlice)) {
+      sliceStates[id] = ps.state || 'unknown';
+      sliceResults[id] = ps;
+      sliceWriteCounts[id] = ps.writes || ps.cellsWritten || 0;
+    }
+    const validation = validateOrchestratorResult(blueprint, sliceStates, sliceResults, sliceWriteCounts);
+    const validationMsg = buildValidationSummary(validation);
+    if (validationMsg) {
+      appendLog(turnId, validationMsg, validation.issues.some(i => i.severity === 'high') ? 'error' : 'warn');
+    }
+  }
 
   if (summary.failed > 0 || summary.skipped > 0) {
     const partial = `Completati ${summary.succeeded}/${summary.total} slice. Fallite: ${summary.failed}, saltate: ${summary.skipped}.`;

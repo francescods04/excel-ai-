@@ -1886,14 +1886,15 @@ async function runPostWriteCritic(toolName, actions) {
   const summary = summarizeActionsForCritic(actions);
   if (!summary) return null;
 
-  const prompt = `You are a fast strict critic for Excel agent writes. Scan the actions below for OBVIOUS errors only — do NOT speculate, do NOT make stylistic suggestions.
+  const prompt = `You are a fast strict critic for Excel agent writes. Scan the actions below for OBVIOUS errors and absurdly wrong data — do NOT make stylistic suggestions, but DO flag clearly nonsensical numbers.
 
-Flag ONLY:
+Flag:
 - Unbalanced parentheses, missing leading "=" on formulas, obvious typos in function names
 - Literal error markers in values/formulas: #VALUE!, #REF!, #NAME?, #DIV/0!, #NUM!, #N/A
 - References to sheets that look wrong (e.g. "Sheet1!X1" when the action's sheet is "DCF" and the LBO context uses other names)
 - Empty cells map / no-op writes
-- Hard-coded magic numbers where a named-range / cross-sheet reference would be safer (low severity)
+- OBVIOUSLY absurd numeric values: e.g., a parking cost of 3 billion for 40 units, 600,000 parking spaces for a 40-unit building, unit prices that are 100x the stated price, cost/sq m that's 10x market rate, a "per space" quantity > total units
+- Consistency errors: e.g., "per space" quantity wildly different from "per unit" quantity in the same context, totals that are orders of magnitude off from the sum of their parts
 
 Respond with COMPACT JSON only, no markdown:
 { "ok": true } if nothing wrong.
