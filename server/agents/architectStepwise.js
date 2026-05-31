@@ -36,6 +36,7 @@ function initArchitectRun(blueprint) {
     sliceStates,
     sliceResults: {},
     sliceAgents: {},
+    sliceWriteCounts: {},
     pendingBatch: null,
     roundIndex: 0,
     startedAt: null,
@@ -63,6 +64,7 @@ function ensureArchitectRun(state) {
   }
   if (!state.sliceResults) state.sliceResults = {};
   if (!state.sliceAgents) state.sliceAgents = {};
+  if (!state.sliceWriteCounts) state.sliceWriteCounts = {};
   if (!state.metrics) state.metrics = {};
   state.metrics.llmRoundTrips = Number(state.metrics.llmRoundTrips || 0);
   state.metrics.sliceStepCalls = Number(state.metrics.sliceStepCalls || 0);
@@ -217,9 +219,10 @@ function initReadySlices(state, {
   state.roundIndex = (state.roundIndex || 0) + 1;
   onEvent('waveStarted', { waveIndex: state.roundIndex, sliceIds: toStart.map(s => s.id) });
 
+  const userObjective = context.userObjective || context.objective || '';
   for (const slice of toStart) {
     const sliceTier = slice.tier === 'flash' ? 'flash' : 'pro';
-    const slicePrompt = buildSliceWorkerPrompt(slice, state.blueprint);
+    const slicePrompt = buildSliceWorkerPrompt(slice, state.blueprint, userObjective);
     const sliceObjective = `${slice.title}\n\n${slice.instructions}`;
     const workerContext = { ...context, _sliceId: slice.id, _sliceScope: slice.scope };
     const workerState = initAgentRunFn(sliceObjective, workerContext, {
@@ -258,17 +261,54 @@ function ingestSliceStep(state, sliceId, result, sinks, onEvent = () => {}) {
 
   if (result.control === 'emit_actions') {
     const actions = Array.isArray(result.payload?.actions) ? result.payload.actions : [];
-    if (actions.length > 0) sinks.actions.push(...actions.map(action => ({ ...action, _sliceId: sliceId })));
+    if (actions.length > 0) {
+      sinks.actions.push(...actions.map(action => ({ ...action, _sliceId: sliceId })));
+      state.sliceWriteCounts[sliceId] = (state.sliceWriteCounts[sliceId] || 0) + actions.length;
+    }
     return;
   }
 
   if (result.control === 'done') {
+    // Reject done with zero writes. Past runs had slice workers confabulate
+    // "upstream not available" and call done immediately, marking the slice
+    // succeeded — the workbook stayed empty but every dependent slice was
+    // greenlit, producing a fake "completato" turn with missing sheets.
+    // Format/audit-style slices (no sheets_owned, no ranges_owned) are exempt
+    // because their job is to verify, not write.
+    const wroteSomething = (state.sliceWriteCounts[sliceId] || 0) > 0;
+    const canBeReadOnly = (!slice.scope || (
+      (!slice.scope.sheets_owned || slice.scope.sheets_owned.length === 0) &&
+      (!slice.scope.ranges_owned || slice.scope.ranges_owned.length === 0)
+    ));
+    // Only enforce when the slice actually had time to act (>1 iteration). A
+    // 1-iteration immediate done is allowed (legitimate "nothing to add" or
+    // test scenario). Multi-iteration done with zero writes = confabulation.
+    const sliceIter = Number(result.state.iteration || 0);
+    if (!wroteSomething && !canBeReadOnly && sliceIter > 1) {
+      state.sliceStates[sliceId] = 'failed';
+      state.sliceResults[sliceId] = {
+        ok: false,
+        status: 'failed_no_writes',
+        error: `slice called done without writing any cells in its owned scope (claimed: "${result.payload?.summary || ''}")`,
+        iteration: result.state.iteration || 0
+      };
+      delete state.sliceAgents[sliceId];
+      onEvent('sliceFailed', {
+        sliceId,
+        status: 'failed_no_writes',
+        error: state.sliceResults[sliceId].error,
+        iteration: state.sliceResults[sliceId].iteration,
+        elapsedMs: null
+      });
+      return;
+    }
     state.sliceStates[sliceId] = 'succeeded';
     state.sliceResults[sliceId] = {
       ok: true,
       status: 'completed',
       summary: result.payload?.summary || result.state.summary || `${slice.title} completed`,
-      iteration: result.state.iteration || 0
+      iteration: result.state.iteration || 0,
+      writes: state.sliceWriteCounts[sliceId] || 0
     };
     delete state.sliceAgents[sliceId];
     const autoFormatActions = Array.isArray(result.payload?.autoFormatActions) ? result.payload.autoFormatActions : [];

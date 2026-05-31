@@ -1341,6 +1341,7 @@ function buildTurnExecutionContext(turn) {
   const { parentPlan, parentResults } = getParentContinuity(turn);
   return {
     ...turn.context,
+    userObjective: turn.objective,
     conversationHistory: conversationMemory.getConversationContext(),
     recentSheets: conversationMemory.getRecentSheets(),
     lastModelState: conversationMemory.getLastModelState(),

@@ -29,6 +29,11 @@ KEY PRINCIPLES:
 - ALWAYS end with a dedicated final slice (id like "format_and_verify", deps = ALL other slices) that runs alone in the LAST wave. It chooses formatting from the user's request and the workbook structure created by previous slices, applies it across every sheet with explicit bulk_set_format actions, adds notes to assumption/input cells (bulk_set_notes), then verifies with read_format_summary and issues at most ONE targeted repair batch. Formatting and notes belong in THIS final wave — do NOT interleave them into data-build slices (it slows workers and risks write conflicts). Because it runs alone, this slice may list ALL sheets in sheets_owned.
 - MODEL TIER: set "tier":"pro" for every BUILD slice (Assumptions, Revenue, COGS, OpEx, P&L, Cash Flow, Balance Sheet, any data/formula slice). Build workers reason over long prompts + upstream layouts and need the pro model for reliable formula placement and bulk batching. Use "tier":"flash" ONLY for the final format_and_verify slice (formatting + notes + one read-back pass — deterministic work, flash is fast enough). If you omit tier, the default is pro.
 
+PRESERVE USER DATA VERBATIM (mandatory — past runs invented a generic burger menu when the user gave a specific MEAT CREW menu with exact items and prices):
+- If the user objective contains DOMAIN-SPECIFIC LISTS (menu items, asset categories, regions, account names, named line items, specific prices, specific numbers), the slice that builds that data MUST receive the FULL VERBATIM list in its instructions field — never paraphrase, never summarize to "create a typical X menu".
+- Format: paste the relevant chunk of the user's text inside the instructions field with a leading "VERBATIM USER DATA — write these exact items at these exact prices:" header. The worker also gets the full user request separately as ORIGINAL USER REQUEST, but architect-side faithful copying gives the worker an unambiguous source.
+- If a list has 30+ items, you may compress whitespace but NEVER drop items, rename them, or fabricate substitutes. Worker will fail the slice if forced to invent.
+
 CANONICAL ASSUMPTIONS LAYOUT (mandatory — schema ambiguity has cascade-killed every multi-sheet run that didn't follow this):
 - The Assumptions slice MUST output a flat 2-column table: column A = driver label (string), column B = driver value (number or %). No "Unit" column, no "Section" column. One driver per row, grouped by blank rows between sections (Section headers go in column A only with no value in B).
 - Year header row (2025-2030) MUST NOT live on the Assumptions sheet. It belongs on Revenue / P&L / CF sheets at a fixed row (row 3 by convention).
@@ -303,14 +308,20 @@ function validateBlueprint(raw) {
  * Build the system prompt addendum that constrains a worker to its slice scope.
  * The worker is otherwise the regular runAgentLoop with full tools.
  */
-function buildSliceWorkerPrompt(slice, blueprint) {
+function buildSliceWorkerPrompt(slice, blueprint, userObjective = '') {
   const scope = slice.scope;
   const hasUpstream = scope.may_read_from.length > 0;
+  const userBlock = userObjective && String(userObjective).trim()
+    ? `\n\nORIGINAL USER REQUEST (verbatim — this is the SOURCE OF TRUTH for all domain data: exact menu items, names, prices, list entries, numbers explicitly given. Architect's instructions may have summarized; if you would otherwise invent any item/price/name/category that COULD be derived from this text, you MUST use the literal value from here instead):
+"""
+${String(userObjective).slice(0, 8000)}
+"""\n`
+    : '';
   return `<slice-context>
 You are a focused worker building ONE slice of a larger blueprint. Other workers are building other slices in parallel.
 
 SLICE: ${slice.id} — ${slice.title}
-
+${userBlock}
 YOUR EXCLUSIVE SCOPE (write here, nowhere else):
 - sheets owned: ${scope.sheets_owned.length ? scope.sheets_owned.join(', ') : '(none — use ranges_owned)'}
 - ranges owned: ${scope.ranges_owned.length ? scope.ranges_owned.join(', ') : '(full sheets above)'}
@@ -327,11 +338,14 @@ ${slice.instructions}
 HARD RULES:
 - DO NOT write to sheets or ranges outside your scope. If you need to reference data from another slice, use a formula referencing its known address from may_read_from.
 - DO NOT call ask_user_question. Make reasonable defaults.${hasUpstream ? `
-- READ BEFORE YOU WRITE: your first tool call MUST be a read (get_cell_ranges / read_sheet) against the upstream ranges listed above. Do NOT guess upstream layout from the slice instructions — in prod runs, workers that skipped this step wrote formulas pointing to wrong cells and had to redo the slice 4-8 times. Confirm exact addresses, then write your formulas against those exact addresses.` : ''}
+- READ BEFORE YOU WRITE: your first tool call MUST be a read (get_cell_ranges / read_sheet) against the upstream ranges listed above. Do NOT guess upstream layout from the slice instructions — in prod runs, workers that skipped this step wrote formulas pointing to wrong cells and had to redo the slice 4-8 times. Confirm exact addresses, then write your formulas against those exact addresses.
+- IF a read returns suspiciously thin data (only A1, zero rows, sheet "doesn't exist"), it is a TOOL ISSUE — the upstream slice succeeded before yours started. Retry ONCE with read_sheet on the same sheet. If still thin, write your formulas anyway using the absolute address from may_read_from (e.g. =Assumptions!$B$5). DO NOT call done with reason "upstream not available" — that is a confabulation; the orchestrator will reject it.` : ''}
 - ITER BUDGET IS TIGHT (~${20}). Consolidate writes: a P&L / cash-flow / balance-sheet slice should be ONE bulk_set_cell_ranges call (up to 16 writes per call) for ALL section rows, then ONE bulk_set_format pass for formatting. Sequential per-row set_cell_range calls burn the budget and cascade-kill downstream waves.
-- execute_office_js is BLOCKED for slice workers. Use set_cell_range / bulk_set_cell_ranges for data + formulas, bulk_set_format for formatting, execute_excel_formula for one-off formulas. Hand-written Office.js routinely throws on numberFormat dimension mismatches and silently rolls back fill/font writes. Do NOT attempt it — the call is rejected before reaching Excel and wastes one iteration.
+- TOOL PARAMS are not negotiable: bulk_create_sheets needs {"names":[…]} (NOT "sheets"). bulk_set_cell_ranges needs {"writes":[…]} (NOT "entries", "ranges", "cells"). get_cell_ranges needs {"ranges":[{"sheet":"X","target":"A1:B40"}]} — target MUST be a real range like "A1:B40", NOT just "A1". Do NOT spend iterations guessing parameter names — read the error response, fix the param name, move on.
+- execute_office_js is BLOCKED for slice workers (and will be rejected before reaching Excel). Use set_cell_range / bulk_set_cell_ranges for data + formulas, bulk_set_format for formatting, create_sheet / bulk_create_sheets for sheet ops, execute_excel_formula for one-off formulas. Do NOT attempt execute_office_js — every attempt is a wasted iteration.
 - copyToRange is FORMULAS ONLY (relative refs adjust per cell). Never use copyToRange with a text label as the source cell — it paints the label into every destination. For headers/titles, write to one cell and merge if you need it visually wide.
-- When this slice is done, call the "done" tool with a one-line summary.
+- DO NOT call done until you have actually written cells in your owned scope. A done with zero writes will be rejected as a failed slice and cascade-kill downstream slices. If you're stuck, write what you can with absolute references and explain in the done summary what is incomplete.
+- When this slice is done, call the "done" tool with a one-line summary describing what you wrote.
 </slice-context>`;
 }
 

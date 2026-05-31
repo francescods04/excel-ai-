@@ -96,7 +96,8 @@ async function runParallelBlueprint({
     logger.info(`[Orchestrator] slice "${sliceId}" started (${slice.title}) [tier=${sliceTier}]`);
 
     try {
-      const slicePrompt = buildSliceWorkerPrompt(slice, blueprint);
+      const userObjective = (context && (context.userObjective || context.objective)) || '';
+      const slicePrompt = buildSliceWorkerPrompt(slice, blueprint, userObjective);
       const sliceObjective = `${slice.title}\n\n${slice.instructions}`;
       // Build a derived context the worker can use. Don't mutate the parent context.
       const workerContext = { ...context, _sliceId: sliceId, _sliceScope: slice.scope };
@@ -332,7 +333,8 @@ async function stepBlueprintWave(state, {
     });
     logger.info(`[Orchestrator/stepwise] slice "${sliceId}" started [tier=${sliceTier}, wave=${state.waveIndex}]`);
 
-    const slicePrompt = buildSliceWorkerPrompt(slice, state.blueprint);
+    const userObjective = (context && (context.userObjective || context.objective)) || '';
+    const slicePrompt = buildSliceWorkerPrompt(slice, state.blueprint, userObjective);
     const sliceObjective = `${slice.title}\n\n${slice.instructions}`;
     const workerContext = { ...context, _sliceId: sliceId, _sliceScope: slice.scope };
     const tier = sliceTier;
