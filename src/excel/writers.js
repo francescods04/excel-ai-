@@ -1503,14 +1503,23 @@ async function execSetCellRange(context, sheetCache, defaultSheet, action) {
   try { (resolved[0]?.cellSheet || fallbackSheet).activate(); } catch (_) {}
 
   if (copyToRange && resolved.length > 0) {
-    const first = resolved[0];
     const parsedDest = parseTargetReference(copyToRange);
     const destSheet = parsedDest.sheetName
       ? await ensureWorksheet(context, sheetCache, parsedDest.sheetName, { createIfMissing: true })
-      : first.cellSheet;
-    const firstCell = first.cellSheet.getRange(first.cellAddr);
+      : resolved[0].cellSheet;
+
+    const sourceAddrs = resolved.map(r => r.cellAddr);
+    const srcSheet = resolved[0].cellSheet;
+    let srcRange;
+    if (resolved.length === 1) {
+      srcRange = srcSheet.getRange(sourceAddrs[0]);
+    } else {
+      const firstAddr = sourceAddrs[0];
+      const lastAddr = sourceAddrs[sourceAddrs.length - 1];
+      srcRange = srcSheet.getRange(`${firstAddr}:${lastAddr}`);
+    }
     const destRange = destSheet.getRange(parsedDest.rangeAddress || copyToRange);
-    destRange.copyFrom(firstCell, Excel.RangeCopyType.all);
+    srcRange.autoFill(destRange, Excel.AutoFillType.fillDefault);
   }
 
   // The outer executeActions() performs the batch sync. Syncing here for every
