@@ -106,6 +106,52 @@ const turns = require('../../server/runtime/turns.js');
     console.log('OK resolveStaleStep (proceed / lost-response re-delivery / stale re-emit)');
   }
 
+  /* action-result gating: client formula errors are terminal blockers */
+  {
+    const turn = {
+      actionExecutions: [
+        {
+          taskId: 'agent-loop',
+          itemId: 'batch-1',
+          status: 'completed',
+          errorCount: 0,
+          isUndo: false,
+          errors: []
+        },
+        {
+          taskId: 'agent-loop',
+          itemId: 'batch-2',
+          status: 'error',
+          errorCount: 2,
+          isUndo: false,
+          errors: [
+            {
+              type: 'formulaError',
+              sheet: 'Cash Flow - Single Location',
+              target: 'B5',
+              message: 'Excel evaluated written formula to #REF!'
+            }
+          ]
+        },
+        {
+          taskId: 'undo',
+          itemId: 'undo',
+          status: 'error',
+          errorCount: 1,
+          isUndo: true,
+          errors: [{ message: 'Undo failed' }]
+        }
+      ]
+    };
+    const blockers = turns.getBlockingActionExecutionErrors(turn);
+    assert.strictEqual(blockers.length, 1, 'only non-undo Excel write errors block completion');
+    assert.strictEqual(blockers[0].itemId, 'batch-2');
+    const summary = turns.summarizeActionExecutionErrors(blockers);
+    assert.ok(summary.includes('Cash Flow - Single Location!B5'), 'summary includes failing formula address');
+    assert.ok(summary.includes('#REF!'), 'summary includes Excel formula error');
+    console.log('OK action-result gating detects formula errors and ignores undo failures');
+  }
+
   // restore env
   for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
   console.log('\nstepwise turn wiring tests completed.');

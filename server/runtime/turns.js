@@ -464,8 +464,45 @@ function normalizeClientActionErrors(errors) {
     type: error?.type || null,
     sheet: error?.sheet || null,
     target: error?.target || null,
-    message: String(error?.message || error || '').slice(0, 500)
+    message: String(error?.message || error || '').slice(0, 500),
+    formula: error?.formula ? String(error.formula).slice(0, 300) : null,
+    value: error?.value != null ? String(error.value).slice(0, 120) : null
   }));
+}
+
+function getBlockingActionExecutionErrors(turn) {
+  if (!turn || !Array.isArray(turn.actionExecutions)) return [];
+  return turn.actionExecutions.filter(record =>
+    record &&
+    !record.isUndo &&
+    (record.status === 'error' || Number(record.errorCount || 0) > 0)
+  );
+}
+
+function summarizeActionExecutionErrors(records = []) {
+  const count = records.reduce((sum, record) => sum + Math.max(1, Number(record.errorCount || 0)), 0);
+  const firstRecord = records[0] || {};
+  const firstError = Array.isArray(firstRecord.errors) && firstRecord.errors.length > 0
+    ? firstRecord.errors[0]
+    : null;
+  const where = firstError
+    ? `${firstError.sheet || 'sheet?'}${firstError.target ? '!' + firstError.target : ''}`
+    : (firstRecord.itemId || firstRecord.taskId || 'batch Excel');
+  const detail = firstError?.message || firstRecord.error || 'errore Excel client';
+  return `Excel ha segnalato ${count} errore/i dopo la scrittura (${where}: ${detail})`;
+}
+
+function failTurnForActionExecutionErrors(turnId, records) {
+  if (!records || records.length === 0) return null;
+  const turn = _getTurnRef(turnId);
+  if (!turn) return null;
+  const reason = summarizeActionExecutionErrors(records);
+  const failedTurn = setTurnStatus(turnId, 'error', reason);
+  failedTurn.narration = { message: reason, suggestions: [] };
+  saveTurn(failedTurn);
+  emitAgentLoopTodos(turnId, 'done');
+  emitTurnCompleted(failedTurn);
+  return failedTurn;
 }
 
 function applyActionExecutionResult(turn, payload = {}) {
@@ -518,6 +555,13 @@ function recordActionExecution(turnId, payload = {}) {
   appendLog(turnId, message, record.status === 'completed' ? 'info' : 'error', {
     actionExecution: record
   });
+  const blocking = getBlockingActionExecutionErrors(turn);
+  if (blocking.length > 0 && !record.isUndo) {
+    const alreadyError = turn.status === 'error' && turn.error;
+    if (!alreadyError) {
+      failTurnForActionExecutionErrors(turnId, blocking);
+    }
+  }
   return record;
 }
 
@@ -2820,6 +2864,12 @@ async function stepArchitectWave(turnId, clientResult, clientSeq) {
 async function finalizeStepwiseArchitectTurn(turnId) {
   const turn = _getTurnRef(turnId);
   if (!turn) return { control: 'aborted', payload: { reason: 'turn missing' }, stepSeq: 0 };
+  const blockingErrors = getBlockingActionExecutionErrors(turn);
+  if (blockingErrors.length > 0) {
+    const failedTurn = failTurnForActionExecutionErrors(turnId, blockingErrors);
+    const reason = failedTurn?.error || summarizeActionExecutionErrors(blockingErrors);
+    return { control: 'aborted', payload: { reason }, stepSeq: turn.agentStepSeq || 0 };
+  }
   const summary = turn.architectSummary || (
     turn.architectState?.blueprint
       ? computeDurableArchitectSummary(turn.architectState)
@@ -3147,6 +3197,8 @@ module.exports = {
   respondToTurnRequest,
   applyActionExecutionResult,
   recordActionExecution,
+  getBlockingActionExecutionErrors,
+  summarizeActionExecutionErrors,
   turnHasMutationResults,
   undoTurn,
   enqueueSteer,

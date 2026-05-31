@@ -140,6 +140,157 @@ function validateSliceActions(sliceId, actions) {
   return { ok: true, actions: normalized };
 }
 
+function formulaLiteralFromCellSpec(spec) {
+  if (!spec || typeof spec !== 'object') return null;
+  if (spec.formula != null) return spec.formula;
+  if (typeof spec.value === 'string' && spec.value.trim().startsWith('=')) return spec.value;
+  return null;
+}
+
+function normalizeFormulaSheetName(raw) {
+  let name = String(raw || '').trim();
+  if (!name) return '';
+  if (name.startsWith("'") && name.endsWith("'")) {
+    name = name.slice(1, -1).replace(/''/g, "'");
+  }
+  return name.trim();
+}
+
+function extractSheetNameFromReference(ref) {
+  const text = String(ref || '').trim();
+  if (!text) return null;
+  if (text.includes('!')) {
+    const left = text.split('!')[0];
+    return normalizeFormulaSheetName(left);
+  }
+  if (/^[A-Z]+\$?\d+(?::\$?[A-Z]+\$?\d+)?$/i.test(text)) return null;
+  if (/^[A-Z]+:[A-Z]+$/i.test(text) || /^\d+:\d+$/.test(text)) return null;
+  return normalizeFormulaSheetName(text);
+}
+
+function extractFormulaSheetRefs(formula) {
+  if (formula == null) return [];
+  const text = String(formula);
+  if (!text.trim().startsWith('=')) return [];
+  const refs = new Set();
+  const quoted = /'((?:[^']|'')+)'!/g;
+  let match;
+  while ((match = quoted.exec(text))) {
+    const name = normalizeFormulaSheetName(`'${match[1]}'`);
+    if (name) refs.add(name);
+  }
+  const unquoted = /(^|[^A-Za-z0-9_.'\]])([A-Za-z_][A-Za-z0-9_.]*)!/g;
+  while ((match = unquoted.exec(text))) {
+    const name = normalizeFormulaSheetName(match[2]);
+    if (name) refs.add(name);
+  }
+  return [...refs];
+}
+
+function collectActionSheetNames(action, out) {
+  if (!action || !action.params) return;
+  const p = action.params;
+  switch (action.tool) {
+    case 'bulk_create_sheets':
+      (Array.isArray(p.names) ? p.names : []).forEach(name => out.add(String(name)));
+      break;
+    case 'delete_sheet':
+      if (p.name) out.add(String(p.name));
+      break;
+    case 'set_cell_range':
+      if (p.sheet) out.add(String(p.sheet));
+      break;
+    case 'bulk_set_cell_ranges':
+      (Array.isArray(p.writes) ? p.writes : []).forEach(write => {
+        if (write?.sheet) out.add(String(write.sheet));
+      });
+      break;
+    case 'bulk_set_format':
+      (Array.isArray(p.formats) ? p.formats : []).forEach(format => {
+        if (format?.sheet) out.add(String(format.sheet));
+      });
+      break;
+    case 'bulk_set_notes':
+      (Array.isArray(p.notes) ? p.notes : []).forEach(note => {
+        if (note?.sheet) out.add(String(note.sheet));
+      });
+      break;
+    case 'copy_range':
+      if (p.from_sheet) out.add(String(p.from_sheet));
+      if (p.to_sheet) out.add(String(p.to_sheet));
+      break;
+    default:
+      break;
+  }
+}
+
+function collectActionFormulaRefs(action, out) {
+  if (!action || !action.params) return;
+  const p = action.params;
+  if (action.tool === 'set_cell_range') {
+    for (const spec of Object.values(p.cells || {})) {
+      const formula = formulaLiteralFromCellSpec(spec);
+      extractFormulaSheetRefs(formula).forEach(ref => out.push({ formula: String(formula), ref }));
+    }
+    return;
+  }
+  if (action.tool === 'bulk_set_cell_ranges') {
+    for (const write of Array.isArray(p.writes) ? p.writes : []) {
+      for (const spec of Object.values(write?.cells || {})) {
+        const formula = formulaLiteralFromCellSpec(spec);
+        extractFormulaSheetRefs(formula).forEach(ref => out.push({ formula: String(formula), ref }));
+      }
+    }
+    return;
+  }
+  if (action.tool === 'create_named_range') {
+    extractFormulaSheetRefs(p.refers_to).forEach(ref => out.push({ formula: String(p.refers_to), ref }));
+    return;
+  }
+  if (action.tool === 'bulk_create_named_ranges') {
+    for (const range of Array.isArray(p.ranges) ? p.ranges : []) {
+      extractFormulaSheetRefs(range?.refers_to).forEach(ref => out.push({ formula: String(range.refers_to), ref }));
+    }
+  }
+}
+
+function validateDeterministicFormulaReferences(slices, context = {}) {
+  const allowedSheets = new Set();
+  for (const name of context.workbookSheets || context.sheets || []) {
+    if (name) allowedSheets.add(String(name));
+  }
+  for (const slice of slices) {
+    for (const sheet of slice.scope?.sheets_owned || []) {
+      if (sheet) allowedSheets.add(String(sheet));
+    }
+    for (const ref of slice.scope?.ranges_owned || []) {
+      const sheet = extractSheetNameFromReference(ref);
+      if (sheet) allowedSheets.add(sheet);
+    }
+    for (const ref of slice.scope?.may_read_from || []) {
+      const sheet = extractSheetNameFromReference(ref);
+      if (sheet) allowedSheets.add(sheet);
+    }
+    for (const action of slice.actions || []) {
+      collectActionSheetNames(action, allowedSheets);
+    }
+  }
+
+  const errors = [];
+  for (const slice of slices) {
+    const refs = [];
+    for (const action of slice.actions || []) collectActionFormulaRefs(action, refs);
+    for (const item of refs) {
+      if (!allowedSheets.has(item.ref)) {
+        errors.push(
+          `slice ${slice.id}: formula references sheet "${item.ref}" but no slice scope/action declares that exact sheet name`
+        );
+      }
+    }
+  }
+  return errors;
+}
+
 const ARCHITECT_SYSTEM_PROMPT = `You are an architect and deterministic action compiler for Excel workbook builds.
 Given a user objective and current workbook state, produce one BLUEPRINT: a directed acyclic graph (DAG) of slices.
 
@@ -181,6 +332,8 @@ PRESERVE USER DATA VERBATIM:
 
 FORMULAS AND CELL MAPS:
 - The architect is the single source of truth for cell addresses. Every formula written in actions[] must be a literal Excel formula string.
+- Every cross-sheet reference in actions[] must exactly match a sheet declared in scope.sheets_owned, scope.may_read_from, or bulk_create_sheets.names. Never use shortened aliases: if the sheet is "Cash Flow - Single Location", formulas must use ='Cash Flow - Single Location'!B5, not =Cash Flow!B5.
+- Quote every sheet name that contains spaces, punctuation, apostrophes, ampersands, or hyphens in formulas using Excel syntax: ='P&L - Single Location'!B10.
 - For Assumptions, use a flat 2-column layout: column A = driver label, column B = driver value. Section headers may live in column A with blank B. Year headers belong on operating sheets, not Assumptions.
 - Before emitting dependent formulas, verify every Assumptions!$B$X reference points to the row you actually wrote in the Assumptions actions.
 - Do not write driver values inline on dependent sheets when they should reference Assumptions. Use absolute references like =Assumptions!$B$5.
@@ -313,7 +466,7 @@ async function generateBlueprint({ objective, context = {}, triage = null, callL
   if (!parsed) {
     throw new Error('Architect produced unparseable JSON');
   }
-  const validation = validateBlueprint(parsed);
+  const validation = validateBlueprint(parsed, { workbookSheets: context.workbookSheets || [] });
   if (!validation.ok) {
     throw new Error(`Architect blueprint validation failed: ${validation.errors.join('; ')}`);
   }
@@ -354,7 +507,7 @@ function extractArchitectJson(llmResult) {
  *
  * Returns { ok: true, blueprint } or { ok: false, errors: [...] }.
  */
-function validateBlueprint(raw) {
+function validateBlueprint(raw, context = {}) {
   const errors = [];
   if (!raw || typeof raw !== 'object') {
     return { ok: false, errors: ['blueprint is not an object'] };
@@ -471,6 +624,9 @@ function validateBlueprint(raw) {
 
   if (errors.length) return { ok: false, errors };
 
+  errors.push(...validateDeterministicFormulaReferences(normalizedSlices, context));
+  if (errors.length) return { ok: false, errors };
+
   return {
     ok: true,
     blueprint: {
@@ -545,5 +701,7 @@ module.exports = {
   extractArchitectJson,
   validateBlueprint,
   validateSliceActions,
+  extractFormulaSheetRefs,
+  validateDeterministicFormulaReferences,
   buildSliceWorkerPrompt
 };

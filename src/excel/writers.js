@@ -263,6 +263,172 @@ function estimateBatchCells(actions = []) {
   }, 0);
 }
 
+const FORMULA_ERROR_RE = /^#(?:REF!|VALUE!|NAME\?|DIV\/0!|NUM!|N\/A|NULL!)$/i;
+const MAX_FORMULA_VERIFY_TARGETS = 180;
+const MAX_FORMULA_VERIFY_CELLS = 3000;
+
+function isFormulaString(value) {
+  return typeof value === 'string' && value.trim().startsWith('=');
+}
+
+function cellSpecHasFormula(spec) {
+  if (!spec || typeof spec !== 'object') return false;
+  if (spec.formula != null) return true;
+  return isFormulaString(spec.value);
+}
+
+function pushFormulaCheckTarget(out, action, sheet, target) {
+  if (!target) return;
+  const parsed = parseTargetReference(target);
+  const resolvedSheet = parsed.sheetName || sheet || action.sheet || action.sheetName || null;
+  const resolvedTarget = parsed.rangeAddress || target;
+  const cells = estimateTargetCells(resolvedTarget);
+  if (!Number.isFinite(cells) || cells > MAX_FORMULA_VERIFY_CELLS) {
+    addLog(`Verifica formule saltata su ${resolvedSheet || 'foglio attivo'}!${resolvedTarget}: range troppo grande.`, 'warn');
+    return;
+  }
+  out.push({
+    sheet: resolvedSheet,
+    target: resolvedTarget,
+    actionType: action.type,
+    queueBatchKey: action[QUEUE_BATCH_KEY] || null
+  });
+}
+
+function collectFormulaCheckTargets(action, out) {
+  if (!action || typeof action !== 'object') return;
+  const parsedTarget = parseTargetReference(action.target);
+  const actionSheet = action.sheet || action.sheetName || parsedTarget.sheetName || null;
+  const actionTarget = parsedTarget.rangeAddress || action.target;
+
+  switch (action.type) {
+    case 'setCellValue':
+    case 'fillRange':
+      if (isFormulaString(action.value)) pushFormulaCheckTarget(out, action, actionSheet, actionTarget);
+      break;
+    case 'runFormula':
+      pushFormulaCheckTarget(out, action, actionSheet, actionTarget);
+      break;
+    case 'writeRange':
+      if (Array.isArray(action.formulas) || isFormulaString(action.value)) {
+        pushFormulaCheckTarget(out, action, actionSheet, actionTarget);
+      }
+      break;
+    case 'setCellRange': {
+      const cells = action.cells || {};
+      const entries = Object.entries(cells);
+      for (const [addr, spec] of entries) {
+        if (cellSpecHasFormula(spec)) pushFormulaCheckTarget(out, action, actionSheet, addr);
+      }
+      if (action.copyToRange && entries.length > 0 && cellSpecHasFormula(entries[0][1])) {
+        const firstParsed = parseTargetReference(entries[0][0]);
+        pushFormulaCheckTarget(out, action, firstParsed.sheetName || actionSheet, action.copyToRange);
+      }
+      break;
+    }
+    case 'copyRange':
+      if (action.to || action.target) {
+        pushFormulaCheckTarget(out, action, action.toSheet || action.fromSheet || action.sheet || null, action.to || action.target);
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+function dedupeFormulaCheckTargets(targets = []) {
+  const seen = new Set();
+  const out = [];
+  for (const t of targets) {
+    const key = `${t.sheet || '__active__'}!${t.target}|${t.queueBatchKey || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(t);
+    if (out.length >= MAX_FORMULA_VERIFY_TARGETS) {
+      addLog(`Verifica formule limitata ai primi ${MAX_FORMULA_VERIFY_TARGETS} range per proteggere Excel.`, 'warn');
+      break;
+    }
+  }
+  return out;
+}
+
+function valueLooksLikeFormulaError(value) {
+  return typeof value === 'string' && FORMULA_ERROR_RE.test(value.trim());
+}
+
+function formulaLooksBroken(formula) {
+  return typeof formula === 'string' && /#(?:REF!|VALUE!|NAME\?|DIV\/0!|NUM!|N\/A|NULL!)/i.test(formula);
+}
+
+async function inspectWrittenFormulaErrors(context, sheetCache, defaultSheet, targets = []) {
+  const checks = dedupeFormulaCheckTargets(targets);
+  if (checks.length === 0) return [];
+  const rangeLoads = [];
+
+  try {
+    if (context.application && typeof context.application.calculate === 'function') {
+      context.application.calculate(Excel.CalculationType.full);
+    }
+  } catch (_) {}
+
+  for (const check of checks) {
+    try {
+      const sheet = check.sheet
+        ? await ensureWorksheet(context, sheetCache, check.sheet, { createIfMissing: false })
+        : defaultSheet;
+      const range = sheet.getRange(check.target);
+      range.load('values,formulas,address,rowCount,columnCount');
+      rangeLoads.push({ ...check, range, sheetName: check.sheet || null });
+    } catch (err) {
+      rangeLoads.push({
+        ...check,
+        sheetName: check.sheet || null,
+        loadError: err && err.message ? err.message : String(err)
+      });
+    }
+  }
+
+  await context.sync();
+
+  const errors = [];
+  for (const item of rangeLoads) {
+    if (item.loadError) {
+      errors.push({
+        type: 'formulaError',
+        sheet: item.sheetName,
+        target: item.target,
+        message: `Formula verification could not read target: ${item.loadError}`,
+        queueBatchKey: item.queueBatchKey || null
+      });
+      continue;
+    }
+    const values = Array.isArray(item.range.values) ? item.range.values : [];
+    const formulas = Array.isArray(item.range.formulas) ? item.range.formulas : [];
+    for (let r = 0; r < Math.max(values.length, formulas.length); r++) {
+      const valueRow = values[r] || [];
+      const formulaRow = formulas[r] || [];
+      for (let c = 0; c < Math.max(valueRow.length, formulaRow.length); c++) {
+        const value = valueRow[c];
+        const formula = formulaRow[c];
+        const hasFormula = isFormulaString(formula);
+        if (!hasFormula && !formulaLooksBroken(formula)) continue;
+        if (!valueLooksLikeFormulaError(value) && !formulaLooksBroken(formula)) continue;
+        const errorValue = valueLooksLikeFormulaError(value) ? String(value).trim() : 'formula error';
+        errors.push({
+          type: 'formulaError',
+          sheet: item.sheetName,
+          target: `${item.target}${values.length > 1 || valueRow.length > 1 ? ` [r${r + 1}c${c + 1}]` : ''}`,
+          message: `Excel evaluated written formula to ${errorValue}`,
+          formula: typeof formula === 'string' ? formula.slice(0, 300) : null,
+          value: value == null ? null : String(value).slice(0, 80),
+          queueBatchKey: item.queueBatchKey || null
+        });
+      }
+    }
+  }
+  return errors.slice(0, 50);
+}
+
 function clampNumber(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -738,6 +904,7 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
   const runStarted = nowMs();
   const result = await Excel.run(async (context) => {
     const actionErrors = [];
+    const formulaCheckTargets = [];
     const defaultSheet = context.workbook.worksheets.getActiveWorksheet();
     const sheetCache = new Map();
     const pendingNotes = [];
@@ -870,6 +1037,7 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
           default:
             console.warn('Azione non supportata:', action.type);
         }
+        collectFormulaCheckTargets(action, formulaCheckTargets);
       } catch (actionErr) {
         console.error('Errore azione', action.type, actionErr);
         const detail = actionErr && actionErr.message ? actionErr.message : String(actionErr);
@@ -901,6 +1069,23 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
         addLog(`context.sync fallito per focus perso, riprovo batch`, 'warn');
       } else {
         throw syncErr;
+      }
+    }
+
+    if (!focusLost && formulaCheckTargets.length > 0) {
+      try {
+        const formulaErrors = await inspectWrittenFormulaErrors(context, sheetCache, defaultSheet, formulaCheckTargets);
+        if (formulaErrors.length > 0) {
+          actionErrors.push(...formulaErrors);
+          addLog(`Verifica formule: ${formulaErrors.length} errore/i Excel rilevati dopo la scrittura.`, 'error');
+        }
+      } catch (err) {
+        actionErrors.push({
+          type: 'formulaVerification',
+          sheet: null,
+          target: null,
+          message: `Formula verification failed: ${err && err.message ? err.message : String(err)}`
+        });
       }
     }
 

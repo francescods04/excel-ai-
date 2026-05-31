@@ -220,6 +220,89 @@ function test_validateBlueprint_rejects_invalid_slice_actions() {
   console.log('  ✓ invalid deterministic action shape rejected clearly');
 }
 
+function test_validateBlueprint_accepts_declared_formula_sheet_refs() {
+  const blueprint = {
+    slices: [
+      {
+        id: 'assumptions',
+        title: 'Assumptions',
+        deps: [],
+        scope: { sheets_owned: ['Assumptions'], ranges_owned: [], may_read_from: [] },
+        instructions: 'Inputs',
+        actions: [
+          { tool: 'bulk_create_sheets', params: { names: ['Assumptions'] } },
+          { tool: 'bulk_set_cell_ranges', params: { writes: [{ sheet: 'Assumptions', cells: { A1: { value: 'Driver' }, B1: { value: 100 } } }] } }
+        ]
+      },
+      {
+        id: 'cash_flow',
+        title: 'Cash Flow',
+        deps: ['assumptions'],
+        scope: { sheets_owned: ['Cash Flow - Single Location'], ranges_owned: [], may_read_from: ['Assumptions!A1:B20'] },
+        instructions: 'Cash flow',
+        actions: [
+          { tool: 'bulk_create_sheets', params: { names: ['Cash Flow - Single Location'] } },
+          {
+            tool: 'bulk_set_cell_ranges',
+            params: {
+              writes: [
+                {
+                  sheet: 'Cash Flow - Single Location',
+                  cells: {
+                    A1: { value: 'Cash Flow' },
+                    B5: { formula: '=Assumptions!$B$1' }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  };
+  const r = validateBlueprint(blueprint);
+  assert.ok(r.ok, `expected declared sheet refs to pass, got: ${(r.errors || []).join('; ')}`);
+  console.log('  ✓ deterministic formula refs to declared sheets accepted');
+}
+
+function test_validateBlueprint_rejects_undeclared_formula_sheet_refs() {
+  const blueprint = {
+    slices: [
+      {
+        id: 'cash_flow',
+        title: 'Cash Flow',
+        deps: [],
+        scope: { sheets_owned: ['Cash Flow - Single Location'], ranges_owned: [], may_read_from: [] },
+        instructions: 'Cash flow',
+        actions: [
+          { tool: 'bulk_create_sheets', params: { names: ['Cash Flow - Single Location'] } },
+          {
+            tool: 'bulk_set_cell_ranges',
+            params: {
+              writes: [
+                {
+                  sheet: 'Cash Flow - Single Location',
+                  cells: {
+                    A1: { value: 'Cash Flow' },
+                    B5: { formula: '=CashFlow!$B$10' }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  };
+  const r = validateBlueprint(blueprint);
+  assert.ok(!r.ok, 'formula reference to undeclared sheet should fail');
+  assert.ok(
+    r.errors.some(e => /references sheet "CashFlow"/.test(e)),
+    `expected missing sheet reference error, got: ${r.errors.join('; ')}`
+  );
+  console.log('  ✓ deterministic formula refs to undeclared sheets rejected');
+}
+
 function test_validateSliceActions_rejects_extra_action_fields() {
   const r = validateSliceActions('x', [
     { tool: 'bulk_create_sheets', params: { names: ['X'] }, thought: 'hidden prose' }
@@ -289,6 +372,8 @@ function test_buildSliceWorkerPrompt_contains_scope_and_instructions() {
   test_validateBlueprint_drops_self_dep();
   test_validateBlueprint_accepts_valid_slice_actions();
   test_validateBlueprint_rejects_invalid_slice_actions();
+  test_validateBlueprint_accepts_declared_formula_sheet_refs();
+  test_validateBlueprint_rejects_undeclared_formula_sheet_refs();
   test_validateSliceActions_rejects_extra_action_fields();
   test_extractArchitectJson_handles_fences();
   await test_generateBlueprint_happy_path();
