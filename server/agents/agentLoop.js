@@ -4253,6 +4253,13 @@ async function runAgentStep(state, clientResult, deps = {}) {
       if (AGENT_FORCE_THINKING_AFTER_ERROR) state.forceThinkingNext = true;
       onProgress('iterationError', { iteration: state.iteration, error: `LLM JSON parse failed: ${llmResult.jsonError}` });
       state.messages.push(makeUserMessage(`Your previous response was not valid JSON (${llmResult.jsonError}). Reply with ONLY a single JSON object {"thought","tool","params"} — no extra text, no trailing characters. Continue the task from where you left off.`));
+      // Refund up to 2 parse failures per slice. DeepSeek pro occasionally emits
+      // truncated / malformed JSON that has nothing to do with the agent's task;
+      // counting these toward maxIter pushed format_and_verify past cap in the
+      // 2026-05-31 fast-food run and skipped the entire formatting pass.
+      if (state.parseFailureStreak <= 2) {
+        state.iteration = Math.max(0, state.iteration - 1);
+      }
       return { state, control: 'continue', payload: {} };
     }
     state.parseFailureStreak = 0;

@@ -34,6 +34,20 @@ PRESERVE USER DATA VERBATIM (mandatory — past runs invented a generic burger m
 - Format: paste the relevant chunk of the user's text inside the instructions field with a leading "VERBATIM USER DATA — write these exact items at these exact prices:" header. The worker also gets the full user request separately as ORIGINAL USER REQUEST, but architect-side faithful copying gives the worker an unambiguous source.
 - If a list has 30+ items, you may compress whitespace but NEVER drop items, rename them, or fabricate substitutes. Worker will fail the slice if forced to invent.
 
+LITERAL FORMULAS IN DEPENDENT SLICES (mandatory — past runs had workers hallucinate cell references: a revenue slice referenced "Working Capital" (€50,000) as the growth rate, producing Revenue 2027 = €69 BILLION):
+- For every slice that writes formulas referencing upstream sheets, the instructions field MUST contain a FORMULAS block listing every output cell with its LITERAL formula string. Workers are forbidden from composing formulas from prose descriptions.
+- Format:
+    FORMULAS:
+      Revenue!B6 = =Assumptions!$B$5*Assumptions!$B$6*Assumptions!$B$7
+      Revenue!C6 = =B6*(1+Assumptions!$B$8)
+      Revenue!D6:G6 = same pattern as C6, dragged right with copyToRange
+      P&L!B10 = =Revenue!B6
+      P&L!B11 = =Revenue!B6*Assumptions!$B$11
+      P&L!B12 = =B10-B11
+      ...
+- Every cell address referenced ($B$11 etc.) MUST match the CELL MAP in the Assumptions slice — never reference a row position the architect didn't pin down. If the dependent slice would need a driver that's not in the CELL MAP, add it to the CELL MAP and to the Assumptions slice instructions first.
+- Workers will not call done if they had to guess any formula. Saving you 1 architect token here costs hours of cascade failures downstream.
+
 CANONICAL ASSUMPTIONS LAYOUT (mandatory — schema ambiguity has cascade-killed every multi-sheet run that didn't follow this):
 - The Assumptions slice MUST output a flat 2-column table: column A = driver label (string), column B = driver value (number or %). No "Unit" column, no "Section" column. One driver per row, grouped by blank rows between sections (Section headers go in column A only with no value in B).
 - Year header row (2025-2030) MUST NOT live on the Assumptions sheet. It belongs on Revenue / P&L / CF sheets at a fixed row (row 3 by convention).
@@ -341,7 +355,15 @@ HARD RULES:
 - READ BEFORE YOU WRITE: your first tool call MUST be a read (get_cell_ranges / read_sheet) against the upstream ranges listed above. Do NOT guess upstream layout from the slice instructions — in prod runs, workers that skipped this step wrote formulas pointing to wrong cells and had to redo the slice 4-8 times. Confirm exact addresses, then write your formulas against those exact addresses.
 - IF a read returns suspiciously thin data (only A1, zero rows, sheet "doesn't exist"), it is a TOOL ISSUE — the upstream slice succeeded before yours started. Retry ONCE with read_sheet on the same sheet. If still thin, write your formulas anyway using the absolute address from may_read_from (e.g. =Assumptions!$B$5). DO NOT call done with reason "upstream not available" — that is a confabulation; the orchestrator will reject it.` : ''}
 - ITER BUDGET IS TIGHT (~${20}). Consolidate writes: a P&L / cash-flow / balance-sheet slice should be ONE bulk_set_cell_ranges call (up to 16 writes per call) for ALL section rows, then ONE bulk_set_format pass for formatting. Sequential per-row set_cell_range calls burn the budget and cascade-kill downstream waves.
-- TOOL PARAMS are not negotiable: bulk_create_sheets needs {"names":[…]} (NOT "sheets"). bulk_set_cell_ranges needs {"writes":[…]} (NOT "entries", "ranges", "cells"). get_cell_ranges needs {"ranges":[{"sheet":"X","target":"A1:B40"}]} — target MUST be a real range like "A1:B40", NOT just "A1". Do NOT spend iterations guessing parameter names — read the error response, fix the param name, move on.
+- TOOL PARAMS are not negotiable. Memorize these EXACT shapes (the wrong name burns one iteration every single time):
+    bulk_create_sheets:    {"names":["Sheet1","Sheet2"]}                          — NOT "sheets"
+    bulk_set_cell_ranges:  {"writes":[{"sheet":"S","cells":{"A1":{"value":1}}}]}  — NOT "entries"/"ranges"/"cells" at top level
+    bulk_set_format:       {"formats":[{"sheet":"S","target":"A1:B2","options":{"bold":true}}]}  — NOT "writes"/"ranges" (formats is the canonical key; writes is bulk_set_cell_ranges)
+    get_cell_ranges:       {"ranges":[{"sheet":"S","target":"A1:B40"}]}           — target MUST be a real range, NOT just "A1"
+    set_cell_range:        {"sheet":"S","cells":{"A1":{"value":1,"formula":"=B1+C1"}}}
+  bulk_set_format options keys: backgroundColor, fontColor, bold, italic, numberFormat, columnWidth, rowHeight, horizontalAlignment, borders. Flat keys, NOT nested under "font" / "fill".
+- IF THIS SHEET ALREADY EXISTS in the workbook (you can see it from the initial workbook overview), DELETE IT FIRST with delete_sheet, THEN create_sheet/bulk_create_sheets fresh. Past runs left old generic data mixed with the new specific data because workers wrote into existing rows without clearing — the result was Assumptions sheets with two different revenue growth rates side by side.
+- SANITY CHECK before calling done: when you wrote a time series (e.g. revenue across 2025-2030), the year-over-year ratio should be roughly 1±0.5 (anything growing 50,000× year-over-year means you referenced the WRONG cell — most commonly multiplying by an absolute € amount instead of a percentage). Read back B6:G6 of your output, eyeball the ratios, and if a year is >10× the prior year, you MUST rewrite that formula using the LITERAL cell address from the slice instructions (architect provides it — do not invent).
 - execute_office_js is BLOCKED for slice workers (and will be rejected before reaching Excel). Use set_cell_range / bulk_set_cell_ranges for data + formulas, bulk_set_format for formatting, create_sheet / bulk_create_sheets for sheet ops, execute_excel_formula for one-off formulas. Do NOT attempt execute_office_js — every attempt is a wasted iteration.
 - copyToRange is FORMULAS ONLY (relative refs adjust per cell). Never use copyToRange with a text label as the source cell — it paints the label into every destination. For headers/titles, write to one cell and merge if you need it visually wide.
 - DO NOT call done until you have actually written cells in your owned scope. A done with zero writes will be rejected as a failed slice and cascade-kill downstream slices. If you're stuck, write what you can with absolute references and explain in the done summary what is incomplete.
