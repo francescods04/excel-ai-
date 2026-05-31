@@ -2,6 +2,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { PassThrough } = require('stream');
 
 async function test(name, fn) {
   try {
@@ -33,7 +34,7 @@ async function main() {
 
   const { writeLlmTrace, readLlmTraces, summarizeLlmTraces } = require('../../server/utils/llmTrace');
   const { runWithExecutionContext, getExecutionContext } = require('../../server/utils/executionContext');
-  let { _buildTraceContext, _resolveRoleConfig } = loadLlmModule();
+  let { _buildTraceContext, _resolveRoleConfig, _readDeepSeekSseStream } = loadLlmModule();
 
   await test('execution context survives async boundaries', async () => {
     await runWithExecutionContext({ turnId: 'turn-ctx', phase: 'planning' }, async () => {
@@ -74,6 +75,31 @@ async function main() {
     assert.strictEqual(plannerCfg.reasoningEffort, 'medium');
     delete process.env.PLANNER_THINKING_ENABLED;
     ({ _resolveRoleConfig } = loadLlmModule());
+  });
+
+  await test('deepseek stream parser accumulates SSE chunks', async () => {
+    const stream = new PassThrough();
+    const chunks = [];
+    const promise = _readDeepSeekSseStream(stream, { maxTotalMs: 1000 }, (delta, text, isDone) => {
+      chunks.push({ delta, text, isDone });
+    });
+
+    stream.write('data: {"choices":[{"delta":{"content":"hel"}}]}\n\n');
+    stream.write('data: {"choices":[{"delta":{"content":"lo"}}]}\r\n');
+    stream.end('data: [DONE]\n');
+
+    const result = await promise;
+    assert.strictEqual(result, 'hello');
+    assert.strictEqual(chunks.at(-1).isDone, true);
+  });
+
+  await test('deepseek stream timeout swallows late reset errors', async () => {
+    const stream = new PassThrough();
+    const promise = _readDeepSeekSseStream(stream, { maxTotalMs: 5 }, () => {});
+
+    await assert.rejects(promise, /Stream timeout after 5ms/);
+    assert.strictEqual(stream.destroyed, true);
+    stream.emit('error', Object.assign(new Error('aborted'), { code: 'ECONNRESET' }));
   });
 
   await test('llm trace writes, reads and summarizes structured records', async () => {

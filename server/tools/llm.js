@@ -710,7 +710,87 @@ async function callLLM({
 }
 
 /* ---------- Streaming ---------- */
-const readline = require('readline');
+
+function readDeepSeekSseStream(stream, options = {}, onChunk = () => {}) {
+  let accumulated = '';
+  let buffer = '';
+  let done = false;
+  let settled = false;
+
+  return new Promise((resolve, reject) => {
+    let timeoutId;
+
+    function finish(err, value, cleanupStream = false) {
+      if (settled) return;
+      settled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+      if (cleanupStream) {
+        stream.off('data', onData);
+        stream.off('end', onEnd);
+        try {
+          if (!stream.destroyed) stream.destroy();
+        } catch (_) {}
+      }
+      if (err) reject(err); else resolve(value);
+    }
+
+    function handleLine(line) {
+      if (done || settled) return;
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) return;
+      const data = trimmed.slice(5).trim();
+      if (data === '[DONE]') {
+        done = true;
+        onChunk('', accumulated, true);
+        finish(null, accumulated, true);
+        return;
+      }
+      try {
+        const parsed = JSON.parse(data);
+        const deltaContent = parsed.choices?.[0]?.delta?.content || '';
+        const deltaReasoning = parsed.choices?.[0]?.delta?.reasoning_content || '';
+        const delta = deltaContent || deltaReasoning;
+        if (delta) {
+          accumulated += delta;
+          onChunk(delta, accumulated, false);
+        }
+      } catch (_) {}
+    }
+
+    function onData(chunk) {
+      if (done || settled) return;
+      buffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+      let newlineIndex;
+      while ((newlineIndex = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, newlineIndex).replace(/\r$/, '');
+        buffer = buffer.slice(newlineIndex + 1);
+        handleLine(line);
+        if (done || settled) return;
+      }
+    }
+
+    function onEnd() {
+      if (settled) return;
+      if (buffer.trim()) handleLine(buffer);
+      if (!done && !settled) onChunk('', accumulated, true);
+      finish(null, accumulated);
+    }
+
+    function onError(err) {
+      if (settled) return;
+      finish(err, null, true);
+    }
+
+    stream.on('data', onData);
+    stream.on('end', onEnd);
+    stream.on('aborted', () => onError(new Error('Stream aborted')));
+    stream.on('error', onError);
+
+    if (options.maxTotalMs && options.maxTotalMs > 0) {
+      timeoutId = setTimeout(() => finish(new Error(`Stream timeout after ${options.maxTotalMs}ms`), null, true), options.maxTotalMs);
+    }
+  });
+}
 
 async function callDeepSeekStream(messages, options = {}, onChunk) {
   const model = options.model || DEEPSEEK_MODEL;
@@ -743,73 +823,7 @@ async function callDeepSeekStream(messages, options = {}, onChunk) {
     }
   );
 
-  const stream = response.data;
-  let accumulated = '';
-  let done = false;
-  let settled = false;
-
-  return new Promise((resolve, reject) => {
-    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-
-    let timeoutId;
-    function finish(err, value, cleanupStream = false) {
-      if (settled) return;
-      settled = true;
-      if (timeoutId) clearTimeout(timeoutId);
-      if (cleanupStream) {
-        try { rl.close(); } catch (_) {}
-        try {
-          if (!stream.destroyed) stream.destroy();
-        } catch (_) {}
-      }
-      if (err) reject(err); else resolve(value);
-    }
-
-    if (options.maxTotalMs && options.maxTotalMs > 0) {
-      timeoutId = setTimeout(() => finish(new Error(`Stream timeout after ${options.maxTotalMs}ms`), null, true), options.maxTotalMs);
-    }
-
-    rl.on('line', (line) => {
-      if (done || settled) return;
-      const trimmed = line.trim();
-      if (!trimmed.startsWith('data:')) return;
-      const data = trimmed.slice(5).trim();
-      if (data === '[DONE]') {
-        done = true;
-        onChunk('', accumulated, true);
-        finish(null, accumulated, true);
-        return;
-      }
-      try {
-        const parsed = JSON.parse(data);
-        const deltaContent = parsed.choices?.[0]?.delta?.content || '';
-        const deltaReasoning = parsed.choices?.[0]?.delta?.reasoning_content || '';
-        const delta = deltaContent || deltaReasoning;
-        if (delta) {
-          accumulated += delta;
-          onChunk(delta, accumulated, false);
-        }
-      } catch (_) {}
-    });
-
-    rl.on('close', () => {
-      if (settled) return;
-      if (!done) onChunk('', accumulated, true);
-      finish(null, accumulated);
-    });
-
-    rl.on('error', (err) => {
-      finish(err, null, true);
-    });
-
-    stream.on('aborted', () => {
-      finish(new Error('Stream aborted'), null, true);
-    });
-
-    stream.on('error', (err) => {
-      finish(err, null, true);
-    });
-  });
+  return readDeepSeekSseStream(response.data, options, onChunk);
 }
 
 async function callLLMStreaming({
@@ -955,5 +969,6 @@ module.exports = {
   resetUsageStats,
   getUsageStats,
   _buildTraceContext: buildTraceContext,
-  _resolveRoleConfig: resolveRoleConfig
+  _resolveRoleConfig: resolveRoleConfig,
+  _readDeepSeekSseStream: readDeepSeekSseStream
 };
