@@ -116,7 +116,48 @@ function tryParseJSON(content) {
   try { return { ok: true, value: JSON.parse(extractJSON(content)) }; } catch (_) {}
   // Repair pass: escape bare control chars in string literals, then try again.
   try { return { ok: true, value: JSON.parse(repairJsonControlChars(content)) }; } catch (_) {}
-  try { return { ok: true, value: JSON.parse(repairJsonControlChars(extractJSON(content))) }; } catch (e) { return { ok: false, error: e }; }
+  try { return { ok: true, value: JSON.parse(repairJsonControlChars(extractJSON(content))) }; } catch (_) {}
+  // Repair: truncation — close open brackets/braces/strings if LLM output got cut off
+  try { return { ok: true, value: JSON.parse(repairTruncatedJSON(content)) }; } catch (_) {}
+  try { return { ok: true, value: JSON.parse(repairTruncatedJSON(extractJSON(content))) }; } catch (_) {}
+  // Repair: trailing commas inside arrays/objects
+  try { return { ok: true, value: JSON.parse(removeTrailingCommas(content)) }; } catch (_) {}
+  try { return { ok: true, value: JSON.parse(removeTrailingCommas(extractJSON(content))) }; } catch (e) { return { ok: false, error: e }; }
+}
+
+function repairTruncatedJSON(s) {
+  if (!s || typeof s !== 'string') return s;
+  s = repairJsonControlChars(s);
+  let depth = 0, inStr = false, escape = false;
+  const stack = [];
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (escape) { escape = false; continue; }
+      if (c === '\\') { escape = true; continue; }
+      if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '{' || c === '[') { depth++; stack.push(c); }
+    else if (c === '}' || c === ']') {
+      depth--;
+      if (stack.length > 0 && ((stack[stack.length - 1] === '{' && c === '}') || (stack[stack.length - 1] === '[' && c === ']'))) {
+        stack.pop();
+      }
+    }
+  }
+  if (inStr) s += '"';
+  while (stack.length > 0) {
+    const opener = stack.pop();
+    s += opener === '{' ? '}' : ']';
+  }
+  return s;
+}
+
+function removeTrailingCommas(s) {
+  if (!s || typeof s !== 'string') return s;
+  return s.replace(/,(\s*[}\]])/g, '$1');
 }
 
 function safeTimeoutMs(value, fallback) {
