@@ -24,6 +24,7 @@ const DEFAULT_MAX_PARALLEL = Number(process.env.PARALLEL_ORCHESTRATOR_MAX || 6);
 // re-read if drift, 1 create_sheet, 3-5 writes, 1 format, 1 verify, plus ~5
 // iter cushion for tool param glitches and JSON parse retries.
 const SLICE_HARD_ITER_CAP = Number(process.env.SLICE_HARD_ITER_CAP) || 30;
+const SLICE_MAX_RETRIES = Number(process.env.SLICE_MAX_RETRIES) || 1;
 const PRO_MODEL = process.env.AGENT_LOOP_PRO_MODEL || process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro';
 
 function initArchitectRun(blueprint) {
@@ -118,13 +119,17 @@ function cascadeSkips(state, onEvent = () => {}) {
     if (state.sliceStates[slice.id] !== 'pending') continue;
     for (const dep of slice.deps || []) {
       const depSt = state.sliceStates[dep];
-      if (depSt === 'failed' || depSt === 'skipped') {
-        state.sliceStates[slice.id] = 'skipped';
-        state.sliceResults[slice.id] = { ok: false, skipped: true, reason: `dep ${dep} ${depSt}` };
-        onEvent('sliceSkipped', { sliceId: slice.id, reason: `dep ${dep} ${depSt}` });
-        changed = true;
-        break;
+      if (depSt !== 'failed' && depSt !== 'skipped') continue;
+      const depWrites = state.sliceWriteCounts[dep] || 0;
+      if (depWrites > 0) {
+        onEvent('depPartialData', { sliceId: slice.id, dep, depStatus: depSt, depWrites, note: 'downstream proceeding with partial data from failed dep' });
+        continue;
       }
+      state.sliceStates[slice.id] = 'skipped';
+      state.sliceResults[slice.id] = { ok: false, skipped: true, reason: `dep ${dep} ${depSt}` };
+      onEvent('sliceSkipped', { sliceId: slice.id, reason: `dep ${dep} ${depSt}` });
+      changed = true;
+      break;
     }
   }
   return changed;
@@ -202,8 +207,15 @@ function activeRunningSliceIds(state) {
 
 function readyPendingSlices(state) {
   return state.blueprint.slices.filter(slice => {
-    if (state.sliceStates[slice.id] !== 'pending') return false;
-    return (slice.deps || []).every(dep => state.sliceStates[dep] === 'succeeded');
+    const st = state.sliceStates[slice.id];
+    if (st === 'retrying') return true;
+    if (st !== 'pending') return false;
+    return (slice.deps || []).every(dep => {
+      const depSt = state.sliceStates[dep];
+      if (depSt === 'succeeded') return true;
+      if ((depSt === 'failed' || depSt === 'skipped') && (state.sliceWriteCounts[dep] || 0) > 0) return true;
+      return false;
+    });
   });
 }
 
@@ -326,7 +338,15 @@ function initReadySlices(state, {
     }
     const sliceTier = slice.tier === 'flash' ? 'flash' : 'pro';
     const slicePrompt = buildSliceWorkerPrompt(slice, state.blueprint, userObjective);
-    const sliceObjective = `${slice.title}\n\n${slice.instructions}`;
+    let sliceInstructions = slice.instructions;
+    const isRetry = state.sliceStates[slice.id] === 'retrying';
+    if (isRetry) {
+      const prev = state.sliceResults[slice.id] || {};
+      const prevWrites = prev.writes || 0;
+      const retryCount = (state.sliceRetries && state.sliceRetries[slice.id]) || 0;
+      sliceInstructions = `[RETRY #${retryCount}] Previous attempt ended after ${prev.iteration || '?'} iterations: "${prev.error || 'unknown error'}". ${prevWrites > 0 ? `${prevWrites} cells were written before failure — keep what works, fix or extend what's missing.` : 'No cells were written.'} Focus on the most critical sections first. If you cannot complete everything, prioritize quality over quantity. Write the highest-value content first, then add detail as budget allows.\n\n${sliceInstructions}`;
+    }
+    const sliceObjective = `${slice.title}\n\n${sliceInstructions}`;
     const workerContext = { ...context, _sliceId: slice.id, _sliceScope: slice.scope };
     const workerState = initAgentRunFn(sliceObjective, workerContext, {
       promptVariant: sliceTier === 'pro' ? 'default' : 'fast',
@@ -358,6 +378,30 @@ function initReadySlices(state, {
 
 function makeSliceProgress(onEvent, sliceId) {
   return (event, data = {}) => onEvent('sliceEvent', { sliceId, event, data });
+}
+
+function retryFailedSlice(state, sliceId, status, errorMsg, onEvent = () => {}) {
+  const retriesUsed = (state.sliceRetries && state.sliceRetries[sliceId]) || 0;
+  if (retriesUsed >= SLICE_MAX_RETRIES) return false;
+  state.sliceRetries = state.sliceRetries || {};
+  state.sliceRetries[sliceId] = retriesUsed + 1;
+  state.sliceStates[sliceId] = 'retrying';
+  state.sliceResults[sliceId] = {
+    ok: false,
+    status: 'retrying',
+    error: errorMsg,
+    iteration: (state.sliceAgents[sliceId] && state.sliceAgents[sliceId].iteration) || 0,
+    writes: state.sliceWriteCounts[sliceId] || 0,
+    retry: retriesUsed + 1
+  };
+  delete state.sliceAgents[sliceId];
+  onEvent('sliceRetrying', {
+    sliceId,
+    retry: retriesUsed + 1,
+    error: errorMsg,
+    writes: state.sliceResults[sliceId].writes
+  });
+  return true;
 }
 
 function ingestSliceStep(state, sliceId, result, sinks, onEvent = () => {}) {
@@ -430,11 +474,13 @@ function ingestSliceStep(state, sliceId, result, sinks, onEvent = () => {}) {
   }
 
   if (result.control === 'aborted') {
+    const errorMsg = result.payload?.reason || result.state.abortReason || 'aborted';
+    if (retryFailedSlice(state, sliceId, 'aborted', errorMsg, onEvent)) return;
     state.sliceStates[sliceId] = 'failed';
     state.sliceResults[sliceId] = {
       ok: false,
       status: 'aborted',
-      error: result.payload?.reason || result.state.abortReason || 'aborted',
+      error: errorMsg,
       iteration: result.state.iteration || 0
     };
     delete state.sliceAgents[sliceId];
@@ -483,8 +529,10 @@ async function resumePendingBatch(state, clientResult, {
         ingestSliceStep(state, entry.value.sliceId, entry.value.result, sinks, onEvent);
       } else {
         const sliceId = items[index].sliceId;
+        const errorMsg = entry.reason?.message || String(entry.reason);
+        if (retryFailedSlice(state, sliceId, 'exception', errorMsg, onEvent)) continue;
         state.sliceStates[sliceId] = 'failed';
-        state.sliceResults[sliceId] = { ok: false, error: entry.reason?.message || String(entry.reason) };
+        state.sliceResults[sliceId] = { ok: false, error: errorMsg };
         delete state.sliceAgents[sliceId];
         onEvent('sliceFailed', { sliceId, error: state.sliceResults[sliceId].error });
       }
@@ -587,8 +635,10 @@ async function advanceRunningSlices(state, {
       ingestSliceStep(state, entry.value.sliceId, entry.value.result, sinks, onEvent);
     } else {
       const sliceId = agentic[settled.indexOf(entry)];
+      const errorMsg = entry.reason?.message || String(entry.reason);
+      if (retryFailedSlice(state, sliceId, 'exception', errorMsg, onEvent)) continue;
       state.sliceStates[sliceId] = 'failed';
-      state.sliceResults[sliceId] = { ok: false, error: entry.reason?.message || String(entry.reason) };
+      state.sliceResults[sliceId] = { ok: false, error: errorMsg };
       delete state.sliceAgents[sliceId];
       onEvent('sliceFailed', { sliceId, error: state.sliceResults[sliceId].error });
     }
