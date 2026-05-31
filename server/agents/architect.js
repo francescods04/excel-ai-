@@ -521,6 +521,14 @@ PRESERVE USER DATA VERBATIM:
 - If the objective contains a restaurant menu with prices, create a dedicated "Menu" or "Menu Detail" sheet and write one row per item with the exact item name, base price, and menu price when present. Revenue can aggregate from that Menu sheet, but category-only summaries are not enough.
 - Never replace the user's menu with invented category mix percentages unless the exact line-item menu is also present in the workbook.
 
+SCALE AND DENSITY (CRITICAL — prior failure mode):
+- The blueprint MUST match the density the user asked for. A 7-slice, 80-row summary in response to "1000 righe" / "molto dettagliato" / "monthly schedule" / "per piano" is a failure, not a fast win.
+- copyToRange is the volume lever. One write entry with a relative-reference formula + copyToRange="B5:B1000" fills 996 rows in a single deterministic action. Use it for any multi-period or multi-unit schedule.
+- For real estate / construction / project finance objectives: include period-by-period schedules — monthly construction (24-36 rows), monthly debt drawdown / interest reserve, monthly cash flow, monthly absorption / sales velocity, per-floor or per-unit cost matrix, per-phase milestones. Do NOT collapse a multi-year build into a single "Total Cost" line.
+- For institutional valuation (DCF / LBO / M&A): include period-by-period projections covering at least the explicit horizon (e.g. 60 months or 10 years × 4 quarters), terminal value calculation, debt schedule with interest expense by period, multi-axis sensitivity tables (3-5 axes × 5-7 steps each = 25-49 cells per table, plus 3-5 separate tables).
+- Slice count scales with density: <200 rows → 5-8 slices; 200-1000 rows → 8-12 slices; >1000 rows → 10-15 slices with explicit per-period / per-unit detail.
+- When the SCALE TARGETS section below contains a row count, period count, or unit count, you MUST allocate that volume across slices. Half-density blueprints will be rejected downstream as "missed the brief".
+
 FORMULAS AND CELL MAPS:
 - The architect is the single source of truth for cell addresses. Every formula written in actions[] must be a literal Excel formula string.
 - Every cross-sheet reference in actions[] must exactly match a sheet declared in scope.sheets_owned, scope.may_read_from, or bulk_create_sheets.names. Never use shortened aliases: if the sheet is "Cash Flow - Single Location", formulas must use ='Cash Flow - Single Location'!B5, not =Cash Flow!B5.
@@ -629,6 +637,27 @@ function buildArchitectUserContent({ objective, context = {}, triage = null }) {
     lines.push(`- parallelizable: ${triage.parallelizable}`);
     lines.push(`- expected iterations (single-agent baseline): ${triage.estimated_iterations}`);
     lines.push(`- reasoning: ${triage.reasoning}`);
+  }
+
+  const scale = triage && triage.scale_hints ? triage.scale_hints : null;
+  if (scale && (scale.rowsRequested || scale.periods || scale.units || scale.detailLevel)) {
+    lines.push('');
+    lines.push(`SCALE TARGETS (parsed from user objective — match this density in the blueprint):`);
+    if (scale.rowsRequested) lines.push(`- target row count: ~${scale.rowsRequested} data rows across the workbook`);
+    if (scale.periods) lines.push(`- period schedule: ${scale.periods} ${scale.periodGranularity || 'periods'} (use copyToRange for the time axis)`);
+    else if (scale.periodGranularity) lines.push(`- period granularity: ${scale.periodGranularity} (size the schedule to the project horizon)`);
+    if (scale.units) lines.push(`- unit-level detail: ${scale.units} unit rows (per floor / apartment / space — one row per unit)`);
+    if (scale.detailLevel === 'high') lines.push(`- detail level: HIGH — user explicitly requested granular / row-by-row output`);
+    const target = scale.rowsRequested || 0;
+    if (target >= 1000) {
+      lines.push(`- guidance: build dense schedules. Use copyToRange aggressively. Plan 10-15 slices with multi-period AND per-unit detail. Summary-only blueprints will be rejected as "missed the brief".`);
+    } else if (target >= 500) {
+      lines.push(`- guidance: include 2-3 dense schedules (monthly / per-unit). Plan 8-12 slices. Do NOT collapse the horizon into single-cell totals.`);
+    } else if (target >= 200) {
+      lines.push(`- guidance: include at least one multi-period schedule built with copyToRange. Plan 6-10 slices.`);
+    } else {
+      lines.push(`- guidance: free choice on density, but still build period schedules where the objective implies them.`);
+    }
   }
 
   lines.push('');
@@ -903,7 +932,7 @@ HARD RULES:
 - DO NOT call ask_user_question. Make reasonable defaults.${hasUpstream ? `
 - READ BEFORE YOU WRITE: your first tool call MUST be a read (get_cell_ranges / read_sheet) against the upstream ranges listed above. Do NOT guess upstream layout from the slice instructions — in prod runs, workers that skipped this step wrote formulas pointing to wrong cells and had to redo the slice 4-8 times. Confirm exact addresses, then write your formulas against those exact addresses.
 - IF a read returns suspiciously thin data (only A1, zero rows, sheet "doesn't exist"), it is a TOOL ISSUE — the upstream slice succeeded before yours started. Retry ONCE with read_sheet on the same sheet. If still thin, write your formulas anyway using the absolute address from may_read_from (e.g. =Assumptions!$B$5). DO NOT call done with reason "upstream not available" — that is a confabulation; the orchestrator will reject it.` : ''}
-- ITER BUDGET IS TIGHT (~${20}). Consolidate writes: a P&L / cash-flow / balance-sheet slice should be ONE bulk_set_cell_ranges call (up to 16 writes per call) for ALL section rows, then ONE bulk_set_format pass for formatting. Sequential per-row set_cell_range calls burn the budget and cascade-kill downstream waves.
+- ITER BUDGET IS TIGHT (~${20}). Consolidate writes: a P&L / cash-flow / balance-sheet slice should be ONE bulk_set_cell_ranges call (up to 32 writes per call) for ALL section rows, then ONE bulk_set_format pass for formatting. Sequential per-row set_cell_range calls burn the budget and cascade-kill downstream waves.
 - TOOL PARAMS are not negotiable. Memorize these EXACT shapes (the wrong name burns one iteration every single time):
     bulk_create_sheets:    {"names":["Sheet1","Sheet2"]}                          — NOT "sheets"
     bulk_set_cell_ranges:  {"writes":[{"sheet":"S","cells":{"A1":{"value":1}}}]}  — NOT "entries"/"ranges"/"cells" at top level

@@ -813,7 +813,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'bulk_set_cell_ranges',
-      description: `Write MANY independent ranges (same or different sheets) in ONE iteration. Each entry has the same shape as set_cell_range. Use when sections are tightly coupled (e.g., Assumptions feeding a Driver sheet) and you would otherwise need 2-3 sequential calls. Hard cap 16 entries.\n\n**When NOT to bulk:** if sections are independent and the user benefits from seeing them appear incrementally, prefer separate set_cell_range calls per section — visible progress beats a 1-call payload that completes in silence.\n\n**Formatting:** as with set_cell_range, prefer to write values/formulas here, then apply formatting in a separate bulk_set_format pass after the data is verified. style_preset/cellStyles per cell are accepted for back-compat but discouraged.\n\nExample (3 coupled sections, no inline formatting):\n{\n  "writes": [\n    { "sheet": "Assumptions", "cells": {\n        "A1": { "value": "Driver" }, "B1": { "value": "Value" },\n        "A2": { "value": "Revenue growth %" }, "B2": { "value": 0.08 }\n    } },\n    { "sheet": "Sources & Uses", "cells": {\n        "A1": { "value": "Sources" },\n        "A2": { "value": "Equity" }, "B2": { "value": 100 },\n        "A3": { "value": "Total Sources" }, "B3": { "formula": "=SUM(B2:B2)" }\n    } },\n    { "sheet": "Debt Schedule", "cells": {\n        "A1": { "value": "Year" }\n    }, "copyToRange": "A2:A6" }\n  ]\n}\n\nEach write may include copyToRange and allow_overwrite, identical to set_cell_range. Failures on individual writes do NOT abort the batch; they surface under "errors" in the result.`,
+      description: `Write MANY independent ranges (same or different sheets) in ONE iteration. Each entry has the same shape as set_cell_range. Use when sections are tightly coupled (e.g., Assumptions feeding a Driver sheet) and you would otherwise need 2-3 sequential calls. Hard cap 32 entries.\n\n**When NOT to bulk:** if sections are independent and the user benefits from seeing them appear incrementally, prefer separate set_cell_range calls per section — visible progress beats a 1-call payload that completes in silence.\n\n**Formatting:** as with set_cell_range, prefer to write values/formulas here, then apply formatting in a separate bulk_set_format pass after the data is verified. style_preset/cellStyles per cell are accepted for back-compat but discouraged.\n\nExample (3 coupled sections, no inline formatting):\n{\n  "writes": [\n    { "sheet": "Assumptions", "cells": {\n        "A1": { "value": "Driver" }, "B1": { "value": "Value" },\n        "A2": { "value": "Revenue growth %" }, "B2": { "value": 0.08 }\n    } },\n    { "sheet": "Sources & Uses", "cells": {\n        "A1": { "value": "Sources" },\n        "A2": { "value": "Equity" }, "B2": { "value": 100 },\n        "A3": { "value": "Total Sources" }, "B3": { "formula": "=SUM(B2:B2)" }\n    } },\n    { "sheet": "Debt Schedule", "cells": {\n        "A1": { "value": "Year" }\n    }, "copyToRange": "A2:A6" }\n  ]\n}\n\nEach write may include copyToRange and allow_overwrite, identical to set_cell_range. Failures on individual writes do NOT abort the batch; they surface under "errors" in the result.`,
       parameters: {
         type: 'object',
         required: ['writes'],
@@ -821,7 +821,7 @@ const TOOL_DEFINITIONS = [
           writes: {
             type: 'array',
             minItems: 1,
-            maxItems: 16,
+            maxItems: 32,
             items: {
               type: 'object',
               required: ['sheet', 'cells'],
@@ -3239,8 +3239,8 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       if (writes.length === 0) {
         return { error: 'bulk_set_cell_ranges: "writes" must be a non-empty array (alias: "ranges").' };
       }
-      if (writes.length > 16) {
-        return { error: `bulk_set_cell_ranges: max 16 writes per call, got ${writes.length}` };
+      if (writes.length > 32) {
+        return { error: `bulk_set_cell_ranges: max 32 writes per call, got ${writes.length}` };
       }
       const actions = [];
       const accepted = [];
@@ -3888,7 +3888,7 @@ function normalizeClientResults(clientResult) {
 function bulkNudgeFor(lastN) {
   if (lastN.length !== 2) return null;
   if (lastN.every(n => n === 'set_cell_range')) {
-    return 'BATCH HINT (HARD): you just called set_cell_range twice. Your NEXT write MUST be bulk_set_cell_ranges with ALL remaining sections in one call (cap 16 entries). Sequential set_cell_range calls in a slice worker burn the iter budget and have cascade-killed downstream waves in prior runs. After all data lands, run ONE bulk_set_format pass.';
+    return 'BATCH HINT (HARD): you just called set_cell_range twice. Your NEXT write MUST be bulk_set_cell_ranges with ALL remaining sections in one call (cap 32 entries). Sequential set_cell_range calls in a slice worker burn the iter budget and have cascade-killed downstream waves in prior runs. After all data lands, run ONE bulk_set_format pass.';
   }
   if (lastN.every(n => n === 'set_format')) {
     return 'BATCH HINT: you just called set_format twice in a row. Consolidate the next formats into ONE bulk_set_format call based on the observed ranges.';

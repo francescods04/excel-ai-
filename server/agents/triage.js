@@ -151,6 +151,69 @@ function extractTriageJson(llmResult) {
 const VALID_COMPLEXITY = new Set(['trivial', 'moderate', 'complex', 'institutional']);
 const VALID_MODE = new Set(['single_agent', 'architect_then_parallel', 'single_deep_plan']);
 
+// Parse explicit scale signals from the user objective. These travel into the
+// architect prompt so the blueprint actually matches the requested density
+// instead of always defaulting to summary tables. Past failure mode: user
+// asked for ~1000 rows, blueprint produced 7 slices of ~30 rows each.
+function extractScaleHints(objective) {
+  const text = String(objective || '');
+  const hints = {
+    rowsRequested: null,
+    periods: null,
+    periodGranularity: null,
+    units: null,
+    detailLevel: null
+  };
+
+  const rowMatch = text.match(/(\d{2,5})\s*(?:rig?h?[ae]|rows?|linee?|voci|line[- ]?items?)\b/i);
+  if (rowMatch) hints.rowsRequested = Number(rowMatch[1]);
+
+  const monthMatch = text.match(/(\d{1,3})\s*(?:mesi|months?)\b/i);
+  const yearMatch = text.match(/(\d{1,2})\s*(?:anni|years?)\b/i);
+  if (monthMatch) {
+    hints.periods = Number(monthMatch[1]);
+    hints.periodGranularity = 'monthly';
+  } else if (/\b(monthly|mensile|ogni mese|per month)\b/i.test(text)) {
+    hints.periodGranularity = 'monthly';
+  } else if (/\b(quarterly|trimestrale|per quarter)\b/i.test(text)) {
+    hints.periodGranularity = 'quarterly';
+  }
+  if (yearMatch) {
+    const y = Number(yearMatch[1]);
+    if (hints.periodGranularity === 'monthly' && hints.periods == null) hints.periods = y * 12;
+    else if (hints.periods == null) {
+      hints.periods = y;
+      hints.periodGranularity = hints.periodGranularity || 'annual';
+    }
+  }
+
+  const unitPatterns = [
+    /(\d{1,4})\s*(?:piani|floors?|stori?ey?s?)\b/i,
+    /(\d{1,4})\s*(?:units?|unit[aà]|appartamenti|apartments?)\b/i,
+    /(\d{1,4})\s*(?:spazi|spaces|posti|seats?|parking)\b/i,
+    /(\d{1,4})\s*(?:locations?|sedi|store)\b/i
+  ];
+  const unitCounts = unitPatterns
+    .map(re => text.match(re))
+    .filter(Boolean)
+    .map(m => Number(m[1]));
+  if (unitCounts.length > 0) hints.units = Math.max(...unitCounts);
+
+  if (/\b(molto dettagliat|row by row|riga per riga|very detailed|granular|line[- ]?by[- ]?line|item[- ]?level|line[- ]?item)\b/i.test(text)) {
+    hints.detailLevel = 'high';
+  }
+
+  if (hints.rowsRequested == null) {
+    let inferred = 0;
+    if (hints.periods && hints.units) inferred = hints.periods * hints.units;
+    else if (hints.periods) inferred = hints.periods * 10;
+    else if (hints.units) inferred = hints.units * 15;
+    if (inferred >= 200) hints.rowsRequested = inferred;
+    if (hints.detailLevel === 'high' && (hints.rowsRequested || 0) < 500) hints.rowsRequested = Math.max(hints.rowsRequested || 0, 500);
+  }
+  return hints;
+}
+
 function validateTriageDecision(decision, objective) {
   const complexity = VALID_COMPLEXITY.has(decision.complexity) ? decision.complexity : 'moderate';
   let mode = VALID_MODE.has(decision.mode) ? decision.mode : 'single_agent';
@@ -176,7 +239,8 @@ function validateTriageDecision(decision, objective) {
     mode,
     estimated_iterations: estimated,
     reasoning: String(decision.reasoning || '').slice(0, 400) || `Auto-classified as ${complexity}.`,
-    objective_excerpt: String(objective).slice(0, 200)
+    objective_excerpt: String(objective).slice(0, 200),
+    scale_hints: extractScaleHints(objective)
   };
 }
 
@@ -189,12 +253,14 @@ function buildSafeFallback(objective, latencyMs, errorTag) {
     estimated_iterations: 15,
     reasoning: `Fallback: triage LLM unavailable (${errorTag}); defaulting to single_agent loop.`,
     objective_excerpt: String(objective).slice(0, 200),
+    scale_hints: extractScaleHints(objective),
     _meta: { latencyMs, model: null, raw: null, fallback: true, errorTag }
   };
 }
 
 module.exports = {
   triageObjective,
+  extractScaleHints,
   // exported for tests
   TRIAGE_SYSTEM_PROMPT,
   buildTriageUserContent,

@@ -4,7 +4,8 @@ const {
   extractTriageJson,
   validateTriageDecision,
   buildSafeFallback,
-  buildTriageUserContent
+  buildTriageUserContent,
+  extractScaleHints
 } = require('../../server/agents/triage');
 
 function makeMockLLM(scriptedResponses) {
@@ -127,6 +128,29 @@ async function test_triage_iterations_clamped() {
   console.log('  ✓ iteration count clamped to safe range');
 }
 
+function test_extractScaleHints_reads_explicit_signals() {
+  // Real estate prompt that under-delivered before: 10 piani × 1000mq + 1000 rows + sensitivity.
+  const re = extractScaleHints('valutazione progetto immobiliare a vairano scalo, 10 piani di palazzo, 1000mq per piano +- analizza tutti i costi, vari scenario, sensitivity analysis e circa 1000 righe diverse');
+  assert.strictEqual(re.rowsRequested, 1000, `expected 1000 rows, got ${re.rowsRequested}`);
+  assert.strictEqual(re.units, 10, `expected 10 units (piani), got ${re.units}`);
+
+  // Monthly + multi-year period spec.
+  const dcf = extractScaleHints('build a 5 year DCF with monthly granularity and line-item detail');
+  assert.strictEqual(dcf.periodGranularity, 'monthly');
+  assert.strictEqual(dcf.periods, 60, `5 anni × 12 mesi = 60, got ${dcf.periods}`);
+  assert.strictEqual(dcf.detailLevel, 'high');
+  assert.ok(dcf.rowsRequested >= 500, `inferred row count should escalate with HIGH detail, got ${dcf.rowsRequested}`);
+
+  // Plain objective: no scale signals — all null.
+  const plain = extractScaleHints('cambia la formula in B5');
+  assert.strictEqual(plain.rowsRequested, null);
+  assert.strictEqual(plain.periods, null);
+  assert.strictEqual(plain.units, null);
+  assert.strictEqual(plain.detailLevel, null);
+
+  console.log('  ✓ extractScaleHints reads rows/periods/units/detail signals');
+}
+
 async function test_triage_user_content_includes_context() {
   const txt = buildTriageUserContent({
     objective: 'build a DCF',
@@ -151,6 +175,7 @@ async function test_triage_user_content_includes_context() {
   await test_triage_extracts_json_with_prose();
   await test_triage_iterations_clamped();
   await test_triage_user_content_includes_context();
+  test_extractScaleHints_reads_explicit_signals();
   console.log('All triage tests passed.\n');
 })().catch(err => {
   console.error('Triage test failed:', err);
