@@ -312,6 +312,20 @@ function parseEuroPrice(raw) {
 
 function cleanMenuItemName(prefix) {
   let name = String(prefix || '').replace(/\s+/g, ' ').trim();
+  // Strip recognized noise/annotation phrases BEFORE the splits so words like
+  // "Menu" or "Plant Based" inside an annotation don't bleed across items.
+  // Past failure: "TENDERS — 7,50 € Tenders Plant Based. (Menu non disponibile)
+  // VEGGIE DELUXE — 14,50 €" → menuTitleSplit on \bMenu\b cut at "(Menu" leaving
+  // "non disponibile) VEGGIE DELUXE" as the extracted name, which then never
+  // matched the deterministic action literal and broke the architect.
+  name = name
+    .replace(/\(\s*Menu\s+non\s+disponibile\s*\)?\.?/gi, ' ')
+    .replace(/\(\s*Plant\s+Based\s*\)/gi, ' ')
+    .replace(/I\s+prezzi\s+sono\s+indicati[^.]*\.?/gi, ' ')
+    .replace(/Prezzo\s+fisso:?[^.€]*\.?/gi, ' ')
+    .replace(/Extra\s*\/\s*Top:?[^.€]*\.?/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   const categorySplit = name.split(/(?:🍟|🍔|🥪|🌭|🌱|🍰|🥤|⚠️|Starters|Burger & Smash|Sandwiches|Hot Dogs|Beyond Meat(?: \(Plant Based\))?|Sides|Sweets & Milkshakes|Dolci|Milkshakes|Drinks)/i);
   name = categorySplit[categorySplit.length - 1].trim();
   const menuTitleSplit = name.split(/\bMenu\b/i);
@@ -321,8 +335,6 @@ function cleanMenuItemName(prefix) {
   const priorPriceSplit = name.split(/€\s*/);
   name = priorPriceSplit[priorPriceSplit.length - 1].trim();
   name = name
-    .replace(/^(?:I prezzi sono indicati.*?|Prezzo fisso:?|Menu non disponibile\)?|Extra \/ Top:?)\s*/i, '')
-    .replace(/\((?:Menu non disponibile|Plant Based)\)\s*$/i, '')
     .replace(/^[^\p{L}\p{N}+]+/u, '')
     .replace(/[^\p{L}\p{N}+&.'’‘/\s-]+$/u, '')
     .trim();

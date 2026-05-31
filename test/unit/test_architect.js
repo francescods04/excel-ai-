@@ -314,6 +314,28 @@ function test_extractVerbatimMenuFacts_reads_menu_items_and_prices() {
   console.log('  ✓ menu fact extractor reads verbatim items and prices');
 }
 
+function test_extractVerbatimMenuFacts_strips_menu_non_disponibile_annotation() {
+  // Regression: the "(Menu non disponibile)" annotation between items used to
+  // bleed across the next item's name via the \bMenu\b split, producing
+  // "non disponibile) VEGGIE DELUXE" instead of "VEGGIE DELUXE" and breaking
+  // architect verbatim coverage validation.
+  const objective = [
+    'TENDERS — 7,50 €',
+    'Tenders Plant Based. (Menu non disponibile)',
+    'VEGGIE DELUXE — 14,50 € | M 21,90 €',
+    'JUNIOR — 8,50 €',
+    'Patty singolo di Manzo e American Cheese. (Menu non disponibile)'
+  ].join('\n');
+  const facts = extractVerbatimMenuFacts(objective);
+  const veggie = facts.find(f => f.basePrice === 14.5 && f.menuPrice === 21.9);
+  assert.ok(veggie, 'VEGGIE DELUXE extracted with both prices');
+  assert.strictEqual(veggie.name, 'VEGGIE DELUXE', `name should be "VEGGIE DELUXE", got: ${veggie.name}`);
+  const junior = facts.find(f => f.basePrice === 8.5);
+  assert.ok(junior, 'JUNIOR extracted');
+  assert.ok(!/non disponibile/i.test(junior.name), `JUNIOR name leaked annotation: ${junior.name}`);
+  console.log('  ✓ "(Menu non disponibile)" annotation does not leak into next item name');
+}
+
 function test_validateBlueprint_rejects_menu_category_summary_without_line_items() {
   const blueprint = {
     slices: [
@@ -466,6 +488,7 @@ function test_buildSliceWorkerPrompt_contains_scope_and_instructions() {
   test_validateBlueprint_accepts_declared_formula_sheet_refs();
   test_validateBlueprint_rejects_undeclared_formula_sheet_refs();
   test_extractVerbatimMenuFacts_reads_menu_items_and_prices();
+  test_extractVerbatimMenuFacts_strips_menu_non_disponibile_annotation();
   test_validateBlueprint_rejects_menu_category_summary_without_line_items();
   test_validateBlueprint_accepts_menu_line_item_actions();
   test_validateSliceActions_rejects_extra_action_fields();

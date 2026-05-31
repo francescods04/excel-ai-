@@ -555,14 +555,62 @@ function recordActionExecution(turnId, payload = {}) {
   appendLog(turnId, message, record.status === 'completed' ? 'info' : 'error', {
     actionExecution: record
   });
-  const blocking = getBlockingActionExecutionErrors(turn);
-  if (blocking.length > 0 && !record.isUndo) {
-    const alreadyError = turn.status === 'error' && turn.error;
-    if (!alreadyError) {
-      failTurnForActionExecutionErrors(turnId, blocking);
+
+  // Mid-run Excel write errors (e.g. #NUM!, #REF!, formula evaluation) used to
+  // fail the turn. Now: inject an observation into the active agent state(s)
+  // so the LLM sees them on its next step and emits corrective writes instead
+  // of the loop dying. Final-finalize gates still catch unresolved errors.
+  if (!record.isUndo && record.status === 'error' && (Number(record.errorCount) > 0 || (record.errors && record.errors.length > 0))) {
+    const pushed = injectActionErrorObservation(turn, record);
+    if (pushed.length > 0) {
+      appendLog(turnId, `[${record.taskId}] Errori formule reinviati al loop (${pushed.join(', ')}) per retry automatico.`, 'warn');
     }
   }
   return record;
+}
+
+function buildActionErrorObservation(record) {
+  const errs = Array.isArray(record.errors) ? record.errors : [];
+  const lines = errs.slice(0, 8).map((e, i) => {
+    const loc = `${e.sheet || ''}${e.target ? '!' + e.target : ''}` || '?';
+    const formula = e.formula ? ` (formula: ${e.formula})` : '';
+    const value = !e.formula && e.value ? ` (value: ${e.value})` : '';
+    return `${i + 1}. ${loc} — ${e.message || 'errore Excel'}${formula}${value}`;
+  }).join('\n');
+  const header = `EXCEL WRITE ERRORS — last batch (taskId=${record.taskId}, ${record.errorCount || errs.length} of ${record.actionCount} actions failed). The previous tool call landed in Excel but produced invalid results. Read the offending cells if you need context, then emit corrected writes (fix formulas, references, or values). Do NOT call done while these errors remain.`;
+  return lines ? `${header}\n${lines}` : header;
+}
+
+function injectActionErrorObservation(turn, record) {
+  const observation = buildActionErrorObservation(record);
+  const pushed = [];
+  // Single agent loop path
+  if (turn.agentState && Array.isArray(turn.agentState.messages) && turn.agentState.status !== 'completed' && turn.agentState.status !== 'aborted') {
+    turn.agentState.messages.push({ role: 'user', content: observation });
+    pushed.push('agent-loop');
+  }
+  // Architect parallel path: feed back to running slice agents. If we can pin
+  // the failing slice via _sliceId on actions, target only that one; otherwise
+  // broadcast so whichever slice owns the failing range will react.
+  if (turn.architectState && turn.architectState.sliceAgents) {
+    const failingSliceIds = new Set();
+    const errs = Array.isArray(record.errors) ? record.errors : [];
+    for (const err of errs) {
+      if (err && err.sliceId) failingSliceIds.add(String(err.sliceId));
+    }
+    const targetSliceIds = failingSliceIds.size > 0
+      ? Array.from(failingSliceIds)
+      : Object.keys(turn.architectState.sliceAgents);
+    for (const sliceId of targetSliceIds) {
+      const sliceState = turn.architectState.sliceAgents[sliceId];
+      if (!sliceState || !Array.isArray(sliceState.messages)) continue;
+      if (sliceState.status === 'completed' || sliceState.status === 'aborted') continue;
+      sliceState.messages.push({ role: 'user', content: observation });
+      pushed.push(sliceId);
+    }
+  }
+  if (pushed.length > 0) saveTurn(turn);
+  return pushed;
 }
 
 function turnHasMutationResults(turn) {
@@ -2615,12 +2663,17 @@ function initStepwiseAgentLoop(turnId, strategy) {
 
   const context = buildTurnExecutionContext(turn);
   const speedModeFlags = turn.speedMode || {};
+  // Architect-fallback runs lack the architect's deterministic final
+  // format_and_verify slice, so investor-facing output comes out as raw
+  // unformatted cells. Force the auto-format pass on done for those runs.
+  const isArchitectFallback = typeof strategy.reason === 'string' && strategy.reason.startsWith('architect_failed');
   turn.agentState = initAgentRun(turn.objective, context, {
     promptVariant: strategy.promptVariant || 'fast',
     modelOverride: turn.llm?.modelOverride || undefined,
     maxIterations: strategy.maxIterations || undefined,
     forceThinkingDisabled: speedModeFlags.thinkingDisabled === true ? true : undefined,
-    postWriteCriticEnabled: speedModeFlags.postWriteCritic !== false
+    postWriteCriticEnabled: speedModeFlags.postWriteCritic !== false,
+    autoFormatOnDone: isArchitectFallback ? true : undefined
   });
   turn.agentStepSeq = 0;
   turn.agentCollectedActions = [];
