@@ -543,6 +543,7 @@
     .demo-success{display:none;text-align:center;padding:40px 20px;}
     .demo-success.show{display:block;animation:fadein .5s ease}
     @keyframes fadein{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+    @keyframes spin{to{transform:rotate(360deg)}}
     .success-icon{width:60px;height:60px;margin:0 auto 20px;border:2px solid var(--accent);border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--accent);font-size:28px;}
     .demo-success h3{font-size:22px;margin-bottom:8px}
     .demo-success p{color:var(--text-2);font-size:14px}
@@ -991,6 +992,7 @@
             <h3>Richiedi accesso demo</h3>
             <p>// form · 5 campi · ricevi credenziali in 24h</p>
             <form class="form-grid" id="demoForm" onsubmit="handleDemoSubmit(event)">
+              <input type="text" name="hp" tabindex="-1" autocomplete="off" style="position:absolute;left:-9999px;height:0;width:0;opacity:0" aria-hidden="true">
               <div class="form-row">
                 <div class="field"><label><b>nome</b></label><input type="text" name="nome" placeholder="Mario" required></div>
                 <div class="field"><label><b>cognome</b></label><input type="text" name="cognome" placeholder="Rossi" required></div>
@@ -1015,7 +1017,8 @@
                 <input type="checkbox" required>
                 <span>Accetto la <a href="/privacy.html">Privacy Policy</a> e i <a href="/faq.html">Termini di servizio</a>.</span>
               </label>
-              <button type="submit" class="submit">Richiedi accesso <span class="btn-arrow">→</span></button>
+              <div class="form-error" id="demoError" style="display:none;color:var(--red);font-size:12.5px;font-family:'JetBrains Mono',monospace;padding:8px 10px;background:rgba(255,107,107,0.08);border:1px solid rgba(255,107,107,0.25);border-radius:4px"></div>
+              <button type="submit" class="submit" id="demoSubmit">Richiedi accesso <span class="btn-arrow">→</span></button>
             </form>
             <div class="demo-success" id="demoSuccess">
               <div class="success-icon">✓</div>
@@ -1388,10 +1391,48 @@
     /* ═══════════════════════════════════════
        10. DEMO FORM
        ═══════════════════════════════════════ */
-    function handleDemoSubmit(e){
+    async function handleDemoSubmit(e){
       e.preventDefault();
-      document.getElementById('demoForm').style.display = 'none';
-      document.getElementById('demoSuccess').classList.add('show');
+      const form = e.target;
+      const btn = document.getElementById('demoSubmit');
+      const err = document.getElementById('demoError');
+      err.style.display = 'none';
+      err.textContent = '';
+
+      const data = {};
+      new FormData(form).forEach((v, k) => { data[k] = v; });
+
+      btn.disabled = true;
+      btn.dataset.label = btn.textContent;
+      btn.innerHTML = 'Invio in corso<span class="spinner" style="display:inline-block;width:12px;height:12px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .6s linear infinite;margin-left:8px;vertical-align:-1px"></span>';
+
+      try {
+        const res = await fetch('/api/demo-request', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify(data)
+        });
+        const json = await res.json().catch(() => ({}));
+
+        if(!res.ok){
+          const msg = json.details && json.details.length
+            ? json.details.join(' · ')
+            : (json.error || ('Errore ' + res.status));
+          err.textContent = '⚠ ' + msg;
+          err.style.display = 'block';
+          btn.disabled = false;
+          btn.innerHTML = btn.dataset.label;
+          return;
+        }
+
+        form.style.display = 'none';
+        document.getElementById('demoSuccess').classList.add('show');
+      } catch (e) {
+        err.textContent = '⚠ Errore di rete. Controlla la connessione e riprova.';
+        err.style.display = 'block';
+        btn.disabled = false;
+        btn.innerHTML = btn.dataset.label;
+      }
     }
     window.handleDemoSubmit = handleDemoSubmit;
 

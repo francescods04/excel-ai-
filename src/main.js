@@ -16,7 +16,8 @@ import { hideRequestPanel, showPermissionRequest, showUserInputRequest, showQues
 import { getExcelContext } from './excel/context.js';
 import { worksheetExists, readWorkbookSnapshot, readSheetSnapshot, readRangeSnapshot, readRangeAsCsv, readNamedRanges, readMultiRangeBatch, readFormatSummary } from './excel/readers.js';
 import { enqueueActions, executeActions as execActions, undoLastSnapshot, waitForActionQueueIdle, execRunJavaScript, isRunJavaScriptEnabled } from './excel/writers.js';
-import { startTurn, approveTurnExecution, postTurnStep, postTurnResponse, postTurnResponseBatch, postTurnActionResult, getTurn, steerTurn, getErrorMessageFromResponse } from './api/turn.js';
+import { startHealthScanner, stopHealthScanner } from './excel/healthScan.js';
+import { startTurn, approveTurnExecution, postTurnStep, postTurnResponse, postTurnResponseBatch, postTurnActionResult, postHealthReport, getTurn, steerTurn, getErrorMessageFromResponse } from './api/turn.js';
 import { startAgent, resumeAgentWithResponse, postAgentClientResponse } from './api/agent.js';
 import { loadModelConfig, changeModel, warmupLLM } from './api/config.js';
 import { init as initAuth, getAccessToken, apiCall } from './auth/auth.js';
@@ -940,6 +941,12 @@ function openTurnEventStream(turnId, planMsgId) {
     src.addEventListener('turnStarted', () => {
       if (inReplay) return; // already shown before
       addLog(`Turn ${turnId} avviato`);
+      try {
+        startHealthScanner({
+          turnId,
+          reporter: ({ turnId: tid, errors }) => postHealthReport(tid, errors).catch(() => {})
+        });
+      } catch (_) {}
     });
 
     src.addEventListener('planUpdated', (e) => {
@@ -1140,6 +1147,7 @@ function openTurnEventStream(turnId, planMsgId) {
         hideApproveBar();
         hideTypingIndicator();
         stopElapsedTimer();
+        try { stopHealthScanner(); } catch (_) {}
         if (data.status === 'error' || data.error) {
           addLog(`Esecuzione terminata con errore: ${data.error || 'errore sconosciuto'}`, 'error');
           addMessage(`Esecuzione interrotta: ${escapeHtml(data.error || 'errore sconosciuto')}`, 'error');

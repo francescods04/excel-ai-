@@ -617,6 +617,99 @@ function injectActionErrorObservation(turn, record) {
   return pushed;
 }
 
+// ---------- Periodic workbook health report ----------
+//
+// The client-side scanner periodically scans the whole workbook for cells
+// that evaluated to Excel errors (#VALUE!, #REF!, …). We dedupe against
+// errors already observed within this turn (by sheet|addr|formula) so the
+// agent loop doesn't get spammed with the same observation every cycle, and
+// inject only NEW issues into active slice/agent messages.
+const HEALTH_MAX_INJECT = 12;
+const HEALTH_MAX_REMEMBERED = 200;
+
+function healthErrorKey(err) {
+  return `${err.sheet || ''}|${err.addr || ''}|${err.formula || ''}`;
+}
+
+function buildHealthObservation(newErrors) {
+  const lines = newErrors.slice(0, HEALTH_MAX_INJECT).map((e, i) => {
+    const loc = `${e.sheet || ''}!${e.addr || ''}`;
+    const formulaPart = e.formula ? ` (formula: ${e.formula})` : '';
+    return `${i + 1}. ${loc} → ${e.value || 'errore'}${formulaPart}`;
+  }).join('\n');
+  const moreNote = newErrors.length > HEALTH_MAX_INJECT
+    ? `\n(+ ${newErrors.length - HEALTH_MAX_INJECT} altre celle in errore)`
+    : '';
+  return `WORKBOOK HEALTH SCAN — ${newErrors.length} new error cell${newErrors.length === 1 ? '' : 's'} detected since last check. These were found across all sheets, not just what you just wrote. Read them if needed and emit corrective writes (fix the formula, the reference, or the input value upstream). Do NOT call done while these remain.\n${lines}${moreNote}`;
+}
+
+function recordHealthReport(turnId, errorsIn) {
+  const turn = _getTurnRef(turnId);
+  if (!turn) throw new Error(`Turn non trovato: ${turnId}`);
+  if (turn.status === 'completed' || turn.status === 'aborted') {
+    return { newCount: 0, totalSeen: turn.healthSeen ? turn.healthSeen.length : 0 };
+  }
+  if (!Array.isArray(turn.healthSeen)) turn.healthSeen = [];
+  const seenKeys = new Set(turn.healthSeen);
+
+  const newErrors = [];
+  for (const e of errorsIn) {
+    if (!e || typeof e !== 'object') continue;
+    if (!e.sheet || !e.addr) continue;
+    const key = healthErrorKey(e);
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    newErrors.push(e);
+  }
+
+  // Cap remembered keys so a very long turn doesn't grow unbounded.
+  turn.healthSeen = Array.from(seenKeys).slice(-HEALTH_MAX_REMEMBERED);
+
+  if (newErrors.length === 0) {
+    return { newCount: 0, totalSeen: turn.healthSeen.length };
+  }
+
+  const observation = buildHealthObservation(newErrors);
+  const pushed = [];
+
+  if (turn.agentState && Array.isArray(turn.agentState.messages) && turn.agentState.status !== 'completed' && turn.agentState.status !== 'aborted') {
+    turn.agentState.messages.push({ role: 'user', content: observation });
+    pushed.push('agent-loop');
+  }
+
+  if (turn.architectState && turn.architectState.sliceAgents) {
+    // Route per-slice when we can map sheet → slice via scope.sheets_owned;
+    // otherwise broadcast so whatever slice owns the broken sheet reacts.
+    const sheetToSlice = new Map();
+    const blueprint = turn.architectState.blueprint || {};
+    const slices = Array.isArray(blueprint.slices) ? blueprint.slices : [];
+    for (const slice of slices) {
+      const owned = slice.scope && Array.isArray(slice.scope.sheets_owned) ? slice.scope.sheets_owned : [];
+      for (const s of owned) sheetToSlice.set(s, slice.id);
+    }
+    const targetSlices = new Set();
+    for (const e of newErrors) {
+      const owner = sheetToSlice.get(e.sheet);
+      if (owner) targetSlices.add(owner);
+    }
+    const fanout = targetSlices.size > 0 ? Array.from(targetSlices) : Object.keys(turn.architectState.sliceAgents);
+    for (const sliceId of fanout) {
+      const sliceState = turn.architectState.sliceAgents[sliceId];
+      if (!sliceState || !Array.isArray(sliceState.messages)) continue;
+      if (sliceState.status === 'completed' || sliceState.status === 'aborted') continue;
+      sliceState.messages.push({ role: 'user', content: observation });
+      pushed.push(sliceId);
+    }
+  }
+
+  if (pushed.length > 0) {
+    appendLog(turnId, `Health scan: ${newErrors.length} nuovo/i error cell injetati su (${pushed.join(', ')}).`, 'warn');
+    saveTurn(turn);
+  }
+
+  return { newCount: newErrors.length, totalSeen: turn.healthSeen.length, injectedInto: pushed };
+}
+
 function turnHasMutationResults(turn) {
   return Object.values(turn?.results || {}).some(result =>
     hasMutationActions(result?.actions || []) ||
@@ -3272,6 +3365,7 @@ module.exports = {
   respondToTurnRequest,
   applyActionExecutionResult,
   recordActionExecution,
+  recordHealthReport,
   getBlockingActionExecutionErrors,
   summarizeActionExecutionErrors,
   turnHasMutationResults,

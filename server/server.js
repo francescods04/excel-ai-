@@ -890,6 +890,24 @@ app.post('/api/turn/action-result', authenticate, async (req, res) => {
   }
 });
 
+// Periodic workbook health report from the client-side scanner. Dedupes
+// against errors already known to the turn and, for genuinely new ones,
+// injects an observation into active agent / slice messages so the next LLM
+// iteration sees them. NEVER calls an LLM here — fast write only.
+app.post('/api/turn/health-report', authenticate, async (req, res) => {
+  try {
+    const { turnId, errors } = req.body || {};
+    if (!turnId) return res.status(400).json({ error: 'turnId richiesto' });
+    if (!Array.isArray(errors)) return res.status(400).json({ error: 'errors deve essere un array' });
+    await turns.getTurnRefAsync(turnId);
+    const result = turns.recordHealthReport(turnId, errors);
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    logger.error('Errore turn/health-report:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/turn/stream/:turnId', authenticate, async (req, res) => {
   const { turnId } = req.params;
   let turn = turns.loadTurn(turnId);
@@ -1210,6 +1228,89 @@ app.post('/api/wiki/ingest-all', async (req, res) => {
   } catch (error) {
     logger.error('Errore wiki/ingest-all:', error.message);
     res.status(500).json({ error: error.message });
+  }
+});
+
+/* ---------- Demo request (landing form) ---------- */
+const ALLOWED_RUOLI = new Set([
+  'Analista finanziario', 'Commercialista', 'CFO / Controller',
+  'Investment Banker', 'Consulente', 'Startup founder', 'Altro'
+]);
+
+app.post('/api/demo-request', async (req, res) => {
+  const startedAt = Date.now();
+  try {
+    const { nome, cognome, email, azienda, ruolo, hp } = req.body || {};
+
+    if (hp) {
+      logger.info('Demo request: honeypot triggered, dropping silently');
+      return res.json({ ok: true, id: null, honeypot: true });
+    }
+
+    const errors = [];
+    const clean = (v, max = 200) => typeof v === 'string' ? v.trim().slice(0, max) : '';
+    const n = clean(nome, 80);
+    const c = clean(cognome, 80);
+    const e = clean(email, 254).toLowerCase();
+    const a = clean(azienda, 120);
+    const r = clean(ruolo, 60);
+
+    if (n.length < 2) errors.push('nome richiesto');
+    if (c.length < 2) errors.push('cognome richiesto');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) errors.push('email non valida');
+    if (a.length < 2) errors.push('azienda richiesta');
+    if (!ALLOWED_RUOLI.has(r)) errors.push('ruolo non valido');
+
+    if (errors.length) {
+      return res.status(400).json({ error: 'Validazione fallita', details: errors });
+    }
+
+    const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+            || req.socket?.remoteAddress
+            || null;
+
+    const row = {
+      nome: n, cognome: c, email: e, azienda: a, ruolo: r,
+      source: 'landing',
+      user_agent: (req.headers['user-agent'] || '').slice(0, 500),
+      referer: (req.headers['referer'] || '').slice(0, 500),
+      ip
+    };
+
+    const { getSupabase } = require('./supabase/client');
+    const supabase = getSupabase();
+
+    const { data: existing } = await supabase
+      .from('demo_leads')
+      .select('id, created_at')
+      .eq('email', e)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    if (existing && existing.length) {
+      logger.info('Demo request: duplicate email, returning existing lead', { email: e, id: existing[0].id });
+      return res.json({ ok: true, id: existing[0].id, duplicate: true });
+    }
+
+    const { data, error } = await supabase
+      .from('demo_leads')
+      .insert(row)
+      .select('id, created_at')
+      .single();
+
+    if (error) {
+      logger.error('Demo request: supabase insert error', { message: error.message, code: error.code });
+      return res.status(500).json({ error: 'Errore nel salvataggio. Riprova più tardi.' });
+    }
+
+    logger.info('Demo request: saved', {
+      id: data.id, email: e, ruolo: r, ip, latency_ms: Date.now() - startedAt
+    });
+
+    res.json({ ok: true, id: data.id });
+  } catch (error) {
+    logger.error('Demo request: unhandled', { message: error.message, stack: error.stack });
+    res.status(500).json({ error: 'Errore interno. Riprova più tardi.' });
   }
 });
 

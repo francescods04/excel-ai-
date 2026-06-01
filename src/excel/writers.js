@@ -30,6 +30,13 @@ let isExecutingQueue = false;
 let queueProcessTimer = null;
 const queueIdleResolvers = [];
 
+function isExcelQueueIdle(excelActionQueue) {
+  if (isExecutingQueue) return false;
+  if (queueProcessTimer) return false;
+  if (Array.isArray(excelActionQueue) && excelActionQueue.length > 0) return false;
+  return true;
+}
+
 function resolveQueueIdleIfNeeded(excelActionQueue) {
   if (isExecutingQueue || (excelActionQueue && excelActionQueue.length > 0)) return;
   const resolvers = queueIdleResolvers.splice(0, queueIdleResolvers.length);
@@ -712,6 +719,19 @@ if (typeof window !== 'undefined') {
   window.__excelQueueStats = queueStats;
 }
 
+// Subscribers (e.g. healthScan) that want to know when a batch finished so
+// they can throttle their own Excel.run calls. Kept as a simple array of
+// callbacks to avoid a hard import dependency on a specific scanner module.
+const onBatchFinishedSubscribers = [];
+function subscribeBatchFinished(fn) {
+  if (typeof fn === 'function') onBatchFinishedSubscribers.push(fn);
+}
+function notifyBatchFinished() {
+  for (const fn of onBatchFinishedSubscribers) {
+    try { fn(); } catch (_) {}
+  }
+}
+
 function queueBatchKey(batch, index) {
   const meta = batch?.meta || {};
   const base = meta.itemId || meta.taskId || `batch-${Date.now()}`;
@@ -1366,6 +1386,7 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
     runMs: runDurationMs,
     waitedMs
   });
+  notifyBatchFinished();
 
   return result;
 }
@@ -1893,5 +1914,7 @@ export {
   execRunJavaScript,
   sanitizeOfficeJsCode,
   isRunJavaScriptEnabled,
-  pickAutoFillSource
+  pickAutoFillSource,
+  isExcelQueueIdle,
+  subscribeBatchFinished
 };

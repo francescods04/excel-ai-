@@ -104,6 +104,18 @@ async function postTurnActionResult(turnId, result, retries = 3) {
   throw new Error(`Errore nel salvataggio esito azioni Excel dopo ${retries + 1} tentativi: ${lastError.message}`);
 }
 
+async function postHealthReport(turnId, errors) {
+  const res = await fetch(`${API_BASE}/api/turn/health-report`, {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ turnId, errors })
+  });
+  if (!res.ok) {
+    throw new Error(await getErrorMessageFromResponse(res, 'Errore health report'));
+  }
+  return res.json();
+}
+
 async function getTurn(turnId) {
   const res = await fetch(`${API_BASE}/api/turn/${encodeURIComponent(turnId)}`, {
     headers: authHeaders()
@@ -137,4 +149,4 @@ async function getErrorMessageFromResponse(response, fallbackMessage) {
   return fallback;
 }
 
-export { startTurn, approveTurnExecution, postTurnStep, postTurnResponse, postTurnResponseBatch, postTurnActionResult, getTurn, steerTurn, getErrorMessageFromResponse, API_BASE };
+export { startTurn, approveTurnExecution, postTurnStep, postTurnResponse, postTurnResponseBatch, postTurnActionResult, postHealthReport, getTurn, steerTurn, getErrorMessageFromResponse, API_BASE };
