@@ -323,6 +323,27 @@ const SCENARIOS = {
       'Sensitivity of NAV/share to cap-rate shifts (+/- 50/100 bps) as a real table',
       'Outputs reference Portfolio + CapStack via formulas; key assumptions noted'
     ]
+  },
+
+  re_vairano_10piani: {
+    domain: 'real_estate',
+    objective:
+      "fai un excel super completo per fare la valutazione della realizzazione di un progetto immobiliare da 0, l'immobile sarà un 10 piani a Vairano Scalo in provincia di Caserta di circa 1000 mq per piano. Fai un'analisi super complessa di costi e ricavi, finanziamenti, dividi i costi in vari sottocosto. L'excel deve essere completo con ogni foglio circa 1000 righe.",
+    context: emptyWorkbook('Sheet1'),
+    loopPromptVariant: 'default',
+    rubric: [
+      'Assumptions sheet con tutti i driver: superficie totale, prezzi/mq per piano, costi/mq, % oneri, ltc/ltv, tassi mutuo, IRES/IRAP, IVA — TUTTI con label IT esatti e valori numerici (non placeholder)',
+      'Assumptions DEVE includere righe esplicite per Equity Investito, Debito Totale, WACC/Costo Capitale — non possono mancare se poi c\'è una valutazione',
+      'Cost Breakdown con sottocosti italiani granulari: acquisizione area (terreno, registro 9%, notarile, mediazione, bonifica), tecnici (progettazione architettonica/strutturale/impiantistica %, DL, CSP/CSE, collaudi, APE, pratiche), oneri concessori (urbanizzazione primaria/secondaria, contributo costruzione), costruzione (strutture, tamponamenti, impianti elettrico/idrico/termico/condizionamento/VMC/fotovoltaico, finiture, infissi, ascensori), sicurezza cantiere, finanziari, imposte, commerciali, contingency',
+      'Per-Floor Detail con 10 piani × N unità (residenziale/commerciale), superfici lorda/commerciale/vendibile per piano, prezzi differenziati per piano alto/basso — righe DI DATI VERI, no padding repetitivo',
+      'Revenue Schedule mensile con assorbimento progressivo (ramp 24-48 mesi) e ricavi incassati per mese per piano — formule, non valori hardcoded',
+      'Construction Schedule con S-curve mensile su SAL per fasi: acquisizione → progettazione → fondazioni → strutture → impianti → finiture → consegna. % completamento progressivo, costi mese × fase',
+      'Financing Schedule con tiraggio SAL (tipicamente 30/40/30 o S-curve), interessi capitalizzati durante costruzione, periodo pre-ammortamento, rimborso post-vendite',
+      'Cash Flow mensile completo per orizzonte ≥36 mesi: 1 riga per mese (non sentinel-rows-only), con Ricavi Incassati, Costi, Imposte, Flusso Operativo, Tiraggio/Rimborso Mutuo, Interessi, Flusso Netto, Cassa Cumulata',
+      'P&L annuale per orizzonte completo (4-6 anni), con Ricavi, COGS, Soft Cost, EBITDA, Interessi, IRES+IRAP, Utile Netto, Cumulato — formule che roll-up da Cash Flow + Cost Breakdown',
+      'Valuation con IRR Equity, IRR Progetto, NPV (WACC), ROE, ROI, MOIC, Payback — formule reali contro Cash Flow / Assumptions, non valori hardcoded. DSCR per periodo con min/medio. Se Equity/Debito/WACC mancanti su Assumptions, IFERROR + "INPUT MANCANTE" — mai numeri fabbricati.',
+      'Sensitivity con almeno 2-3 tabelle 7×7 reali (formule basate su data tables o offset): Prezzo vendita vs Costo costruzione, Tasso assorbimento vs Tasso interesse, Ritardo SAL vs Prezzo — non solo header'
+    ]
   }
 };
 

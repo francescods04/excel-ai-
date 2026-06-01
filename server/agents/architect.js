@@ -1312,11 +1312,21 @@ function validateBlueprint(raw, context = {}) {
     const estIters = Number(s.estimated_iters);
     // Default tier flipped to 'flash' (2026-05-31 bench: flash beat pro on
     // Vairano 10-piano IT real-estate prompt — 4 sheet × 1000 rows, ~38K
-    // formulas, 15min. Pro fallback path hit architect timeout + JSON parse
-    // errors and produced 71 formulas total. Flash + skill IT delivers
-    // dense output at ~1/10 the cost per token). 'pro' remains opt-in via
-    // explicit slice.tier='pro' in the architect blueprint.
-    const tier = s.tier === 'pro' ? 'pro' : 'flash';
+    // formulas, 15min). HOWEVER the 2026-06-01 bench on the full Vairano
+    // prompt (10 piani × 1000mq × all 10 sheets) showed pro Q=82 vs flash
+    // Q=42, with flash hitting stagnation_no_progress and never touching
+    // Cash Flow / P&L / Valuation / Sensitivity. So now: auto-upgrade to pro
+    // for finance-aggregator slices (valuation, sensitivity, cash flow, P&L,
+    // returns) — they're the ones that benefit from deeper reasoning to
+    // chain Cash Flow → P&L → Valuation correctly. Structural/data slices
+    // (assumptions, cost breakdown, per-floor, schedules) stay flash.
+    const sliceTextForTierGate = `${s.id || ''} ${s.title || ''} ${(s.instructions || '').slice(0, 800)}`.toLowerCase();
+    const isFinanceAggregator = /(valuation|valutazione|valutaz|\birr\b|\bnpv\b|\bwacc\b|\bdscr\b|\bmoic\b|payback|sensitivity|sensitivit|p&?l|profit.loss|conto economico|cash.?flow|flusso.?cassa|returns?|rendimenti|equity waterfall)/i.test(sliceTextForTierGate);
+    const blueprintForcedPro = s.tier === 'pro';
+    const tier = blueprintForcedPro || isFinanceAggregator ? 'pro' : 'flash';
+    if (isFinanceAggregator && !blueprintForcedPro) {
+      logger.info(`[Architect] slice "${s.id}" auto-upgraded to pro tier (finance aggregator)`);
+    }
 
     // When ALLOW_DETERMINISTIC is off (default), strip ALL pre-baked actions
     // so each content slice runs through an LLM worker. Even a single
@@ -1578,7 +1588,8 @@ ${slice.instructions}
 
 HARD RULES:
 - DO NOT write to sheets or ranges outside your scope. If you need to reference data from another slice, use a formula referencing its known address from may_read_from.
-- DO NOT call ask_user_question. Make reasonable defaults.${hasUpstream ? `
+- DO NOT call ask_user_question. Make reasonable defaults.
+- TRUST YOUR WRITES — DO NOT RE-READ CELLS YOU JUST WROTE. set_cell_range / bulk_set_cell_ranges are durable; the ACK returned by the harness is authoritative. The 2026-06-01 Vairano pro bench wasted 10-15 iters per slice doing get_cell_ranges on cells the worker had just written (the mock workbook returns stale empty data, but production behaves identically — once you write A1=42, A1 IS 42 until you overwrite it). Read ONLY upstream sheets owned by OTHER slices (from may_read_from). If a write returned an error in the ACK (#VALUE!/#REF!), fix the formula directly — no re-read needed to confirm "did it actually write?".${hasUpstream ? `
 - READ BEFORE YOU WRITE: your first tool call MUST be a read (get_cell_ranges / read_sheet) against the upstream ranges listed above. Do NOT guess upstream layout from the slice instructions — in prod runs, workers that skipped this step wrote formulas pointing to wrong cells and had to redo the slice 4-8 times. Confirm exact addresses, then write your formulas against those exact addresses.
 - IF a read returns suspiciously thin data (only A1, zero rows, sheet "doesn't exist"), it is a TOOL ISSUE — the upstream slice succeeded before yours started. Retry ONCE with read_sheet on the same sheet. If still thin, write your formulas anyway using the absolute address from may_read_from (e.g. =Assumptions!$B$5). DO NOT call done with reason "upstream not available" — that is a confabulation; the orchestrator will reject it.` : ''}
 - ITER BUDGET IS TIGHT (~${20}). Consolidate writes: assumptions/driver tables should be ONE bulk_set_cell_ranges call; a P&L / cash-flow / balance-sheet slice should be ONE bulk_set_cell_ranges call (up to 32 writes per call) for ALL section rows, then ONE bulk_set_format pass for formatting. Sequential per-row set_cell_range calls burn the budget and cascade-kill downstream waves.

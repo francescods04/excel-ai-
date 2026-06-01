@@ -129,12 +129,38 @@ const CHEAP_FOLLOWUP_TOOLS = new Set([
   'resume_calculation'
 ]);
 
+// Tools that, when run 3+ times in a row, signal "mechanical fill mode" — the
+// agent is emitting cells from a known structure, not making design choices.
+// In that mode, thinking=high adds latency without quality. Drop to low.
+const MECHANICAL_WRITE_TOOLS = new Set([
+  'set_cell_range',
+  'bulk_set_cell_ranges',
+  'set_format',
+  'bulk_set_format',
+  'set_notes',
+  'bulk_set_notes',
+  'copy_range'
+]);
+
+function inMechanicalWriteRun(state, window = 3) {
+  const trail = state && Array.isArray(state.recentToolTrail) ? state.recentToolTrail : [];
+  if (trail.length < window) return false;
+  const tail = trail.slice(-window);
+  return tail.every(e => MECHANICAL_WRITE_TOOLS.has(e.toolName));
+}
+
 function shouldUseAgentThinking(iteration, state = {}) {
   if (AGENT_THINKING_EVERY_ITER) return true;
   if (state.forceThinkingNext) return true;
   // Skip thinking right after a "cheap" tool — the model just needs to pick
   // the next obvious step, not reason hard. Wins ~1-3s per iteration on those.
   if (state.lastToolName && CHEAP_FOLLOWUP_TOOLS.has(state.lastToolName)) return false;
+  // Mechanical fill mode: 3+ consecutive write tools indicate the agent is in
+  // emit mode (filling a known schedule, not designing). Skip thinking on the
+  // next iter — observed in 2026-06-01 Vairano pro bench, where ~50 iters
+  // were pure schedule fills that didn't need any reasoning at all but ran
+  // with effort=high anyway, costing ~10-15 min extra wall time.
+  if (inMechanicalWriteRun(state)) return false;
   if (AGENT_THINKING_FIRST_ITER && iteration === 1) return true;
   if (AGENT_THINKING_INTERVAL > 0 && iteration % AGENT_THINKING_INTERVAL === 0) return true;
   if (AGENT_FORCE_THINKING_AFTER_ERROR && ((state.consecutiveErrors || 0) > 0 || (state.parseFailureStreak || 0) > 0)) {
@@ -2945,7 +2971,8 @@ async function runAgentLoop(objective, context, options = {}) {
             forceThinkingNext,
             consecutiveErrors,
             parseFailureStreak,
-            lastToolName: recentToolTrail.length > 0 ? recentToolTrail[recentToolTrail.length - 1].toolName : null
+            lastToolName: recentToolTrail.length > 0 ? recentToolTrail[recentToolTrail.length - 1].toolName : null,
+            recentToolTrail
           });
       const turnId = options.turnId || options.agentId;
       const callOpts = {
@@ -3201,6 +3228,30 @@ async function runAgentLoop(objective, context, options = {}) {
           results.push({ type: 'read_skill_duplicate', name: skillName });
           onEvent('iterationError', { iteration, error: duplicateSkillMsg });
           messages.push(makeUserMessage(duplicateSkillMsg));
+          continue;
+        }
+      }
+
+      // Hard bulk enforcement: 3 consecutive set_cell_range / set_format /
+      // create_sheet / create_named_range → reject and force the bulk variant.
+      // Mirrors the stepwise guard at line 5354. The legacy soft hint at line
+      // 3349 was ignored in the 2026-06-01 Vairano pro run (79 sequential
+      // set_cell_range over 22 min). Hard block now matches stepwise behavior.
+      const LEGACY_SEQUENTIAL_FORCE_BULK = {
+        create_named_range: 'bulk_create_named_ranges',
+        create_sheet: 'bulk_create_sheets',
+        set_format: 'bulk_set_format',
+        set_cell_range: 'bulk_set_cell_ranges'
+      };
+      const legacyBulkAlt = LEGACY_SEQUENTIAL_FORCE_BULK[toolName];
+      if (legacyBulkAlt) {
+        const recentLegacy = recentToolTrail.slice(-2).map(e => e.toolName);
+        if (recentLegacy.length === 2 && recentLegacy.every(n => n === toolName)) {
+          const forceMsg = `STAGNATION GUARD: "${toolName}" was called 3 times in a row. Your NEXT call MUST be "${legacyBulkAlt}" with ALL remaining items in one payload. Sequential one-at-a-time calls have killed prior runs by exhausting the iteration budget (2026-06-01 Vairano pro bench: 79 sequential set_cell_range × 12s/iter = 16 min wasted). This call is rejected; retry as ${legacyBulkAlt}.`;
+          logger.warn(`[AgentLoop] ${forceMsg}`);
+          messages.push(makeUserMessage(forceMsg));
+          results.push({ type: 'error', error: forceMsg, blocked: true, tool: toolName });
+          onEvent('iterationError', { iteration, error: forceMsg });
           continue;
         }
       }
@@ -4783,6 +4834,21 @@ function initAgentRun(objective, context, options = {}) {
     ? '\n\n' + options.systemPromptAddendum.trim()
     : '';
 
+  // Trust-your-writes reminder. 2026-06-01 Vairano pro bench wasted 10-15 iters
+  // doing get_cell_ranges on cells the worker had just written; the harness
+  // mock returns stale empty data, but in production cells stay written too —
+  // the ACK from a set_cell_range is authoritative. Inject this once at run
+  // start to short-circuit the "did my write actually land?" verification
+  // spiral that dominated the pro slice traces.
+  const writeTrustReminder = `\n\n<system-reminder>\nTRUST-YOUR-WRITES POLICY: set_cell_range / bulk_set_cell_ranges are durable. Once a write call returns ACK, the cells ARE updated. Do NOT call get_cell_ranges/get_range_as_csv on cells you just wrote yourself to "verify" — the ACK is authoritative. Read tools are for upstream data owned by OTHER slices (from the architect's may_read_from), and for INITIAL grounding before your first write. If a write returned with errors in the ACK (#VALUE!, #REF!, malformed shape), the error message already tells you what's wrong — fix the formula directly without re-reading.\n</system-reminder>`;
+
+  // JSON output size cap reminder. 2026-06-01 Vairano pro run had 12 JSON
+  // parse failures (~8% of iters wasted) because response bodies grew to
+  // 32K+ chars and got truncated mid-string. Tell the model to split large
+  // writes into 2-3 sequential calls. Cap is informational; the LLM still
+  // controls its own output but now knows the soft ceiling.
+  const jsonSizeReminder = `\n\n<system-reminder>\nOUTPUT SIZE CAP: keep each single JSON response under ~12,000 characters. If a write would push the response over the cap (typically >25 rows of cells in one set_cell_range, or >5 entries in bulk_set_cell_ranges with dense cell maps), SPLIT the work across 2-3 sequential tool calls. Truncated responses cost a full retry iteration (observed 12× in the 2026-06-01 Vairano pro bench, ~8% of wall time wasted). A short response that emits exactly one focused tool call is faster than a long response that gets truncated. Reasoning content is free (not counted in the cap) — output content is what matters.\n</system-reminder>`;
+
   const explicitCap = options.maxIterations || Number(process.env.AGENT_MAX_ITER);
   const maxIterations = explicitCap && explicitCap > 0 ? explicitCap : 10000;
 
@@ -4790,7 +4856,7 @@ function initAgentRun(objective, context, options = {}) {
     objective,
     context,
     messages: [
-      { role: 'system', content: systemPromptForRun + (skillReminder ? '\n\n' + skillReminder : '') + systemPromptAddendum },
+      { role: 'system', content: systemPromptForRun + writeTrustReminder + jsonSizeReminder + (skillReminder ? '\n\n' + skillReminder : '') + systemPromptAddendum },
       makeUserMessage(userPrompt)
     ],
     results: [],
@@ -4921,7 +4987,8 @@ async function callStepLLM(state, deps) {
         forceThinkingNext: state.forceThinkingNext,
         consecutiveErrors: state.consecutiveErrors,
         parseFailureStreak: state.parseFailureStreak,
-        lastToolName: state.recentToolTrail.length > 0 ? state.recentToolTrail[state.recentToolTrail.length - 1].toolName : null
+        lastToolName: state.recentToolTrail.length > 0 ? state.recentToolTrail[state.recentToolTrail.length - 1].toolName : null,
+        recentToolTrail: state.recentToolTrail
       });
   const modelForRun = resolveAgentLoopModel(state.config.modelOverride || undefined, state.config.promptVariant);
   const llmResult = await doLLM({
@@ -5337,10 +5404,15 @@ async function runAgentStep(state, clientResult, deps = {}) {
       set_cell_range: 'bulk_set_cell_ranges'
     };
     const bulkReplacement = SEQUENTIAL_FORCE_BULK[toolName];
-    if (bulkReplacement && (toolName !== 'set_cell_range' || state.context?._sliceId)) {
+    // 2026-06-01 Vairano pro bench: 79 sequential set_cell_range, 0 bulk_set_cell_ranges
+    // — dominant cause of 34min wall time. The original guard required _sliceId
+    // (i.e. only fired inside architect+slice mode), so the standalone agent_loop
+    // path got no enforcement. Drop the slice gate; the guard is safe for any
+    // mode because the redirect always has a valid bulk alternative.
+    if (bulkReplacement) {
       const recent = state.recentToolTrail.slice(-2).map(e => e.toolName);
       if (recent.length === 2 && recent.every(n => n === toolName)) {
-        const forceMsg = `STAGNATION GUARD: "${toolName}" was called 3 times in a row. Your NEXT call MUST be "${bulkReplacement}" with ALL remaining items in one payload. Sequential one-at-a-time calls have killed prior slices by exhausting the iteration budget. This call is rejected; retry as ${bulkReplacement}.`;
+        const forceMsg = `STAGNATION GUARD: "${toolName}" was called 3 times in a row. Your NEXT call MUST be "${bulkReplacement}" with ALL remaining items in one payload. Sequential one-at-a-time calls have killed prior runs by exhausting the iteration budget (2026-06-01 Vairano pro bench: 79 sequential set_cell_range × 12s/iter = 16min wasted that one bulk_set_cell_ranges of 30 entries would have done in 1 iter). This call is rejected; retry as ${bulkReplacement}.`;
         state.messages.push(makeUserMessage(forceMsg));
         state.results.push({ type: 'error', error: forceMsg, blocked: true, tool: toolName });
         onProgress('iterationError', { iteration: state.iteration, error: forceMsg });
@@ -5349,7 +5421,10 @@ async function runAgentStep(state, clientResult, deps = {}) {
       }
     }
 
-    if (toolName === 'set_cell_range' && state.context?._sliceId) {
+    // Micro-write guard — now applies in BOTH slice and standalone agent_loop modes.
+    // Catches the case where a run produces many tiny set_cell_range (<12 cells)
+    // calls rather than batching. Pro Vairano bench had ~50 such calls.
+    if (toolName === 'set_cell_range') {
       const priorSmallWrites = state.results.filter(r =>
         r && r.type === 'tool' &&
         r.tool === 'set_cell_range' &&
@@ -5365,7 +5440,7 @@ async function runAgentStep(state, clientResult, deps = {}) {
         typeof params.cells === 'object' &&
         Object.keys(params.cells).length < 12;
       if (currentSmallWrite && priorSmallWrites >= 2) {
-        const forceMsg = `MICRO-WRITE GUARD: this slice already used ${priorSmallWrites} small set_cell_range calls. Retry with bulk_set_cell_ranges and include ALL remaining rows/sections in one payload. If you are finished, call done instead of writing another tiny batch.`;
+        const forceMsg = `MICRO-WRITE GUARD: ${priorSmallWrites} prior small set_cell_range calls (<12 cells each). Retry as bulk_set_cell_ranges with the remaining sections in one payload (32 entries × 32 cells = 1024 cells per call). If finished, call done instead of writing another tiny batch.`;
         state.messages.push(makeUserMessage(forceMsg));
         state.results.push({ type: 'error', error: forceMsg, blocked: true, tool: toolName });
         onProgress('iterationError', { iteration: state.iteration, error: forceMsg });
