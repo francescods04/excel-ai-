@@ -543,8 +543,88 @@ function yieldToHost(delayMs = 0) {
   return new Promise(resolve => setTimeout(resolve, delayMs));
 }
 
-function yieldDelayForChunk(durationMs) {
-  return durationMs > SLOW_CHUNK_MS ? UI_YIELD_MS : 0;
+// Adaptive inter-chunk yield. Previously returned 0 for fast chunks, which let
+// Excel.run runs stack back-to-back with no UI breathing room — Office.js
+// crashed under heavy parallel-worker payloads. Always give at least UI_YIELD_MS
+// so the host can repaint and Office.js queues drain; scale with cells and run
+// duration to throttle big batches.
+function yieldDelayForChunk(durationMs, cellCount = 0) {
+  const baseRaw = (typeof window !== 'undefined' && Number(window.EXCEL_INTER_RUN_BASE_MS));
+  const base = Number.isFinite(baseRaw) && baseRaw >= 0 ? baseRaw : UI_YIELD_MS;
+  let ms = base;
+  if (cellCount > 150) ms += 40;
+  if (durationMs > 1500) ms += 80;
+  if (durationMs > SLOW_CHUNK_MS) ms += 200;
+  const capRaw = (typeof window !== 'undefined' && Number(window.EXCEL_INTER_RUN_MAX_MS));
+  const cap = Number.isFinite(capRaw) && capRaw > 0 ? capRaw : 320;
+  return Math.min(ms, cap);
+}
+
+// ---------- Cells-per-second token bucket ----------
+// Smooths the burstiness reported by the Vairano bench (peaks of 24 actions /
+// ~5k+ cells in <1s) into a sustainable rate. Per-second refill keeps long
+// runs honest; the wider capacity preserves short bursts so small batches still
+// feel snappy. Mega writeRange actions (>BYPASS_CELLS) bypass the bucket — they
+// can't be split, and forcing them to wait only delays without protecting.
+const RATE_CAPACITY_CELLS_DEFAULT = 5000;
+const RATE_REFILL_PER_SEC_DEFAULT = 3000;
+const RATE_BYPASS_CELLS_DEFAULT = 1250;
+const rateBucket = { tokens: RATE_CAPACITY_CELLS_DEFAULT, lastRefill: Date.now() };
+
+function rateConfig() {
+  const w = typeof window !== 'undefined' ? window : {};
+  const cap = Number(w.EXCEL_RATE_CAPACITY_CELLS);
+  const refill = Number(w.EXCEL_RATE_REFILL_PER_SEC);
+  const bypass = Number(w.EXCEL_RATE_BYPASS_CELLS);
+  return {
+    capacity: Number.isFinite(cap) && cap > 0 ? cap : RATE_CAPACITY_CELLS_DEFAULT,
+    refill: Number.isFinite(refill) && refill > 0 ? refill : RATE_REFILL_PER_SEC_DEFAULT,
+    bypass: Number.isFinite(bypass) && bypass > 0 ? bypass : RATE_BYPASS_CELLS_DEFAULT
+  };
+}
+
+async function acquireRateBudget(cells) {
+  const cfg = rateConfig();
+  if (!Number.isFinite(cells) || cells <= 0) return 0;
+  if (cells > cfg.bypass) return 0; // atomic mega-writes bypass the bucket
+  const now = Date.now();
+  const elapsedSec = Math.max(0, (now - rateBucket.lastRefill) / 1000);
+  rateBucket.tokens = Math.min(cfg.capacity, rateBucket.tokens + elapsedSec * cfg.refill);
+  rateBucket.lastRefill = now;
+  if (rateBucket.tokens >= cells) {
+    rateBucket.tokens -= cells;
+    return 0;
+  }
+  const deficit = cells - rateBucket.tokens;
+  const waitMs = Math.ceil((deficit / cfg.refill) * 1000);
+  await yieldToHost(waitMs);
+  rateBucket.tokens = 0;
+  rateBucket.lastRefill = Date.now();
+  return waitMs;
+}
+
+// ---------- Rolling queue telemetry (60s window) ----------
+const QUEUE_STATS_WINDOW_MS = 60_000;
+const queueStats = {
+  runs: [],    // { ts, actionCount, cellCount, runMs, waitedMs }
+  totals: { runs: 0, actions: 0, cells: 0, runMs: 0, waitedMs: 0 }
+};
+
+function recordRunStat(entry) {
+  queueStats.runs.push(entry);
+  queueStats.totals.runs += 1;
+  queueStats.totals.actions += entry.actionCount || 0;
+  queueStats.totals.cells += entry.cellCount || 0;
+  queueStats.totals.runMs += entry.runMs || 0;
+  queueStats.totals.waitedMs += entry.waitedMs || 0;
+  const cutoff = Date.now() - QUEUE_STATS_WINDOW_MS;
+  while (queueStats.runs.length > 0 && queueStats.runs[0].ts < cutoff) {
+    queueStats.runs.shift();
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.__excelQueueStats = queueStats;
 }
 
 function queueBatchKey(batch, index) {
@@ -903,6 +983,7 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
         let slowChunks = 0;
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];
+          const chunkCells = estimateBatchCells(chunk);
           const started = nowMs();
           const result = await executeActions(chunk, updateStepsPanel, 1);
           const durationMs = nowMs() - started;
@@ -914,7 +995,7 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
           aggregate.errors.push(...errors);
           if (result && result._snapshotsTaken) snapshotsTaken += result._snapshotsTaken;
           if (i < chunks.length - 1) {
-            await yieldToHost(yieldDelayForChunk(durationMs));
+            await yieldToHost(yieldDelayForChunk(durationMs, chunkCells));
           }
         }
         const slowNote = slowChunks > 0 ? ` (${slowChunks} lenti)` : '';
@@ -925,6 +1006,9 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
   }
 
   let focusLost = false;
+  const runActionCount = actions.length;
+  const runCellCount = estimateBatchCells(actions);
+  const waitedMs = await acquireRateBudget(runCellCount);
   const runStarted = nowMs();
   const result = await Excel.run(async (context) => {
     const actionErrors = [];
@@ -1144,9 +1228,17 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
     return executeActions(actions, updateStepsPanel, _attempt + 1);
   }
 
+  const runDurationMs = nowMs() - runStarted;
   if (_attempt === 0) {
-    recordChunkTiming(nowMs() - runStarted, actions);
+    recordChunkTiming(runDurationMs, actions);
   }
+  recordRunStat({
+    ts: Date.now(),
+    actionCount: runActionCount,
+    cellCount: Number.isFinite(runCellCount) ? runCellCount : 0,
+    runMs: runDurationMs,
+    waitedMs
+  });
 
   return result;
 }
