@@ -317,6 +317,75 @@ router.patch('/users/:userId', asyncHandler(async (req, res) => {
 }));
 
 // ────────────────────────────────────────────────────────────
+// Leads (demo requests) — query demo_leads with fallback to events
+// ────────────────────────────────────────────────────────────
+router.get('/leads', asyncHandler(async (req, res) => {
+  const limit = parseLimit(req.query.limit, 200, 500);
+
+  // Try demo_leads table first
+  try {
+    const { data, error } = await supabase
+      .from('demo_leads')
+      .select('id, created_at, nome, cognome, email, azienda, ruolo, source, user_agent, status, contacted_at, notes')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (!error) return res.json(data || []);
+  } catch (_) { /* fall through to events */ }
+
+  // Fallback: events with event_type='demo_request_submitted'
+  const { data: evts, error: evErr } = await supabase
+    .from('events')
+    .select('id, ts, properties')
+    .eq('event_type', 'demo_request_submitted')
+    .order('ts', { ascending: false })
+    .limit(limit);
+  if (evErr) throw evErr;
+  const leads = (evts || []).map(e => ({
+    id: e.id,
+    created_at: e.ts,
+    nome: e.properties?.nome,
+    cognome: e.properties?.cognome,
+    email: e.properties?.email,
+    azienda: e.properties?.azienda,
+    ruolo: e.properties?.ruolo,
+    source: 'events',
+    user_agent: e.properties?.user_agent,
+  }));
+  res.json(leads);
+}));
+
+// ────────────────────────────────────────────────────────────
+// Funnel aggregations
+// ────────────────────────────────────────────────────────────
+router.get('/funnel', asyncHandler(async (req, res) => {
+  const since24h = new Date(Date.now() - 86400000).toISOString();
+  const { data: byType, error } = await supabase.rpc('admin_event_counts_24h');
+  // Fallback if RPC doesn't exist
+  let events = byType;
+  if (error || !byType) {
+    const { data } = await supabase
+      .from('events')
+      .select('event_type')
+      .gte('ts', since24h);
+    const counts = {};
+    for (const e of (data || [])) {
+      counts[e.event_type] = (counts[e.event_type] || 0) + 1;
+    }
+    events = Object.entries(counts).map(([event_type, count]) => ({ event_type, count }));
+  }
+
+  const get = (name) => (events || []).filter(e => e.event_type === name).reduce((s, e) => s + (e.count || 0), 0);
+  res.json({
+    pageViews: get('page_view'),
+    signups: get('signup_completed'),
+    demoRequests: get('demo_request_submitted'),
+    demoRuns: get('demo_run_completed'),
+    logins: get('login_completed'),
+    ctaClicks: get('cta_click'),
+  });
+}));
+
+// ────────────────────────────────────────────────────────────
 // Costs (per model from LLM events)
 // ────────────────────────────────────────────────────────────
 router.get('/costs', asyncHandler(async (req, res) => {
