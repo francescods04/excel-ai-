@@ -163,6 +163,13 @@ const FAST_CHUNK_MS = 800;
 const UI_YIELD_MS = 16;
 const MAX_NATIVE_NOTE_ATTEMPTS_PER_BATCH = 8;
 const MAX_DIRECT_FORMAT_CELLS = 12000;
+// Above this, autoFill on a single-cell-key formula spec is risky: Office.js
+// has been observed to reject the sync with a generic "argument invalid"
+// when the destination span × cols is in the thousands. We fall back to a
+// matrix-fill (identical formula in every cell) which is predictable. The
+// downside is relative references won't auto-adjust per row — the LLM should
+// use copyToRange for that pattern instead.
+const MAX_AUTOFILL_CELLS_PER_RANGE = Math.max(500, Number(typeof window !== 'undefined' && window.EXCEL_MAX_AUTOFILL_CELLS) || 2000);
 const QUEUE_BATCH_KEY = '__excelQueueBatchKey';
 let adaptiveChunkCostLimit = BASE_EXCEL_CHUNK_COST;
 
@@ -1737,10 +1744,30 @@ async function execSetCellRange(context, sheetCache, defaultSheet, action) {
         } else {
           // Same formula across a multi-cell range key → autoFill from the top-left
           // so relative references adjust (the usual "fill down/across" intent).
+          // For very large destinations (>MAX_AUTOFILL_CELLS), Office.js'
+          // autoFill can reject the whole sync as "argument invalid" and we
+          // have no way to bisect inside Excel.run. Annotate the action so
+          // the per-action isolation upstream can flag it cleanly, and fall
+          // back to the matrix path which is more predictable for size.
+          const totalCells = dims.rows * dims.cols;
           const src = cell.getCell(0, 0);
           src.formulas = [[String(formula)]];
-          try { src.autoFill(cell, Excel.AutoFillType.fillDefault); }
-          catch (_) { cell.formulas = buildMatrix(dims.rows, dims.cols, String(formula)); }
+          if (totalCells > MAX_AUTOFILL_CELLS_PER_RANGE) {
+            addLog(`setCellRange ${originalAddr}: range autoFill enorme (${totalCells} celle). Uso matrix-fill diretto (refs relative non si aggiusteranno per riga).`, 'warn');
+            cell.formulas = buildMatrix(dims.rows, dims.cols, String(formula));
+          } else {
+            try {
+              src.autoFill(cell, Excel.AutoFillType.fillDefault);
+            } catch (autoErr) {
+              addLog(`setCellRange ${originalAddr}: autoFill fallita (${autoErr.message}). Provo fillFormulas.`, 'warn');
+              try {
+                src.autoFill(cell, Excel.AutoFillType.fillFormulas);
+              } catch (auto2) {
+                addLog(`setCellRange ${originalAddr}: fillFormulas anche fallita. Uso matrix-fill (formula "${String(formula).slice(0, 80)}").`, 'warn');
+                cell.formulas = buildMatrix(dims.rows, dims.cols, String(formula));
+              }
+            }
+          }
         }
       } else if (value !== undefined) {
         if (Array.isArray(value)) {

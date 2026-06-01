@@ -338,6 +338,63 @@ function rememberHandledId(set, value) {
   return true;
 }
 
+// Persist handled action-batch ids per turn in localStorage so a page reload
+// (or a long enough SSE drop that the JS state is GCed) doesn't cause the
+// server's replay of taskActions to re-apply the same writes twice. TTL
+// limits how long stale turn entries stick around.
+const HANDLED_IDS_STORAGE_PREFIX = 'excelAi.handledBatchIds:';
+const HANDLED_IDS_TTL_MS = 6 * 60 * 60 * 1000; // 6h
+const HANDLED_IDS_MAX_PER_TURN = 1500;
+
+function loadHandledIdsForTurn(turnId) {
+  if (!turnId || typeof localStorage === 'undefined') return new Set();
+  try {
+    const raw = localStorage.getItem(HANDLED_IDS_STORAGE_PREFIX + turnId);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return new Set();
+    if (Number(parsed.ts) && Date.now() - Number(parsed.ts) > HANDLED_IDS_TTL_MS) {
+      localStorage.removeItem(HANDLED_IDS_STORAGE_PREFIX + turnId);
+      return new Set();
+    }
+    return new Set(Array.isArray(parsed.ids) ? parsed.ids : []);
+  } catch (_) {
+    return new Set();
+  }
+}
+
+function persistHandledIds(turnId, set) {
+  if (!turnId || typeof localStorage === 'undefined' || !set) return;
+  try {
+    const ids = Array.from(set).slice(-HANDLED_IDS_MAX_PER_TURN);
+    localStorage.setItem(
+      HANDLED_IDS_STORAGE_PREFIX + turnId,
+      JSON.stringify({ ts: Date.now(), ids })
+    );
+  } catch (_) {}
+}
+
+function pruneOldHandledIdsStorage() {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const now = Date.now();
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i);
+      if (!key || !key.startsWith(HANDLED_IDS_STORAGE_PREFIX)) continue;
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw);
+        if (!Number(parsed && parsed.ts) || now - Number(parsed.ts) > HANDLED_IDS_TTL_MS) {
+          localStorage.removeItem(key);
+        }
+      } catch (_) {
+        localStorage.removeItem(key);
+      }
+    }
+  } catch (_) {}
+}
+
 function resetRequestQueue() {
   state.requestQueue = [];
   state.activeRequest = null;
@@ -356,10 +413,14 @@ async function resumeStoredTurnIfActive(restoredTurnMemory) {
 
     state.currentTurnId = turn.id;
     state.lastTurnId = turn.id;
+    // Restore handled-batch dedup from localStorage so the server's history
+    // replay after reconnect doesn't re-apply taskActions we already wrote.
+    const persistedHandled = loadHandledIdsForTurn(turn.id);
+    for (const id of persistedHandled) state.handledActionBatchIds.add(id);
     switchTab('progress');
     startElapsedTimer();
     const planMsgId = addMessage(`Riprendo il turn in corso: <strong>${escapeHtml(turn.id)}</strong>`, 'bot');
-    addLog(`Ripresa turn ${turn.id} (${turn.status})`, 'info');
+    addLog(`Ripresa turn ${turn.id} (${turn.status})${persistedHandled.size > 0 ? ` — ${persistedHandled.size} action batch già applicate (dedup)` : ''}`, 'info');
     if (turn.status === 'awaiting_approval') showApproveBar();
     openTurnEventStream(turn.id, planMsgId);
   } catch (err) {
@@ -653,6 +714,7 @@ async function runTurnMode(text) {
     state.currentTurnId = startData.turnId;
     state.lastTurnId = startData.turnId;
     state.lastContextFingerprint = currentFingerprint;
+    pruneOldHandledIdsStorage();
     persistTurnStarted(startData.turnId, currentFingerprint);
     addLog('Turn creato: ' + startData.turnId);
     if (parentTurnId) addLog('Continuità chat: uso il contesto del turn precedente ' + parentTurnId);
@@ -1037,6 +1099,7 @@ function openTurnEventStream(turnId, planMsgId) {
         const data = JSON.parse(e.data);
         const batchId = data.itemId || data.taskId || JSON.stringify(data.actions || []);
         if (!rememberHandledId(state.handledActionBatchIds, batchId)) return;
+        persistHandledIds(turnId, state.handledActionBatchIds);
         if (data.actions && data.actions.length > 0) {
           addLog(`[${data.taskId}] Eseguo ${data.actions.length} azioni su Excel`);
           showToast(`${data.actions.length} azioni Excel (${data.taskId})`, 'info');
