@@ -102,10 +102,35 @@ function extractErrorsFromMatrix(sheetName, baseAddress, values, formulas, maxEr
   return errors;
 }
 
+// Extract cell references from a formula string. Returns up to maxRefs items
+// in the form {sheet, addr}. Skips refs inside string literals "...". Handles
+// quoted sheet names with special chars ('Sources & Uses'!A1).
+function extractFormulaCellRefs(formula, maxRefs = 5) {
+  const out = [];
+  if (typeof formula !== 'string' || formula.length === 0) return out;
+  // Strip "..." string literals so we don't capture refs inside text
+  const stripped = formula.replace(/"(?:[^"\\]|\\.)*"/g, '""');
+  const re = /(?:'((?:[^']|'')+)'|([A-Za-z_][A-Za-z0-9_.]*))!\$?([A-Z]+)\$?(\d+)/g;
+  const seen = new Set();
+  let m;
+  while ((m = re.exec(stripped))) {
+    const sheet = (m[1] || m[2] || '').replace(/''/g, "'");
+    const addr = `${m[3]}${m[4]}`;
+    const key = `${sheet}!${addr}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ sheet, addr });
+    if (out.length >= maxRefs) break;
+  }
+  return out;
+}
+
 async function scanWorkbookErrors({
   maxSheets = MAX_SHEETS_PER_SCAN_DEFAULT,
   maxCellsPerSheet = MAX_CELLS_PER_SHEET_DEFAULT,
-  maxErrors = MAX_ERRORS_PER_REPORT_DEFAULT
+  maxErrors = MAX_ERRORS_PER_REPORT_DEFAULT,
+  enrichRefs = true,
+  maxEnrichTotal = 50
 } = {}) {
   if (typeof Excel === 'undefined') return [];
   return await Excel.run(async (ctx) => {
@@ -114,21 +139,19 @@ async function scanWorkbookErrors({
     await ctx.sync();
     const targetSheets = sheets.items.slice(0, maxSheets);
     const sheetRefs = [];
+    const sheetByName = new Map();
     for (const sheet of targetSheets) {
       const used = sheet.getUsedRangeOrNullObject(true);
       used.load('values,formulas,address,rowCount,columnCount,cellCount');
       sheetRefs.push({ name: sheet.name, used });
+      sheetByName.set(sheet.name, sheet);
     }
     await ctx.sync();
     const allErrors = [];
     for (const { name, used } of sheetRefs) {
       if (used.isNullObject) continue;
       const cellCount = Number(used.cellCount) || 0;
-      if (cellCount > maxCellsPerSheet) {
-        // Cap to first maxCellsPerSheet columns × rows; reading the whole
-        // used range of a 50k-cell sheet just to look for errors is wasteful.
-        continue;
-      }
+      if (cellCount > maxCellsPerSheet) continue;
       const errs = extractErrorsFromMatrix(
         name,
         used.address || `${name}!A1`,
@@ -138,6 +161,51 @@ async function scanWorkbookErrors({
       );
       allErrors.push(...errs);
       if (allErrors.length >= maxErrors) break;
+    }
+
+    // Enrichment pass: for each error with a formula, look up the cells it
+    // references and report their current value. Lets the agent loop see
+    // "PnL!B7 → #VALUE! (formula =Assumptions!B97) — Assumptions!B97 is
+    // currently empty" instead of guessing which upstream cell it meant.
+    // Bounded by maxEnrichTotal so a single scan can never explode into
+    // hundreds of extra loads.
+    if (enrichRefs && allErrors.length > 0) {
+      const pendingLoads = [];
+      const refsPerError = new Map();
+      let totalEnrichLoads = 0;
+      for (let i = 0; i < allErrors.length; i++) {
+        const err = allErrors[i];
+        if (!err.formula) continue;
+        const refs = extractFormulaCellRefs(err.formula, 3);
+        const usable = [];
+        for (const ref of refs) {
+          if (totalEnrichLoads >= maxEnrichTotal) break;
+          const refSheet = sheetByName.get(ref.sheet);
+          if (!refSheet) continue;
+          try {
+            const range = refSheet.getRange(ref.addr);
+            range.load('values,formulas');
+            pendingLoads.push({ errorIndex: i, ref, range });
+            usable.push(ref);
+            totalEnrichLoads++;
+          } catch (_) {}
+        }
+        if (usable.length > 0) refsPerError.set(i, usable);
+      }
+      if (pendingLoads.length > 0) {
+        await ctx.sync();
+        for (const { errorIndex, ref, range } of pendingLoads) {
+          const v = (((range.values || [])[0]) || [])[0];
+          const f = (((range.formulas || [])[0]) || [])[0];
+          if (!allErrors[errorIndex].refs) allErrors[errorIndex].refs = [];
+          allErrors[errorIndex].refs.push({
+            sheet: ref.sheet,
+            addr: ref.addr,
+            value: v == null || v === '' ? null : String(v).slice(0, 80),
+            formula: typeof f === 'string' && f.length > 0 ? f.slice(0, 160) : null
+          });
+        }
+      }
     }
     return allErrors;
   });
@@ -215,6 +283,7 @@ export {
   scanWorkbookErrors,
   // exposed for tests
   extractErrorsFromMatrix,
+  extractFormulaCellRefs,
   isErrorValue,
   parseBaseCellFromAddress,
   colNumberToA1

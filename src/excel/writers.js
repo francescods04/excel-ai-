@@ -1111,6 +1111,13 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
         const totalCells = chunks.reduce((sum, c) => sum + estimateBatchCells(c), 0);
         let snapshotsTaken = 0;
         let slowChunks = 0;
+        // Cross-chunk error dedup. inspectWrittenFormulaErrors runs per chunk
+        // and on dense workbooks the same downstream broken cells get reported
+        // for every chunk that touches them — previous run logged "Verifica
+        // formule: 37 errori" 30+ times for the same payload, with the agent
+        // loop receiving 1148 errors that were really 37 unique cells. Keep
+        // a Set across the loop and drop already-seen keys.
+        const seenChunkErrKeys = new Set();
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];
           const chunkCells = estimateBatchCells(chunk);
@@ -1158,9 +1165,16 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
           const prevCost = adaptiveChunkCostLimit;
           recordChunkTiming(durationMs, chunk);
           if (adaptiveChunkCostLimit < prevCost) slowChunks++;
-          const errors = Array.isArray(result?.errors) ? result.errors : [];
-          aggregate.errorCount += Number(result?.errorCount) || errors.length || 0;
-          aggregate.errors.push(...errors);
+          const rawErrors = Array.isArray(result?.errors) ? result.errors : [];
+          const newErrors = [];
+          for (const e of rawErrors) {
+            const k = `${e?.type || ''}|${e?.sheet || ''}|${e?.target || ''}|${e?.formula || ''}|${e?.message || ''}`;
+            if (seenChunkErrKeys.has(k)) continue;
+            seenChunkErrKeys.add(k);
+            newErrors.push(e);
+          }
+          aggregate.errorCount += Number(result?.errorCount) || rawErrors.length || 0;
+          aggregate.errors.push(...newErrors);
           if (result && result._snapshotsTaken) snapshotsTaken += result._snapshotsTaken;
           if (i < chunks.length - 1) {
             await yieldToHost(yieldDelayForChunk(durationMs, chunkCells));
@@ -1353,6 +1367,19 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
     }
 
     if (!focusLost && formulaCheckTargets.length > 0) {
+      // Estimate total cells we'd load for verification. On huge batches the
+      // background health scanner (runs periodically across the whole
+      // workbook with dedup) catches these errors anyway, so skip the
+      // per-batch inspection cost. Saves multi-second sync per chunk on
+      // dense schedules without losing observability.
+      const inspectCellsBudget = formulaCheckTargets.reduce((sum, t) => {
+        const n = estimateTargetCells(t.target);
+        return sum + (Number.isFinite(n) ? n : 0);
+      }, 0);
+      const MAX_INSPECTION_CELLS = Number(typeof window !== 'undefined' && window.EXCEL_MAX_INSPECT_CELLS) || 3000;
+      if (inspectCellsBudget > MAX_INSPECTION_CELLS) {
+        addLog(`Verifica formule saltata (batch ~${inspectCellsBudget} celle > ${MAX_INSPECTION_CELLS}): delego al background scanner.`, 'info');
+      } else {
       try {
         const formulaErrors = await inspectWrittenFormulaErrors(context, sheetCache, defaultSheet, formulaCheckTargets);
         if (formulaErrors.length > 0) {
@@ -1366,6 +1393,7 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
           target: null,
           message: `Formula verification failed: ${err && err.message ? err.message : String(err)}`
         });
+      }
       }
     }
 
