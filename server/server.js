@@ -365,6 +365,32 @@ app.get('/api/health', (req, res) => {
 
 app.get('/health', (req, res) => res.redirect('/api/health'));
 
+/* ---------- Admin Dashboard (modular routes) ---------- */
+const adminRouter = require('./routes/admin');
+app.use('/api/admin', authenticate, adminRouter);
+
+app.get('/admin', optionalAuth, (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'src', 'admin.html'));
+});
+
+/* ---------- Global error handler ---------- */
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  const requestId = req.id || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  logger.error('Unhandled error in route', {
+    requestId,
+    method: req.method,
+    path: req.path,
+    message: err.message,
+    stack: err.stack?.split('\n').slice(0, 5).join('\n'),
+  });
+  const status = err.status || err.statusCode || 500;
+  res.status(status).json({
+    error: status >= 500 ? 'Errore interno del server' : err.message,
+    requestId,
+  });
+});
+
 /* ---------- Office Add-in Manifest (dinamico) ---------- */
 function sendOfficeManifest(req, res) {
   const baseUrl = inferPublicBaseUrl(req);
@@ -407,554 +433,6 @@ function sendOfficeManifest(req, res) {
   }
 }
 
-/* ---------- Admin Dashboard API ---------- */
-function parseAdminSince(value) {
-  if (!value) return null;
-  const ms = Date.parse(String(value));
-  return Number.isFinite(ms) ? ms : null;
-}
-
-function parseAdminLimit(value, fallback = 50, max = 500) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric) || numeric <= 0) return fallback;
-  return Math.min(Math.floor(numeric), max);
-}
-
-function parseAdminBoolean(value) {
-  if (value === undefined || value === null || value === '') return undefined;
-  if (value === true || value === 'true' || value === '1') return true;
-  if (value === false || value === 'false' || value === '0') return false;
-  return undefined;
-}
-
-function mapTracePreview(record) {
-  const responseText = typeof record.responseText === 'string' ? record.responseText : '';
-  const previewSource = responseText || record.error?.message || '';
-  return {
-    ts: record.ts,
-    traceId: record.traceId,
-    turnId: record.turnId || null,
-    phase: record.phase || null,
-    workflow: record.workflow || null,
-    label: record.label || null,
-    role: record.role || null,
-    eventType: record.eventType,
-    provider: record.provider || null,
-    model: record.model || null,
-    attempt: record.attempt || null,
-    latencyMs: record.latencyMs || null,
-    promptTokens: record.usage?.prompt_tokens || 0,
-    completionTokens: record.usage?.completion_tokens || 0,
-    messageCount: record.messageSummary?.count || 0,
-    messageChars: record.messageSummary?.chars || 0,
-    responseChars: responseText.length || 0,
-    preview: previewSource.length > 220 ? `${previewSource.slice(0, 220)}…` : previewSource,
-    errorMessage: record.error?.message || null,
-  };
-}
-
-app.get('/api/admin/stats', authenticate, async (req, res) => {
-  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  try {
-    const supabase = require('./supabase/client').getSupabase();
-
-    // Use auth admin API to get real user count (auth.users table is not queryable from client)
-    let totalUsersAuth = 0;
-    try {
-      const { data: listData } = await supabase.auth.admin.listUsers({ page: 1, perPage: 1 });
-      totalUsersAuth = listData?.total || 0;
-    } catch (_) {
-      // Fallback: count distinct user_ids from turns
-    }
-
-    const [{ count: turnsToday }, { count: errors24h }, { data: llmCalls }, { data: activeUsers }] = await Promise.all([
-      supabase.from('turns').select('*', { count: 'exact', head: true }).gte('created_at', new Date().toISOString().slice(0, 10)),
-      supabase.from('events').select('*', { count: 'exact', head: true }).eq('event_type', 'turn.failed').gte('ts', new Date(Date.now() - 86400000).toISOString()),
-      supabase.from('events').select('tokens_in, tokens_out').eq('event_type', 'llm.response').gte('ts', new Date(Date.now() - 86400000).toISOString()),
-      supabase.from('events').select('user_id').gte('ts', new Date(Date.now() - 30 * 86400000).toISOString()).neq('user_id', null),
-    ]);
-
-    // Fallback: if auth admin API didn't work, count distinct user_ids from recent events
-    const distinctUserIds = new Set((activeUsers || []).map(e => e.user_id));
-    const totalUsers = totalUsersAuth || distinctUserIds.size;
-
-    const tokensIn24h = (llmCalls || []).reduce((s, r) => s + (r.tokens_in || 0), 0);
-    const tokensOut24h = (llmCalls || []).reduce((s, r) => s + (r.tokens_out || 0), 0);
-
-    res.json({ totalUsers, turnsToday, errors24h, llmCalls24h: (llmCalls || []).length, tokensIn24h, tokensOut24h });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/admin/events-daily', authenticate, async (req, res) => {
-  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  try {
-    const supabase = require('./supabase/client').getSupabase();
-    const { data: turns } = await supabase
-      .from('turns')
-      .select('status, created_at')
-      .gte('created_at', new Date(Date.now() - 30 * 86400000).toISOString())
-      .order('created_at', { ascending: true });
-
-    const byDay = {};
-    for (const t of (turns || [])) {
-      const day = t.created_at.slice(0, 10);
-      if (!byDay[day]) byDay[day] = { completed: 0, failed: 0 };
-      if (t.status === 'completed') byDay[day].completed++;
-      if (t.status === 'error' || t.status === 'failed') byDay[day].failed++;
-    }
-    // Fill every day in the 30-day window so Chart.js keeps bar widths consistent
-    const days = [];
-    const completed = [];
-    const failed = [];
-    const now = new Date();
-    for (let i = 29; i >= 0; i--) {
-      const d = new Date(now);
-      d.setDate(d.getDate() - i);
-      const dayStr = d.toISOString().slice(0, 10);
-      days.push(dayStr);
-      completed.push(byDay[dayStr]?.completed || 0);
-      failed.push(byDay[dayStr]?.failed || 0);
-    }
-    res.json({ days, completed, failed });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/admin/events-by-type', authenticate, async (req, res) => {
-  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  try {
-    const supabase = require('./supabase/client').getSupabase();
-    const { data: rows } = await supabase.rpc('admin_event_counts_24h');
-    res.json(rows || []);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/admin/recent-turns', authenticate, async (req, res) => {
-  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  try {
-    const supabase = require('./supabase/client').getSupabase();
-    // Query turns without the user join (avoids FK dependency issues)
-    const { data: turns, error: turnsError } = await supabase
-      .from('turns')
-      .select('id, user_id, status, task_count, action_count, total_latency_ms, created_at')
-      .order('created_at', { ascending: false })
-      .limit(50);
-    if (turnsError) throw turnsError;
-
-    // Fetch user emails separately for the user_ids we found
-    const userIds = [...new Set((turns || []).map(t => t.user_id).filter(Boolean))];
-    let emailMap = {};
-    if (userIds.length > 0) {
-      try {
-        const { data: users } = await supabase.auth.admin.listUsers({ page: 1, perPage: 1000 });
-        if (users?.users) {
-          for (const u of users.users) {
-            emailMap[u.id] = u.email;
-          }
-        }
-      } catch (_) {
-        // If auth admin list fails, fallback to empty emails
-      }
-    }
-
-    res.json((turns || []).map(t => ({
-      id: t.id,
-      userId: t.user_id,
-      userEmail: emailMap[t.user_id] || null,
-      status: t.status,
-      taskCount: t.task_count,
-      actionCount: t.action_count,
-      totalLatencyMs: t.total_latency_ms,
-      createdAt: t.created_at,
-    })));
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/admin/llm-traces/summary', authenticate, async (req, res) => {
-  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  try {
-    const { summarizeLlmTraces } = require('./utils/llmTrace');
-    const summary = summarizeLlmTraces({
-      sinceMs: parseAdminSince(req.query.since),
-      turnId: req.query.turnId || undefined,
-      eventType: req.query.eventType || undefined,
-      label: req.query.label || undefined,
-      role: req.query.role || undefined,
-      attempt: req.query.attempt || undefined,
-      provider: req.query.provider || undefined,
-      model: req.query.model || undefined,
-      summaryLimit: parseAdminLimit(req.query.summaryLimit, 5000, 50000),
-    });
-    res.json(summary);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/admin/llm-traces', authenticate, async (req, res) => {
-  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  try {
-    const { readLlmTracesAsync } = require('./utils/llmTrace');
-    const records = await readLlmTracesAsync({
-      sinceMs: parseAdminSince(req.query.since),
-      turnId: req.query.turnId || undefined,
-      traceId: req.query.traceId || undefined,
-      eventType: req.query.eventType || undefined,
-      label: req.query.label || undefined,
-      role: req.query.role || undefined,
-      attempt: req.query.attempt || undefined,
-      provider: req.query.provider || undefined,
-      model: req.query.model || undefined,
-      limit: parseAdminLimit(req.query.limit, 40, 200),
-      descending: req.query.order !== 'asc',
-    });
-    res.json(records.map(mapTracePreview));
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Per-turn endpoint: authenticated user can fetch traces for their own turn.
-// Useful for benchmark scripts run by the turn owner.
-app.get('/api/turn/:turnId/llm-traces', authenticate, async (req, res) => {
-  try {
-    const { turnId } = req.params;
-    const turn = turns.loadTurn(turnId);
-    const ownsTurn = turn && turn.userId && turn.userId === req.userId;
-    if (!ownsTurn && req.userPlan !== 'admin') return res.status(403).json({ error: 'Not your turn' });
-    const { readLlmTracesAsync } = require('./utils/llmTrace');
-    const records = await readLlmTracesAsync({
-      turnId,
-      eventType: req.query.eventType || undefined,
-      label: req.query.label || undefined,
-      limit: parseAdminLimit(req.query.limit, 500, 5000),
-      descending: req.query.order !== 'asc',
-    });
-    res.json({ turnId, count: records.length, records });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/admin/llm-traces/:traceId', authenticate, async (req, res) => {
-  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  try {
-    const { readLlmTraces } = require('./utils/llmTrace');
-    const records = readLlmTraces({
-      traceId: req.params.traceId,
-      limit: parseAdminLimit(req.query.limit, 20, 100),
-      descending: false,
-    });
-    if (!records.length) return res.status(404).json({ error: 'Trace not found' });
-    res.json({
-      traceId: req.params.traceId,
-      count: records.length,
-      records,
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/admin/runtime-outcomes/summary', authenticate, async (req, res) => {
-  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  try {
-    const { summarizeRuntimeOutcomes } = require('./utils/runtimeOutcomeSummary');
-    const summary = summarizeRuntimeOutcomes({
-      sinceMs: parseAdminSince(req.query.since),
-      turnId: req.query.turnId || undefined,
-      status: req.query.status || undefined,
-      reasonCategory: req.query.reasonCategory || undefined,
-      escalated: parseAdminBoolean(req.query.escalated),
-      summaryLimit: parseAdminLimit(req.query.summaryLimit, 500, 5000),
-    });
-    res.json(summary);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/admin/runtime-outcomes', authenticate, async (req, res) => {
-  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  try {
-    const { readRuntimeOutcomes } = require('./utils/runtimeOutcomeSummary');
-    const records = readRuntimeOutcomes({
-      sinceMs: parseAdminSince(req.query.since),
-      turnId: req.query.turnId || undefined,
-      status: req.query.status || undefined,
-      reasonCategory: req.query.reasonCategory || undefined,
-      escalated: parseAdminBoolean(req.query.escalated),
-      limit: parseAdminLimit(req.query.limit, 30, 200),
-      descending: req.query.order !== 'asc',
-    });
-    res.json(records);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/admin/users', authenticate, async (req, res) => {
-  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  try {
-    const supabase = require('./supabase/client').getSupabase();
-    const { data: listData, error: listError } = await supabase.auth.admin.listUsers({ page: 1, perPage: 500 });
-    if (listError) throw listError;
-    const users = listData?.users || [];
-
-    const { data: turnStats } = await supabase
-      .from('turns')
-      .select('user_id, status, created_at')
-      .order('created_at', { ascending: false })
-      .limit(50000);
-
-    // Pull actual token / latency / cost data from events telemetry (turns often lack these fields)
-    // Order by ts DESC so we get the most recent events first
-    const { data: eventStats } = await supabase
-      .from('events')
-      .select('user_id, session_id, event_type, tokens_in, tokens_out, model, latency_ms')
-      .eq('event_type', 'llm.response')
-      .gte('ts', new Date(Date.now() - 30 * 86400000).toISOString())
-      .order('ts', { ascending: false })
-      .limit(50000);
-
-    // Also query events that have a direct user_id (most reliable)
-    const { data: eventStatsByUser } = await supabase
-      .from('events')
-      .select('user_id, tokens_in, tokens_out, model, latency_ms')
-      .eq('event_type', 'llm.response')
-      .not('user_id', 'is', null)
-      .gte('ts', new Date(Date.now() - 30 * 86400000).toISOString())
-      .order('ts', { ascending: false })
-      .limit(50000);
-
-    // Build a map of turnId → user_id from turns so we can resolve legacy events that lack user_id
-    const { data: turnLookup } = await supabase
-      .from('turns')
-      .select('id, user_id')
-      .gte('created_at', new Date(Date.now() - 30 * 86400000).toISOString())
-      .limit(50000);
-    const turnUserMap = {};
-    for (const t of (turnLookup || [])) { if (t.id && t.user_id) turnUserMap[t.id] = t.user_id; }
-
-    const todayIso = new Date().toISOString().slice(0, 10);
-    const statsByUser = {};
-
-    for (const t of (turnStats || [])) {
-      const uid = t.user_id;
-      if (!statsByUser[uid]) {
-        statsByUser[uid] = { totalTurns: 0, turnsToday: 0, tokensIn: 0, tokensOut: 0, latencyMsSum: 0, latencyMsCount: 0, errorTurns: 0, costSum: 0 };
-      }
-      const s = statsByUser[uid];
-      s.totalTurns += 1;
-      if (t.created_at && t.created_at.slice(0, 10) === todayIso) s.turnsToday += 1;
-      if (t.status === 'error' || t.status === 'failed') s.errorTurns += 1;
-    }
-
-    const { estimateCost } = require('./utils/pricing');
-    // Process events with session_id resolution
-    for (const e of (eventStats || [])) {
-      let uid = e.user_id;
-      if (!uid && e.session_id && turnUserMap[e.session_id]) uid = turnUserMap[e.session_id];
-      if (!uid) continue;
-      if (!statsByUser[uid]) {
-        statsByUser[uid] = { totalTurns: 0, turnsToday: 0, tokensIn: 0, tokensOut: 0, latencyMsSum: 0, latencyMsCount: 0, errorTurns: 0, costSum: 0 };
-      }
-      const s = statsByUser[uid];
-      s.tokensIn += e.tokens_in || 0;
-      s.tokensOut += e.tokens_out || 0;
-      if (e.latency_ms) {
-        s.latencyMsSum += e.latency_ms;
-        s.latencyMsCount += 1;
-      }
-      s.costSum += estimateCost(e.model || 'unknown', e.tokens_in || 0, e.tokens_out || 0);
-    }
-    // Also process events that have a direct user_id (most reliable attribution)
-    for (const e of (eventStatsByUser || [])) {
-      const uid = e.user_id;
-      if (!uid) continue;
-      if (!statsByUser[uid]) {
-        statsByUser[uid] = { totalTurns: 0, turnsToday: 0, tokensIn: 0, tokensOut: 0, latencyMsSum: 0, latencyMsCount: 0, errorTurns: 0, costSum: 0 };
-      }
-      const s = statsByUser[uid];
-      s.tokensIn += e.tokens_in || 0;
-      s.tokensOut += e.tokens_out || 0;
-      if (e.latency_ms) {
-        s.latencyMsSum += e.latency_ms;
-        s.latencyMsCount += 1;
-      }
-      s.costSum += estimateCost(e.model || 'unknown', e.tokens_in || 0, e.tokens_out || 0);
-    }
-
-    // Fallback: if auth.users is empty, synthesize from distinct turn user_ids
-    let userList = users;
-    if (!userList.length && Object.keys(statsByUser).length > 0) {
-      userList = Object.keys(statsByUser).map(uid => ({
-        id: uid,
-        email: `${uid.slice(0, 8)}@unknown`,
-        app_metadata: { plan: 'free' },
-        created_at: null,
-      }));
-    }
-
-    const enriched = userList.map(u => {
-      const s = statsByUser[u.id] || { totalTurns: 0, turnsToday: 0, tokensIn: 0, tokensOut: 0, latencyMsSum: 0, latencyMsCount: 0, errorTurns: 0, costSum: 0 };
-      const avgLatencyMs = s.latencyMsCount > 0 ? Math.round(s.latencyMsSum / s.latencyMsCount) : 0;
-      return {
-        id: u.id,
-        email: u.email,
-        plan: u.app_metadata?.plan || 'free',
-        createdAt: u.created_at,
-        totalTurns: s.totalTurns,
-        turnsToday: s.turnsToday,
-        tokensIn: s.tokensIn,
-        tokensOut: s.tokensOut,
-        avgLatencyMs,
-        errorTurns: s.errorTurns,
-        estimatedCost: Number((s.costSum || 0).toFixed(4)),
-      };
-    });
-
-    enriched.sort((a, b) => b.totalTurns - a.totalTurns);
-    res.json(enriched);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/admin/costs', authenticate, async (req, res) => {
-  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  try {
-    const { estimateCostBatch } = require('./utils/pricing');
-    const supabase = require('./supabase/client').getSupabase();
-
-    const windows = [
-      { key: '24h', since: new Date(Date.now() - 86400000).toISOString() },
-      { key: '7d', since: new Date(Date.now() - 7 * 86400000).toISOString() },
-      { key: '30d', since: new Date(Date.now() - 30 * 86400000).toISOString() },
-    ];
-
-    const result = {};
-    for (const w of windows) {
-      // Use events (actual telemetry) instead of turns (which often lack token data)
-      const { data: rows } = await supabase
-        .from('events')
-        .select('model, tokens_in, tokens_out, session_id')
-        .eq('event_type', 'llm.response')
-        .gte('ts', w.since);
-      const usage = (rows || []).map(r => ({ model: r.model || 'unknown', tokens_in: r.tokens_in || 0, tokens_out: r.tokens_out || 0 }));
-      const cost = estimateCostBatch(usage);
-      // Count distinct turns from session_id (which stores the turn ID)
-      const distinctTurnIds = new Set((rows || []).map(r => r.session_id).filter(Boolean));
-      result[w.key] = {
-        totalCost: Number(cost.totalCost.toFixed(4)),
-        byModel: Object.fromEntries(Object.entries(cost.byModel).map(([k, v]) => [k, Number(v.toFixed(4))])),
-        calls: usage.length,
-        turns: distinctTurnIds.size,
-      };
-    }
-
-    res.json(result);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/admin', optionalAuth, (req, res) => {
-  res.sendFile(path.join(__dirname, '..', 'src', 'admin.html'));
-});
-
-app.get('/api/admin/pricing', authenticate, async (req, res) => {
-  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  try {
-    const { MODEL_PRICING } = require('./utils/pricing');
-    const rows = Object.entries(MODEL_PRICING).map(([model, prices]) => ({
-      model,
-      input: prices.input,
-      output: prices.output,
-      unit: 'per 1M tokens',
-      note: prices.input === 0 && prices.output === 0 ? 'local / free' : null,
-    }));
-    res.json(rows);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/admin/llm-stats', authenticate, async (req, res) => {
-  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  try {
-    const { estimateCostBatch } = require('./utils/pricing');
-    const supabase = require('./supabase/client').getSupabase();
-
-    const sinceMs = parseAdminSince(req.query.since);
-    const turnId = req.query.turnId || undefined;
-    const eventType = req.query.eventType || 'llm.response';
-
-    let query = supabase.from('events').select('event_type, tokens_in, tokens_out, model, latency_ms').eq('event_type', eventType);
-    if (sinceMs) query = query.gte('ts', new Date(sinceMs).toISOString());
-    if (turnId) query = query.eq('session_id', turnId);
-    const { data: rows, error } = await query.limit(50000);
-    if (error) throw error;
-
-    const records = (rows || []).map(r => ({ model: r.model || 'unknown', tokens_in: r.tokens_in || 0, tokens_out: r.tokens_out || 0 }));
-    const cost = estimateCostBatch(records);
-
-    const totalLatencyMs = (rows || []).reduce((s, r) => s + (r.latency_ms || 0), 0);
-    const avgLatencyMs = rows?.length ? Math.round(totalLatencyMs / rows.length) : 0;
-
-    res.json({
-      count: rows?.length || 0,
-      requests: rows?.length || 0,
-      errors: 0, // errors are separate events
-      fallbacks: 0,
-      totalLatencyMs,
-      avgLatencyMs,
-      promptTokens: records.reduce((s, r) => s + r.tokens_in, 0),
-      completionTokens: records.reduce((s, r) => s + r.tokens_out, 0),
-      cost: Number(cost.totalCost.toFixed(4)),
-      byModel: Object.fromEntries(Object.entries(cost.byModel).map(([k, v]) => [k, Number(v.toFixed(4))])),
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/admin/llm-events', authenticate, async (req, res) => {
-  if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  try {
-    const supabase = require('./supabase/client').getSupabase();
-    const sinceMs = parseAdminSince(req.query.since);
-    const turnId = req.query.turnId || undefined;
-    const limit = parseAdminLimit(req.query.limit, 40, 200);
-
-    let query = supabase.from('events').select('*').in('event_type', ['llm.request', 'llm.response', 'llm.error', 'llm.fallback']);
-    if (sinceMs) query = query.gte('ts', new Date(sinceMs).toISOString());
-    if (turnId) query = query.eq('session_id', turnId);
-    const { data: rows, error } = await query.order('ts', { ascending: false }).limit(limit);
-    if (error) throw error;
-
-    res.json((rows || []).map(r => ({
-      traceId: r.id,
-      ts: r.ts,
-      eventType: r.event_type,
-      turnId: r.session_id,
-      model: r.model,
-      latencyMs: r.latency_ms,
-      promptTokens: r.tokens_in,
-      completionTokens: r.tokens_out,
-      preview: r.properties?.label || r.properties?.role || '',
-    })));
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
 
 /* ---------- Turn / Item Runtime (Codex-inspired) ---------- */
 
@@ -1189,14 +667,46 @@ app.get('/api/turn/stream/:turnId', authenticate, async (req, res) => {
   });
 });
 
-app.get('/api/turn/:turnId', (req, res) => {
+// Per-turn endpoint: authenticated user can fetch their own turn.
+// Admins can fetch any turn.
+app.get('/api/turn/:turnId', authenticate, (req, res) => {
   const turn = turns.loadTurn(req.params.turnId);
   if (!turn) return res.status(404).json({ error: 'Turn non trovato' });
+  if (turn.userId && turn.userId !== req.userId && req.userPlan !== 'admin') {
+    return res.status(403).json({ error: 'Non autorizzato' });
+  }
   res.json(turn);
 });
 
-app.post('/api/turn/:turnId/undo', (req, res) => {
+// Per-turn LLM traces: owner or admin can read
+app.get('/api/turn/:turnId/llm-traces', authenticate, async (req, res) => {
   try {
+    const turnId = req.params.turnId;
+    const turn = turns.loadTurn(turnId);
+    const ownsTurn = turn && turn.userId && turn.userId === req.userId;
+    if (!ownsTurn && req.userPlan !== 'admin') {
+      return res.status(403).json({ error: 'Non autorizzato' });
+    }
+    const { readLlmTracesAsync } = require('./utils/llmTrace');
+    const records = await readLlmTracesAsync({
+      turnId,
+      eventType: req.query.eventType || undefined,
+      label: req.query.label || undefined,
+      limit: Math.min(Math.max(parseInt(req.query.limit) || 500, 1), 5000),
+      descending: req.query.order !== 'asc',
+    });
+    res.json({ turnId, count: records.length, records });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/turn/:turnId/undo', authenticate, (req, res) => {
+  try {
+    const turn = turns.loadTurn(req.params.turnId);
+    if (turn && turn.userId && turn.userId !== req.userId && req.userPlan !== 'admin') {
+      return res.status(403).json({ error: 'Non autorizzato' });
+    }
     const result = turns.undoTurn(req.params.turnId);
     res.json(result);
   } catch (error) {

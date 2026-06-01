@@ -635,12 +635,25 @@ function buildHealthObservation(newErrors) {
   const lines = newErrors.slice(0, HEALTH_MAX_INJECT).map((e, i) => {
     const loc = `${e.sheet || ''}!${e.addr || ''}`;
     const formulaPart = e.formula ? ` (formula: ${e.formula})` : '';
-    return `${i + 1}. ${loc} → ${e.value || 'errore'}${formulaPart}`;
+    let refsPart = '';
+    if (Array.isArray(e.refs) && e.refs.length > 0) {
+      // Shows the agent what each referenced cell actually contains right
+      // now — usually the missing piece for fixing a #VALUE!/#REF! is
+      // knowing "the upstream cell I thought was the input is empty / is
+      // text / points elsewhere".
+      const refStrs = e.refs.slice(0, 3).map(r => {
+        const v = r.value == null ? 'EMPTY' : `"${r.value}"`;
+        const f = r.formula ? ` ←${r.formula}` : '';
+        return `${r.sheet || ''}!${r.addr || ''}=${v}${f}`;
+      }).join('; ');
+      refsPart = ` | upstream: ${refStrs}`;
+    }
+    return `${i + 1}. ${loc} → ${e.value || 'errore'}${formulaPart}${refsPart}`;
   }).join('\n');
   const moreNote = newErrors.length > HEALTH_MAX_INJECT
     ? `\n(+ ${newErrors.length - HEALTH_MAX_INJECT} altre celle in errore)`
     : '';
-  return `WORKBOOK HEALTH SCAN — ${newErrors.length} new error cell${newErrors.length === 1 ? '' : 's'} detected since last check. These were found across all sheets, not just what you just wrote. Read them if needed and emit corrective writes (fix the formula, the reference, or the input value upstream). Do NOT call done while these remain.\n${lines}${moreNote}`;
+  return `WORKBOOK HEALTH SCAN — ${newErrors.length} new error cell${newErrors.length === 1 ? '' : 's'} detected since last check. These were found across all sheets, not just what you just wrote. The "upstream" hint shows the CURRENT value of each cell your formula references — if it says EMPTY, you referenced the wrong row/column. Read the right one and emit corrective writes. Do NOT call done while these remain.\n${lines}${moreNote}`;
 }
 
 function recordHealthReport(turnId, errorsIn) {
