@@ -2563,6 +2563,29 @@ async function executeArchitectParallelTurn(turnId) {
         emitEphemeralLog(turnId, `[slice ${data.sliceId} / loop ${inn.iteration || '?'}] ${inn.tool || 'step'}: ${(inn.thought || '').slice(0, 140)}`);
       } else if (inner === 'iterationError') {
         appendLog(turnId, `[slice ${data.sliceId}] iter error: ${inn.error}`, 'warn');
+      } else if (inner === 'actions') {
+        // Forward Excel actions to the SSE taskActions channel + the action
+        // queue. Without this the in-process mock workbook stays empty and
+        // the per-slice worker thinks its writes never landed, triggering
+        // read-back loops. Production HTTP clients already see these via
+        // the architect's `actions` SSE; we just need the same hook here.
+        const actions = Array.isArray(inn.actions) ? inn.actions : [];
+        if (actions.length > 0) {
+          try {
+            assertActionBatchWithinLimits(actions, { id: data.sliceId, tool: 'architect.slice' });
+          } catch (err) {
+            appendLog(turnId, `[slice ${data.sliceId}] Batch Excel bloccato: ${err.message}`, 'error');
+            throw err;
+          }
+          const itemId = sliceItemIds.get(data.sliceId) || `slice-${data.sliceId}`;
+          if (!Array.isArray(turn.agentCollectedActions)) turn.agentCollectedActions = [];
+          turn.agentCollectedActions.push(...actions);
+          emitTaskActions(turnId, {
+            id: data.sliceId,
+            itemId: `${itemId}-batch-${turn.agentCollectedActions.length}`
+          }, actions);
+          emitEphemeralLog(turnId, `[slice ${data.sliceId} / loop ${inn.iteration || '?'}] Invio ${actions.length} azioni Excel`);
+        }
       }
       return;
     }

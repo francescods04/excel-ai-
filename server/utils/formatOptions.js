@@ -79,10 +79,43 @@ function booleanValue(value) {
   return Boolean(value);
 }
 
+// Excel.js border style aliases: users (and the LLM) often pass bare strings
+// like "thin", "Thin", "hairline", "medium", "thick" or "double" expecting them
+// to map to the right line style. We accept these and convert to {style} so a
+// `borders: {top: 'thin'}` payload doesn't get silently dropped.
+const BORDER_STYLE_ALIASES = Object.freeze({
+  thin: 'continuous',
+  hair: 'continuous',
+  hairline: 'continuous',
+  medium: 'medium',
+  thick: 'thick',
+  double: 'double',
+  dashed: 'dash',
+  dash: 'dash',
+  dotted: 'dot',
+  dot: 'dot',
+  none: 'none',
+  continuous: 'continuous',
+  solid: 'continuous'
+});
+
 function normalizeBorderSpec(value, dropped, path) {
-  if (!value || typeof value !== 'object') return null;
+  if (value == null) return null;
+  // Shorthand string: "thin" / "Thin" / "medium" / "double" / "none"
+  if (typeof value === 'string') {
+    const key = value.trim().toLowerCase();
+    if (key === '') return null;
+    if (key in BORDER_STYLE_ALIASES) return { style: BORDER_STYLE_ALIASES[key] };
+    // Unrecognised but non-empty string: pass through so the writer can try
+    // (writer accepts arbitrary Excel.BorderLineStyle values).
+    return { style: value };
+  }
+  if (typeof value !== 'object') return null;
   const out = {};
-  if (value.style) out.style = value.style;
+  if (value.style != null) {
+    const s = String(value.style).trim().toLowerCase();
+    out.style = s in BORDER_STYLE_ALIASES ? BORDER_STYLE_ALIASES[s] : value.style;
+  }
   if (value.weight) out.weight = value.weight;
   if (value.color) {
     const color = normalizeHexColor(value.color);

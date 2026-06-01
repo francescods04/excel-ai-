@@ -2113,6 +2113,27 @@ function buildToolStagnationSignature(toolName, params = {}) {
   return `${toolName}:${JSON.stringify(normalizeStagnationValue(params))}`;
 }
 
+// Pull the "target" of a read call out of a stagnation signature so the
+// tight_read_thrash detector can compare re-reads of the same range. The
+// signature is "toolName:{json}" — we extract the most likely range/sheet
+// keys and join them.
+function extractReadTargetKey(signature) {
+  if (typeof signature !== 'string') return null;
+  const colon = signature.indexOf(':');
+  if (colon < 0) return null;
+  let body;
+  try { body = JSON.parse(signature.slice(colon + 1)); } catch { return null; }
+  if (!body || typeof body !== 'object') return null;
+  // Sheet first
+  const sheet = body.sheet || body.sheetName || (Array.isArray(body.ranges) && body.ranges[0] && body.ranges[0].sheet) || null;
+  // Then a stable target descriptor
+  const target = body.target || body.range || body.addr || body.address
+    || (Array.isArray(body.ranges) && body.ranges[0] && (body.ranges[0].target || body.ranges[0].range))
+    || null;
+  if (!sheet && !target) return null;
+  return `${sheet || '?'}::${target || '?'}`;
+}
+
 // Best-effort sheet name pulled from a tool-call params object, used by the
 // read-thrash detector to distinguish "5 reads on the same sheet" (real loop)
 // from "5 reads each on a different sheet" (legitimate multi-sheet exploration).
@@ -2200,6 +2221,43 @@ function detectToolStagnation(trail, maxRepeat = STAGNATION_MAX_REPEAT, altCycle
     }
   }
 
+  // Tight read-thrash: 5+ reads on the SAME sheet+target with DIFFERENT
+  // signatures (so they're not just identical repeats) and no write in
+  // between. Catches "agent writes ok, then re-reads the same range 4-5
+  // times with slightly different target strings because the result is
+  // empty/confusing" — the case the wide READS_WITHOUT_WRITE_LIMIT=8
+  // misses but burns 4-5 iters. Threshold is 5 (not 3) so a worker that
+  // legitimately needs 3-4 reads to scout a sheet (e.g. inspecting
+  // Assumptions to find the right rows for downstream formulas) isn't
+  // killed off; 5 identical reads IS a real loop.
+  if (trail.length >= 3) {
+    const tightWindow = trail.slice(-7);
+    const readsOnly = tightWindow.every(e => READ_ONLY_TOOLS_FOR_STAGNATION.has(e.toolName));
+    const distinctSignatures = new Set(tightWindow.map(e => e.signature)).size;
+    if (readsOnly && distinctSignatures >= 2) {
+      // Group by sheet+target to see if any one pair repeats ≥5x in the window.
+      const pairCounts = new Map();
+      for (const e of tightWindow) {
+        const sheetKey = e.sheetHint || '__unknown__';
+        const targetKey = extractReadTargetKey(e.signature) || '__no_target__';
+        const key = `${sheetKey}::${targetKey}`;
+        pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
+      }
+      for (const [key, count] of pairCounts) {
+        if (count >= 5) {
+          const [sheet, target] = key.split('::');
+          if (sheet === '__unknown__' && target === '__no_target__') continue;
+          return {
+            pattern: 'tight_read_thrash',
+            entries: tightWindow,
+            sheet: sheet === '__unknown__' ? null : sheet,
+            target: target === '__no_target__' ? null : target
+          };
+        }
+      }
+    }
+  }
+
   const alternatingWindow = altCycles * 2;
   if (trail.length >= alternatingWindow) {
     const alternating = trail.slice(-alternatingWindow);
@@ -2247,7 +2305,131 @@ function detectToolStagnation(trail, maxRepeat = STAGNATION_MAX_REPEAT, altCycle
       }
     }
   }
+  return null;
+}
 
+// No-progress detector: scan recent tool results and abort if the agent has
+// not produced any successful mutation (write / format / create) within a
+// long stretch. This is the user's preferred safety net — no hard iter cap,
+// but if the agent is wasting iterations on reads/think/plan with no actual
+// change to the workbook, we cut it off. Tunable via AGENT_NO_PROGRESS_LIMIT
+// (default 12 iters of no successful write → abort).
+const NO_PROGRESS_LIMIT = Math.max(4, Number(process.env.AGENT_NO_PROGRESS_LIMIT) || 12);
+const PRODUCTIVE_TOOLS = new Set([
+  'set_cell_range',
+  'bulk_set_cell_ranges',
+  'create_sheet',
+  'bulk_create_sheets',
+  'rename_sheet',
+  'delete_sheet',
+  'duplicate_sheet',
+  'set_format',
+  'bulk_set_format',
+  'format_workbook',
+  'copy_range',
+  'create_named_range',
+  'bulk_create_named_ranges',
+  'execute_excel_formula',
+  'execute_office_js',
+  'execute_python',
+  'add_chart',
+  'bulk_set_notes',
+  'set_notes',
+  'add_conditional_format',
+  'plan_format',
+  'apply_format_plan',
+  'build_dcf_section'
+]);
+// Best-effort recovery for a JSON tool call that came back truncated (e.g.
+// the LLM hit its max output cap mid-string and the model server returned
+// the prefix only). We close any open string + array + object so the
+// result becomes parseable, then sanity-check the shape. If the recovery
+// yields a recognisable {thought, tool, params} we hand it back; otherwise
+// we return null and the caller treats the call as a normal parse failure.
+function tryRecoverTruncatedAgentJson(raw) {
+  if (typeof raw !== 'string' || raw.length < 10) return null;
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith('{')) return null;
+  const stack = [];
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\' && inString) { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{' || ch === '[') stack.push(ch);
+    else if (ch === '}' || ch === ']') stack.pop();
+  }
+  if (stack.length === 0) return null; // JSON was already complete — JSON.parse should have handled it.
+  // Build the suffix to close. Walk the stack from outermost to innermost
+  // and emit the matching closers in reverse. If the LAST open was a string
+  // (i.e. the truncation happened inside a string literal), also emit a
+  // closing quote so the trailing key/value stays valid.
+  const openAtEnd = stack[stack.length - 1];
+  let suffix = '';
+  if (openAtEnd === '"' || (inString && stack.length > 0)) {
+    suffix = '"';
+  }
+  for (let i = stack.length - 1; i >= 0; i--) {
+    suffix += stack[i] === '{' ? '}' : ']';
+  }
+  const candidate = trimmed + suffix;
+  try {
+    const parsed = JSON.parse(candidate);
+    if (!parsed || typeof parsed !== 'object') return null;
+    // Recognise the agent tool-call shape. If neither tool nor params is
+    // present it's not actionable, so fall back to the normal parse-fail path.
+    if (typeof parsed.tool !== 'string' && !parsed.params) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function detectNoProgress(results, options = {}) {
+  const limit = options.limit || NO_PROGRESS_LIMIT;
+  if (!Array.isArray(results) || results.length === 0) return null;
+  // Walk backwards. We need `limit` consecutive iters with NO productive
+  // tool result. Productive = tool in PRODUCTIVE_TOOLS whose result has no
+  // `error` field and isn't in our blocked/stagnation results.
+  let unproductiveRun = 0;
+  let firstUnproductive = null;
+  for (let i = results.length - 1; i >= 0; i--) {
+    const r = results[i];
+    if (!r) continue;
+    // Treat blocked/stagnation as unproductive (they are pushes that didn't
+    // produce a real action).
+    if (r.type === 'error' || r.type === 'done' || r.type === 'ask_user' || r.type === 'todo_write') {
+      // Pause the run counter but don't break — a done can be followed by a
+      // gate that re-issues, so we keep walking.
+      continue;
+    }
+    if (r.type !== 'tool') {
+      continue;
+    }
+    const toolName = r.tool;
+    const result = r.result;
+    const hasError = result && typeof result === 'object' && (
+      (typeof result.error === 'string' && result.error.length > 0) ||
+      (Array.isArray(result.errors) && result.errors.length > 0)
+    );
+    if (PRODUCTIVE_TOOLS.has(toolName) && !hasError) {
+      // Productive tool result found — agent IS making progress.
+      return null;
+    }
+    unproductiveRun += 1;
+    if (firstUnproductive === null) firstUnproductive = i;
+    if (unproductiveRun >= limit) {
+      return {
+        pattern: 'no_progress',
+        startIndex: firstUnproductive,
+        unproductiveRun,
+        lastTool: toolName
+      };
+    }
+  }
   return null;
 }
 
@@ -2266,6 +2448,9 @@ function formatToolStagnationReason(stagnation) {
   if (stagnation.pattern === 'read_thrash') {
     const tools = stagnation.entries.map(e => e.toolName).join(',');
     return `stagnation_read_thrash:${stagnation.entries.length}_reads_no_write:[${tools}]`;
+  }
+  if (stagnation.pattern === 'tight_read_thrash') {
+    return `stagnation_tight_read_thrash:${stagnation.sheet || '?'}::${stagnation.target || '?'}`;
   }
   if (stagnation.pattern === 'destructive_loop') {
     return `stagnation_destructive_loop:${stagnation.sheet || 'unknown_sheet'}`;
@@ -2308,6 +2493,51 @@ function summarizeActionsForCritic(actions) {
     }
   }
   return lines.join('\n');
+}
+
+// Verify-before-done gate. Before we let the agent call `done`, scan the
+// recent tool results for unresolved errors. If any tool returned an `error`
+// (Excel write failure, formula eval error, etc.) we inject a hard reminder
+// and BLOCK the done so the agent can fix it. Without this, the agent
+// happily reports "task complete" while the workbook is full of #VALUE!.
+//
+// Returns { ok, blockingErrors } where ok=true means it's safe to allow done.
+function collectBlockingErrors(results, options = {}) {
+  const maxScan = options.maxScan || 30;
+  const recent = (Array.isArray(results) ? results : []).slice(-maxScan);
+  const blocking = [];
+  for (const r of recent) {
+    if (!r || r.type !== 'tool') continue;
+    const toolName = r.tool;
+    const result = r.result;
+    if (!result || typeof result !== 'object') continue;
+    // Top-level error field (registry returns { error: "..." } on failure)
+    if (typeof result.error === 'string' && result.error.length > 0) {
+      blocking.push({ tool: toolName, message: result.error.slice(0, 240) });
+      continue;
+    }
+    // Per-entry errors (e.g. bulk_set_format / bulk_set_cell_ranges report
+    // errors: [{ index, sheet, reason }, ...])
+    if (Array.isArray(result.errors) && result.errors.length > 0) {
+      for (const e of result.errors.slice(0, 6)) {
+        const msg = (e && (e.reason || e.message || e.error)) || 'errore';
+        const where = e && (e.sheet ? `${e.sheet}${e.target ? '!' + e.target : ''}` : '');
+        blocking.push({
+          tool: toolName,
+          message: (where ? where + ': ' : '') + String(msg).slice(0, 240)
+        });
+      }
+    }
+  }
+  return { ok: blocking.length === 0, blockingErrors: blocking };
+}
+
+function buildDoneBlockedMessage(blockingErrors) {
+  const list = blockingErrors.slice(0, 10).map((b, i) =>
+    `${i + 1}. [${b.tool}] ${b.message}`
+  ).join('\n');
+  const more = blockingErrors.length > 10 ? `\n(+ ${blockingErrors.length - 10} altri errori)` : '';
+  return `DONE BLOCKED — ${blockingErrors.length} unresolved tool error(s) detected in recent results. You CANNOT call done while these remain. Read the offending cells with get_cell_ranges to understand the failure, then emit corrected writes (fix formulas, references, or values). If the error mentions a missing option/format key, switch to bulk_set_format with the correct options shape. The model is considered complete only when the next iteration produces zero new errors.\n${list}${more}`;
 }
 
 async function runPostWriteCritic(toolName, actions) {
@@ -2571,11 +2801,21 @@ async function runAgentLoop(objective, context, options = {}) {
             }
           }
         });
-        // Parse the streamed JSON
+        // Parse the streamed JSON. If the LLM hit the output token cap and the
+        // payload came back truncated mid-string, JSON.parse throws. Try to
+        // recover by closing the open string + object + array tokens so the
+        // partial tool call is still actionable. Cheap and avoids burning
+        // another LLM round-trip on what is usually a recoverable truncation.
         try {
           llmResult = JSON.parse(accumulated);
         } catch (e) {
-          llmResult = { raw: accumulated, jsonError: e.message };
+          const recovered = tryRecoverTruncatedAgentJson(accumulated);
+          if (recovered) {
+            logger.warn(`[AgentLoop] iter ${iteration} recovered truncated JSON (${accumulated.length} chars → ${recovered.length} chars): ${e.message}`);
+            llmResult = recovered;
+          } else {
+            llmResult = { raw: accumulated, jsonError: e.message };
+          }
         }
       } else {
         llmResult = await callLLM(callOpts);
@@ -2634,6 +2874,16 @@ async function runAgentLoop(objective, context, options = {}) {
 
       // Handle done
       if (toolName === 'done') {
+        // Verify-before-done: block done if recent tool results have errors.
+        const verify = collectBlockingErrors(results);
+        if (!verify.ok && !options.allowDoneWithErrors) {
+          const blockMsg = buildDoneBlockedMessage(verify.blockingErrors);
+          logger.warn(`[AgentLoop] done blocked: ${verify.blockingErrors.length} unresolved error(s) in recent tool results`);
+          messages.push(makeUserMessage(blockMsg));
+          results.push({ type: 'error', error: 'done_blocked_by_errors', blocked: true, tool: 'done', errors: verify.blockingErrors.slice(0, 6) });
+          onEvent('iterationError', { iteration, error: 'done_blocked_by_errors' });
+          continue;
+        }
         done = true;
         // Optional auto-format pass for legacy single-agent runs.
         if (touchedSheets.size > 0 && autoFormatOnDone) {
@@ -2931,6 +3181,33 @@ async function runAgentLoop(objective, context, options = {}) {
           error: abortReason,
           stagnation: true,
           pattern: stagnation.pattern
+        });
+        break;
+      }
+
+      // No-progress safety net (per user: no hard cap if useful, only cap
+      // when nothing happens). Fires when AGENT_NO_PROGRESS_LIMIT consecutive
+      // tool results contain no successful mutation. The detectNoProgress
+      // helper already excludes errors/blocked so legitimate retries don't
+      // trip it.
+      const noProgress = detectNoProgress(results);
+      if (noProgress) {
+        aborted = true;
+        abortReason = `stagnation_no_progress:${noProgress.unproductiveRun}_iters_no_write:last=${noProgress.lastTool}`;
+        results.push({
+          type: 'error',
+          error: abortReason,
+          stagnation: true,
+          pattern: 'no_progress',
+          unproductiveRun: noProgress.unproductiveRun,
+          lastTool: noProgress.lastTool
+        });
+        logger.warn(`[AgentLoop] No-progress detected (${abortReason})`);
+        onEvent('iterationError', {
+          iteration,
+          error: abortReason,
+          stagnation: true,
+          pattern: 'no_progress'
         });
         break;
       }
@@ -3444,6 +3721,14 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       };
     }
     case 'create_sheet': {
+      // If this is a slice worker and the requested sheet is already in the
+      // slice's owned scope, the workbook_scaffold slice already created it.
+      // Re-creating an existing sheet is a no-op at the Excel layer but wastes
+      // a client round-trip; skip it and tell the agent.
+      const ownedScope = (context && context._sliceScope && Array.isArray(context._sliceScope.sheets_owned)) ? context._sliceScope.sheets_owned : null;
+      if (ownedScope && params && typeof params.name === 'string' && ownedScope.includes(params.name)) {
+        return { ok: true, skipped: true, reason: `sheet "${params.name}" already in slice scope (scaffolded upstream)`, sheetsCreated: [] };
+      }
       return {
         actions: [{ type: 'createSheet', name: params.name }]
       };
@@ -3466,11 +3751,27 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
           unique.push(trimmed);
         }
       }
+      // Same scope-aware skip as create_sheet: if a slice worker asks to bulk
+      // create sheets that are all in its scope, it's wasted work.
+      const ownedScopeBulk = (context && context._sliceScope && Array.isArray(context._sliceScope.sheets_owned)) ? context._sliceScope.sheets_owned : null;
+      let filtered = unique;
+      let skippedInScope = [];
+      if (ownedScopeBulk) {
+        filtered = [];
+        for (const n of unique) {
+          if (ownedScopeBulk.includes(n)) skippedInScope.push(n);
+          else filtered.push(n);
+        }
+      }
+      if (filtered.length === 0) {
+        return { ok: true, skipped: true, reason: 'all requested sheets already in slice scope (scaffolded upstream)', sheetsCreated: [], skippedInScope };
+      }
       return {
         ok: true,
-        sheetsCreated: unique,
-        count: unique.length,
-        actions: unique.map(name => ({ type: 'createSheet', name }))
+        sheetsCreated: filtered,
+        count: filtered.length,
+        skippedInScope: skippedInScope.length > 0 ? skippedInScope : undefined,
+        actions: filtered.map(name => ({ type: 'createSheet', name }))
       };
     }
     case 'bulk_create_named_ranges': {
@@ -4365,6 +4666,9 @@ function bulkNudgeFor(lastN) {
   if (lastN.every(n => n === 'set_cell_range')) {
     return 'BATCH HINT (HARD): you just called set_cell_range twice. Your NEXT write MUST be bulk_set_cell_ranges with ALL remaining sections in one call (cap 32 entries). Sequential set_cell_range calls in a slice worker burn the iter budget and have cascade-killed downstream waves in prior runs. After all data lands, run ONE bulk_set_format pass.';
   }
+  if (lastN.every(n => n === 'bulk_set_cell_ranges')) {
+    return 'BATCH HINT: you just called bulk_set_cell_ranges twice in a row. Keep going with bulk_set_cell_ranges for any further sections — but if you have many small remaining sections, consider whether they can be combined into a single larger bulk call (up to 32 entries per call). Sliced workers run fastest when each call writes dozens of cells, not 1-2 entries.';
+  }
   if (lastN.every(n => n === 'set_format')) {
     return 'BATCH HINT: you just called set_format twice in a row. Consolidate the next formats into ONE bulk_set_format call based on the observed ranges.';
   }
@@ -4627,6 +4931,16 @@ async function finishToolExecution(state, toolName, params, thought, toolResult,
           `If copyToRange is failing, write cells individually or use a formula reference pattern. Do not start over from scratch.`,
           `This is your ONE rescue. The next stagnation will abort the run.`
         ].join('\n');
+      } else if (stagnation.pattern === 'tight_read_thrash') {
+        const where = stagnation.sheet
+          ? `sheet "${stagnation.sheet}"${stagnation.target ? ' target ' + stagnation.target : ''}`
+          : 'the same range';
+        nudge = [
+          `STAGNATION DETECTED: you re-read ${where} 3+ times in a row with no write between reads.`,
+          `STOP the read loop. Either: (a) the previous write landed and the re-read is redundant — trust the write acknowledgment and proceed; (b) the range is genuinely empty and that's expected (e.g. freshly created sheet) — write fresh data instead of re-reading.`,
+          `Next call MUST be a WRITE (set_cell_range / bulk_set_cell_ranges / create_sheet / bulk_create_sheets / bulk_set_format) or done. Do not call get_cell_ranges / get_range_as_csv / read_sheet / read_workbook on the same area again.`,
+          `This is your ONE rescue. The next stagnation will abort the run.`
+        ].join('\n');
       } else {
         nudge = [
           `STAGNATION DETECTED: ${reason}. You just called the same tool ${stagnation.entries.length} times in a row (${tools}) without making progress.`,
@@ -4647,6 +4961,26 @@ async function finishToolExecution(state, toolName, params, thought, toolResult,
     state.abortReason = formatToolStagnationReason(stagnation);
     state.results.push({ type: 'error', error: state.abortReason, stagnation: true, pattern: stagnation.pattern, tools: stagnation.entries.map(e => e.toolName), strikes: state.stagnationStrikes });
     onProgress('iterationError', { iteration: state.iteration, error: state.abortReason, stagnation: true, pattern: stagnation.pattern, strikes: state.stagnationStrikes });
+    return { state, control: 'aborted', payload: { reason: state.abortReason } };
+  }
+
+  // No-progress safety net (per user: no hard cap if useful, only cap when
+  // nothing happens). Fires when AGENT_NO_PROGRESS_LIMIT consecutive tool
+  // results contain no successful mutation. Replaces the old hard iter cap
+  // on slice workers — the agent can run as long as it's writing real data.
+  const noProgress = detectNoProgress(state.results);
+  if (noProgress) {
+    state.status = 'aborted';
+    state.abortReason = `stagnation_no_progress:${noProgress.unproductiveRun}_iters_no_write:last=${noProgress.lastTool}`;
+    state.results.push({
+      type: 'error',
+      error: state.abortReason,
+      stagnation: true,
+      pattern: 'no_progress',
+      unproductiveRun: noProgress.unproductiveRun,
+      lastTool: noProgress.lastTool
+    });
+    onProgress('iterationError', { iteration: state.iteration, error: state.abortReason, stagnation: true, pattern: 'no_progress' });
     return { state, control: 'aborted', payload: { reason: state.abortReason } };
   }
 
@@ -4827,6 +5161,16 @@ async function runAgentStep(state, clientResult, deps = {}) {
     }
 
     if (toolName === 'done') {
+      // Verify-before-done: block done if recent tool results have errors.
+      const verify = collectBlockingErrors(state.results);
+      if (!verify.ok && !state.config?.allowDoneWithErrors) {
+        const blockMsg = buildDoneBlockedMessage(verify.blockingErrors);
+        logger.warn(`[AgentStep] done blocked: ${verify.blockingErrors.length} unresolved error(s) in recent tool results`);
+        state.messages.push(makeUserMessage(blockMsg));
+        state.results.push({ type: 'error', error: 'done_blocked_by_errors', blocked: true, tool: 'done', errors: verify.blockingErrors.slice(0, 6) });
+        onProgress('iterationError', { iteration: state.iteration, error: 'done_blocked_by_errors' });
+        return { state, control: 'continue', payload: { thought } };
+      }
       state.status = 'completed';
       state.summary = params.summary || 'Task completed';
       // Optional legacy auto-format pass before exit.

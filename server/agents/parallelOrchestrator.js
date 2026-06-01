@@ -26,13 +26,25 @@ const DEFAULT_MAX_PARALLEL = Number(process.env.PARALLEL_ORCHESTRATOR_MAX || 4);
 // (reserved by the architect for a final audit/verification slice, not routine formatting).
 const PRO_MODEL = process.env.AGENT_LOOP_PRO_MODEL || process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro';
 
-// Bumped 12 → 30 to match architectStepwise (2026-05-31 Revenue slice cap-hit).
-const SLICE_HARD_ITER_CAP = Number(process.env.SLICE_HARD_ITER_CAP) || 30;
+// No hard iter cap. The user wants slices to run as long as they're making
+// real progress. The only stops are:
+//   1) `detectToolStagnation` in agentLoop (read-thrash, repeat, alternating,
+//      destructive loop)
+//   2) `detectNoProgress` in agentLoop (12 consecutive iters with no
+//      successful mutation → the agent is doing nothing useful)
+//   3) the per-wave WAVE_WALL_TIMEOUT_MS (360s default — bumped from 240s
+//      because heavy 1000-row writes like Vairano's per_floor_detail and
+//      construction_schedule need 270-330s even when the agent is making
+//      real progress. Vercel's 300s cap is a separate concern addressed by
+//      the per-step /step endpoint, not the in-process orchestrator.)
+//   4) the outer turn timeout enforced by the caller
+// A scenario can still impose a ceiling via SLICE_HARD_ITER_CAP if needed.
+const SLICE_HARD_ITER_CAP = Number(process.env.SLICE_HARD_ITER_CAP) || 0;
 // Wall-clock budget for an entire wave's Promise.allSettled. If the longest
 // slice in the wave exceeds this, we cut it off and mark every still-running
 // slice as failed_timeout so the wave returns to the client and the next
 // /step can proceed. Default 240s = stays safely under Vercel's 300s cap.
-const WAVE_WALL_TIMEOUT_MS = Number(process.env.WAVE_WALL_TIMEOUT_MS) || 240000;
+const WAVE_WALL_TIMEOUT_MS = Number(process.env.WAVE_WALL_TIMEOUT_MS) || 360000;
 
 async function runParallelBlueprint({
   blueprint,
@@ -104,7 +116,9 @@ async function runParallelBlueprint({
         turnId,
         promptVariant: tier === 'pro' ? 'default' : 'fast',
         modelOverride: tier === 'pro' ? PRO_MODEL : undefined,
-        maxIterations: Math.min(SLICE_HARD_ITER_CAP, Math.max(20, Math.ceil(Number(slice.estimated_iters || 10) * 2.5))),
+        maxIterations: SLICE_HARD_ITER_CAP > 0
+          ? Math.min(SLICE_HARD_ITER_CAP, Math.max(20, Math.ceil(Number(slice.estimated_iters || 10) * 2.5)))
+          : 10000,
         systemPromptAddendum: slicePrompt,
         onEvent: (evt, data) => {
           onEvent('sliceEvent', { sliceId, event: evt, data });
@@ -339,7 +353,9 @@ async function stepBlueprintWave(state, {
       turnId,
       promptVariant: tier === 'pro' ? 'default' : 'fast',
       modelOverride: tier === 'pro' ? PRO_MODEL : undefined,
-      maxIterations: Math.max(6, Math.min(SLICE_HARD_ITER_CAP, slice.estimated_iters * 2)),
+      maxIterations: SLICE_HARD_ITER_CAP > 0
+        ? Math.max(6, Math.min(SLICE_HARD_ITER_CAP, slice.estimated_iters * 2))
+        : 10000,
       systemPromptAddendum: slicePrompt,
       onEvent: (evt, data) => { onEvent('sliceEvent', { sliceId, event: evt, data }); },
       requestClientTool: runtimeHelpers.requestClientTool,
