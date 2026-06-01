@@ -121,6 +121,120 @@ app.get('/api/auth/me', authenticate, async (req, res) => {
   }
 });
 
+/* ---------- User dashboard endpoints ---------- */
+app.get('/api/me/turns', authenticate, async (req, res) => {
+  try {
+    const { getSupabase } = require('./supabase/client');
+    const supabase = getSupabase();
+    const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+    const offset = Math.max(parseInt(req.query.offset) || 0, 0);
+
+    const { data, error } = await supabase
+      .from('turns')
+      .select('id, status, input_message_length, task_count, action_count, error_type, error_message, model, created_at, completed_at, total_latency_ms, tokens_in, tokens_out')
+      .eq('user_id', req.userId)
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ turns: data || [], limit, offset });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/me/stats', authenticate, async (req, res) => {
+  try {
+    const { getSupabase } = require('./supabase/client');
+    const supabase = getSupabase();
+    const userId = req.userId;
+
+    const since7d = new Date(Date.now() - 7 * 86400000).toISOString();
+    const since30d = new Date(Date.now() - 30 * 86400000).toISOString();
+
+    const [
+      { count: totalTurns },
+      { count: total30d },
+      { count: total7d },
+      { count: totalToday },
+      { count: failed30d },
+      { data: tokensAgg },
+    ] = await Promise.all([
+      supabase.from('turns').select('*', { count: 'exact', head: true }).eq('user_id', userId),
+      supabase.from('turns').select('*', { count: 'exact', head: true }).eq('user_id', userId).gte('created_at', since30d),
+      supabase.from('turns').select('*', { count: 'exact', head: true }).eq('user_id', userId).gte('created_at', since7d),
+      supabase.from('turns').select('*', { count: 'exact', head: true }).eq('user_id', userId).gte('created_at', new Date().toISOString().slice(0, 10)),
+      supabase.from('turns').select('*', { count: 'exact', head: true }).eq('user_id', userId).eq('status', 'failed').gte('created_at', since30d),
+      supabase.from('turns').select('tokens_in, tokens_out, total_latency_ms').eq('user_id', userId).gte('created_at', since30d),
+    ]);
+
+    const tokensIn = (tokensAgg || []).reduce((s, r) => s + (r.tokens_in || 0), 0);
+    const tokensOut = (tokensAgg || []).reduce((s, r) => s + (r.tokens_out || 0), 0);
+    const latencies = (tokensAgg || []).map(r => r.total_latency_ms || 0).filter(x => x > 0).sort((a, b) => a - b);
+    const p50 = latencies.length ? latencies[Math.floor(latencies.length * 0.5)] : 0;
+    const p95 = latencies.length ? latencies[Math.floor(latencies.length * 0.95)] : 0;
+
+    res.json({
+      total_turns: totalTurns || 0,
+      turns_30d: total30d || 0,
+      turns_7d: total7d || 0,
+      turns_today: totalToday || 0,
+      failed_30d: failed30d || 0,
+      success_rate_30d: total30d ? Math.round(((total30d - (failed30d || 0)) / total30d) * 100) : 100,
+      tokens_in_30d: tokensIn,
+      tokens_out_30d: tokensOut,
+      latency_p50_ms: p50,
+      latency_p95_ms: p95,
+      daily_quota: 10,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/me/settings', authenticate, async (req, res) => {
+  try {
+    const { settings } = req.body || {};
+    if (typeof settings !== 'object' || settings === null || Array.isArray(settings)) {
+      return res.status(400).json({ error: 'settings deve essere un oggetto' });
+    }
+    const { getSupabase } = require('./supabase/client');
+    const supabase = getSupabase();
+    const { error } = await supabase
+      .from('user_settings')
+      .upsert({ user_id: req.userId, settings_json: settings, updated_at: new Date().toISOString() });
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/me/feedback', authenticate, async (req, res) => {
+  try {
+    const { type, message, turn_id } = req.body || {};
+    if (!message || typeof message !== 'string' || message.length > 2000) {
+      return res.status(400).json({ error: 'message richiesto (max 2000 caratteri)' });
+    }
+    if (type && !['bug', 'feature', 'praise', 'other'].includes(type)) {
+      return res.status(400).json({ error: 'type non valido' });
+    }
+    const { getSupabase } = require('./supabase/client');
+    const supabase = getSupabase();
+    const { error } = await supabase.from('events').insert({
+      user_id: req.userId,
+      event_type: 'user_feedback',
+      properties: { type: type || 'other', message, turn_id: turn_id || null },
+      success: true,
+    });
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 /* ---------- Supabase Config (per il frontend) ---------- */
 const { getSupabaseUrl } = require('./supabase/client');
 app.get('/api/config', (req, res) => {
@@ -1269,7 +1383,7 @@ app.post('/api/demo-request', async (req, res) => {
             || req.socket?.remoteAddress
             || null;
 
-    const row = {
+    const properties = {
       nome: n, cognome: c, email: e, azienda: a, ruolo: r,
       source: 'landing',
       user_agent: (req.headers['user-agent'] || '').slice(0, 500),
@@ -1280,34 +1394,49 @@ app.post('/api/demo-request', async (req, res) => {
     const { getSupabase } = require('./supabase/client');
     const supabase = getSupabase();
 
-    const { data: existing } = await supabase
-      .from('demo_leads')
-      .select('id, created_at')
-      .eq('email', e)
-      .order('created_at', { ascending: false })
-      .limit(1);
+    // Primary store: demo_leads (apply supabase/migrations/005_demo_leads.sql)
+    // Fallback: events table with event_type='demo_request'
+    let savedId = null;
+    let usedFallback = false;
 
-    if (existing && existing.length) {
-      logger.info('Demo request: duplicate email, returning existing lead', { email: e, id: existing[0].id });
-      return res.json({ ok: true, id: existing[0].id, duplicate: true });
+    try {
+      const { data, error } = await supabase
+        .from('demo_leads')
+        .insert({ nome: n, cognome: c, email: e, azienda: a, ruolo: r,
+                  source: 'landing', user_agent: properties.user_agent,
+                  referer: properties.referer, ip })
+        .select('id, created_at')
+        .single();
+
+      if (!error && data) {
+        savedId = data.id;
+      } else {
+        usedFallback = true;
+        logger.warn('Demo request: demo_leads unavailable, using events fallback', { code: error?.code, msg: error?.message });
+      }
+    } catch (e) {
+      usedFallback = true;
     }
 
-    const { data, error } = await supabase
-      .from('demo_leads')
-      .insert(row)
-      .select('id, created_at')
-      .single();
+    if (usedFallback) {
+      const { data, error } = await supabase
+        .from('events')
+        .insert({ event_type: 'demo_request', properties, success: true })
+        .select('id')
+        .single();
 
-    if (error) {
-      logger.error('Demo request: supabase insert error', { message: error.message, code: error.code });
-      return res.status(500).json({ error: 'Errore nel salvataggio. Riprova più tardi.' });
+      if (error) {
+        logger.error('Demo request: both stores failed', { error: error.message });
+        return res.status(500).json({ error: 'Errore nel salvataggio. Riprova più tardi.' });
+      }
+      savedId = data?.id;
     }
 
     logger.info('Demo request: saved', {
-      id: data.id, email: e, ruolo: r, ip, latency_ms: Date.now() - startedAt
+      id: savedId, email: e, ruolo: r, ip, fallback: usedFallback, latency_ms: Date.now() - startedAt
     });
 
-    res.json({ ok: true, id: data.id });
+    res.json({ ok: true, id: savedId });
   } catch (error) {
     logger.error('Demo request: unhandled', { message: error.message, stack: error.stack });
     res.status(500).json({ error: 'Errore interno. Riprova più tardi.' });

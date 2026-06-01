@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Accedi — Excel AI</title>
+  <link rel="icon" type="image/svg+xml" href="/public/favicon.svg">
+  <meta name="description" content="Accedi al tuo account Excel AI.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    :root{
+      --bg:#060709;--bg-1:#0a0c11;--bg-2:#0f1219;--bg-3:#141823;
+      --line:#1a1f2c;--line-2:#252b3a;
+      --text:#e8ecf2;--text-2:#9aa4b6;--text-3:#5a6478;--text-4:#3a4252;
+      --green:#107c41;--green-2:#1a9c54;
+      --accent:#00ffaa;--accent-2:#00d4aa;
+      --accent-soft:rgba(0,255,170,0.08);--accent-glow:rgba(0,255,170,0.25);
+      --amber:#ffb454;--red:#ff6b6b;
+      --r:8px;--r-lg:14px;
+    }
+    html,body{min-height:100vh}
+    body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased;overflow-x:hidden;display:flex;align-items:center;justify-content:center;padding:24px}
+    body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(ellipse 60% 50% at 50% 30%, rgba(0,255,170,0.08), transparent 70%),radial-gradient(ellipse 100% 100% at 50% 100%, var(--bg) 0%, transparent 80%)}
+    body::after{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;opacity:0.03;mix-blend-mode:overlay;background-image:url("data:image/svg+xml;utf8,<svg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>")}
+    .card{position:relative;z-index:1;width:100%;max-width:420px;background:var(--bg-1);border:1px solid var(--line);border-radius:var(--r-lg);padding:36px;box-shadow:0 24px 60px rgba(0,0,0,0.5)}
+    .brand{display:flex;align-items:center;gap:10px;margin-bottom:28px;text-decoration:none;color:var(--text)}
+    .brand-mark{width:30px;height:30px;background:linear-gradient(135deg,var(--green-2),var(--green));border-radius:5px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-weight:700;font-size:14px;color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,0.15),0 2px 8px rgba(16,124,65,0.4)}
+    .brand-name{font-family:'Space Grotesk',sans-serif;font-size:15px;font-weight:600;letter-spacing:-0.02em}
+    h1{font-family:'Space Grotesk',sans-serif;font-size:24px;font-weight:600;letter-spacing:-0.02em;margin-bottom:6px}
+    .sub{color:var(--text-2);font-size:14px;margin-bottom:24px}
+    label{display:block;font-size:12px;color:var(--text-2);margin-bottom:6px;font-weight:500;font-family:'JetBrains Mono',monospace}
+    label b{color:var(--accent)}
+    input{width:100%;padding:11px 14px;background:var(--bg-2);border:1px solid var(--line-2);border-radius:6px;color:var(--text);font-size:14px;font-family:inherit;margin-bottom:14px;transition:all .2s}
+    input::placeholder{color:var(--text-4)}
+    input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(0,255,170,0.1)}
+    .btn{width:100%;padding:12px;background:var(--accent);color:var(--bg);border:none;border-radius:6px;font-family:inherit;font-size:14px;font-weight:600;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:8px}
+    .btn:hover{background:#1affb8;box-shadow:0 0 24px var(--accent-glow)}
+    .btn:disabled{opacity:0.6;cursor:not-allowed}
+    .btn-ghost{background:transparent;color:var(--text);border:1px solid var(--line-2);margin-top:12px}
+    .btn-ghost:hover{background:var(--bg-2);box-shadow:none;color:var(--text);border-color:var(--line-2)}
+    .err{color:var(--red);font-size:12.5px;background:rgba(255,107,107,0.08);border:1px solid rgba(255,107,107,0.25);border-radius:4px;padding:8px 10px;margin-bottom:14px;font-family:'JetBrains Mono',monospace;display:none}
+    .ok{color:var(--accent);font-size:12.5px;background:var(--accent-soft);border:1px solid rgba(0,255,170,0.25);border-radius:4px;padding:8px 10px;margin-bottom:14px;font-family:'JetBrains Mono',monospace;display:none}
+    .alt{text-align:center;margin-top:18px;font-size:13px;color:var(--text-2)}
+    .alt a{color:var(--accent);text-decoration:none}
+    .footer-link{position:fixed;top:20px;left:20px;z-index:10;color:var(--text-3);text-decoration:none;font-size:12px;font-family:'JetBrains Mono',monospace;display:flex;align-items:center;gap:6px}
+    .footer-link:hover{color:var(--accent)}
+    .divider{text-align:center;color:var(--text-4);font-size:11px;margin:18px 0;font-family:'JetBrains Mono',monospace;letter-spacing:1px}
+  </style>
+</head>
+<body>
+  <a class="footer-link" href="/">← torna al sito</a>
+  <div class="card">
+    <a class="brand" href="/">
+      <div class="brand-mark">E</div>
+      <span class="brand-name">Excel AI</span>
+    </a>
+    <h1>Accedi</h1>
+    <p class="sub">Bentornato. Inserisci le tue credenziali.</p>
+
+    <div class="err" id="err"></div>
+    <div class="ok" id="ok"></div>
+
+    <form id="loginForm">
+      <label><b>email</b></label>
+      <input type="email" name="email" placeholder="mario@azienda.it" required autocomplete="email">
+
+      <label><b>password</b></label>
+      <input type="password" name="password" placeholder="••••••••" required autocomplete="current-password" minlength="8">
+
+      <button class="btn" type="submit" id="submitBtn">Accedi <span>→</span></button>
+    </form>
+
+    <div class="divider">OPPURE</div>
+
+    <button class="btn btn-ghost" type="button" id="magicBtn">Ricevi magic link via email</button>
+
+    <p class="alt">Non hai un account? <a href="/signup.html">Registrati</a></p>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script>
+    (async () => {
+      const { supabaseUrl, supabaseAnonKey } = await fetch('/api/config').then(r => r.json());
+      window.__sb = window.supabase.createClient(supabaseUrl, supabaseAnonKey, {
+        auth: { persistSession: true, autoRefreshToken: true, storage: window.localStorage }
+      });
+      window.dispatchEvent(new Event('supabase-ready'));
+    })();
+  </script>
+  <script>
+    const errEl = document.getElementById('err');
+    const okEl = document.getElementById('ok');
+    const btn = document.getElementById('submitBtn');
+    const form = document.getElementById('loginForm');
+    const magicBtn = document.getElementById('magicBtn');
+
+    function showErr(msg){ errEl.textContent='⚠ '+msg; errEl.style.display='block'; okEl.style.display='none'; }
+    function showOk(msg){ okEl.textContent='✓ '+msg; okEl.style.display='block'; errEl.style.display='none'; }
+    function clear(){ errEl.style.display='none'; okEl.style.display='none'; }
+
+    window.addEventListener('supabase-ready', () => {
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        clear();
+        btn.disabled = true;
+        btn.textContent = 'Accesso in corso…';
+        const data = new FormData(form);
+        const email = data.get('email').trim();
+        const password = data.get('password');
+        const { data: res, error } = await window.__sb.auth.signInWithPassword({ email, password });
+        if(error){
+          showErr(error.message.includes('Invalid login') ? 'Email o password non corrette.' : error.message);
+          btn.disabled = false;
+          btn.innerHTML = 'Accedi <span>→</span>';
+          return;
+        }
+        showOk('Accesso riuscito. Reindirizzamento…');
+        setTimeout(() => location.href = '/dashboard.html', 400);
+      });
+
+      magicBtn.addEventListener('click', async () => {
+        clear();
+        const email = form.email.value.trim();
+        if(!email){ showErr('Inserisci la tua email per ricevere il magic link.'); return; }
+        magicBtn.disabled = true;
+        magicBtn.textContent = 'Invio link in corso…';
+        const { error } = await window.__sb.auth.signInWithOtp({
+          email,
+          options: { emailRedirectTo: window.location.origin + '/dashboard.html' }
+        });
+        if(error){ showErr(error.message); magicBtn.disabled = false; magicBtn.textContent = 'Ricevi magic link via email'; return; }
+        showOk('Controlla la tua email. Il link è valido per 1 ora.');
+        magicBtn.disabled = false;
+        magicBtn.textContent = 'Ricevi magic link via email';
+      });
+
+      if(new URLSearchParams(location.search).get('reset') === 'success'){
+        showOk('Password aggiornata. Ora puoi accedere.');
+      }
+    });
+  </script>
+</body>
+</html>

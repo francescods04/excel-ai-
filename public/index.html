@@ -151,6 +151,200 @@
     /* ═══ WHAT IS ═══ */
     .what-grid{display:grid;grid-template-columns:1fr 1.1fr;gap:80px;align-items:center;}
     .what-copy h2{margin-bottom:24px}
+
+    /* ═══ LIVE DEMO ═══ */
+    .demo-live{position:relative}
+    .demo-live::before{
+      content:'';position:absolute;inset:-40px;
+      background:radial-gradient(ellipse 80% 60% at 50% 0%, rgba(0,255,170,0.05), transparent 60%);
+      pointer-events:none;z-index:0;
+    }
+    .demo-live .container{position:relative;z-index:1}
+    .live-stage{
+      display:grid;grid-template-columns:1fr 1.4fr;gap:32px;
+      background:var(--bg-1);border:1px solid var(--line-2);
+      border-radius:var(--r-lg);overflow:hidden;
+      box-shadow:var(--shadow-2),0 0 80px rgba(0,255,170,0.04);
+    }
+    .live-controls{
+      padding:28px;
+      display:flex;flex-direction:column;gap:18px;
+      border-right:1px solid var(--line);
+      background:var(--bg-2);
+    }
+    .live-controls h3{
+      font-family:'Space Grotesk',sans-serif;font-size:18px;
+      font-weight:600;color:var(--text);margin-bottom:0;
+    }
+    .live-controls .hsub{
+      font-family:'JetBrains Mono',monospace;font-size:11px;
+      color:var(--text-3);letter-spacing:0.5px;margin-top:-12px;
+    }
+    .prompt-box{
+      background:var(--bg-1);border:1px solid var(--line-2);
+      border-radius:6px;padding:10px 12px;
+      display:flex;align-items:center;gap:8px;
+      font-family:'JetBrains Mono',monospace;font-size:12.5px;
+      color:var(--text-2);
+    }
+    .prompt-box::before{content:'>';color:var(--accent);font-weight:600}
+    .prompt-box .cur{color:var(--accent);animation:blink 1s steps(2) infinite}
+    .chips{display:flex;flex-wrap:wrap;gap:6px}
+    .chip{
+      font-family:'JetBrains Mono',monospace;font-size:11px;
+      padding:6px 10px;background:var(--bg-1);
+      border:1px solid var(--line-2);border-radius:100px;
+      color:var(--text-2);cursor:pointer;
+      transition:all .2s;
+    }
+    .chip:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+    .chip.active{background:var(--accent);color:var(--bg);border-color:var(--accent);font-weight:500}
+    .run-row{display:flex;align-items:center;gap:10px}
+    .run-btn{
+      flex:1;padding:10px 16px;background:var(--accent);color:var(--bg);
+      border:none;border-radius:6px;font-family:inherit;font-size:13px;
+      font-weight:600;cursor:pointer;
+      display:flex;align-items:center;justify-content:center;gap:8px;
+      transition:all .2s;
+    }
+    .run-btn:hover{background:#1affb8;box-shadow:0 0 24px var(--accent-glow)}
+    .run-btn:disabled{opacity:0.5;cursor:not-allowed;box-shadow:none}
+    .run-btn .pulse{
+      display:inline-block;width:7px;height:7px;border-radius:50%;
+      background:currentColor;
+    }
+    .run-btn.running .pulse{animation:dotpulse 1s ease-in-out infinite}
+    .log{
+      background:#020305;border:1px solid var(--line);
+      border-radius:6px;padding:10px 12px;
+      font-family:'JetBrains Mono',monospace;font-size:11px;
+      color:var(--text-2);line-height:1.7;
+      min-height:90px;max-height:140px;overflow-y:auto;
+    }
+    .log-line{opacity:0;transform:translateY(4px);transition:all .25s;margin-bottom:2px;}
+    .log-line.in{opacity:1;transform:translateY(0)}
+    .log-line .ts{color:var(--text-4);margin-right:8px}
+    .log-line .ok{color:var(--accent);font-weight:500}
+    .log-line .warn{color:var(--amber);font-weight:500}
+    .log-line .info{color:var(--blue);font-weight:500}
+    .log-line .muted{color:var(--text-3)}
+
+    /* The mini-sheet */
+    .live-sheet{display:flex;flex-direction:column;background:var(--bg-1);min-height:480px}
+    .live-fxbar{
+      display:flex;align-items:center;gap:8px;
+      padding:10px 14px;
+      background:var(--bg-2);
+      border-bottom:1px solid var(--line);
+      font-family:'JetBrains Mono',monospace;font-size:11.5px;
+    }
+    .live-fxbar .fx{color:var(--text-3);font-weight:600;font-size:11px}
+    .live-fxbar .fxinput{
+      flex:1;color:var(--text-2);
+      font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    }
+    .live-fxbar .fxinput .fn{color:var(--accent-2)}
+    .live-fxbar .badge{
+      font-size:10px;padding:2px 8px;border-radius:100px;
+      background:var(--accent-soft);color:var(--accent);
+      border:1px solid rgba(0,255,170,0.25);
+    }
+    .live-tabs{
+      display:grid;grid-template-columns:32px repeat(4,1fr);
+      background:var(--bg-2);
+      border-bottom:1px solid var(--line);
+      font-family:'JetBrains Mono',monospace;font-size:10px;
+      color:var(--text-3);font-weight:600;
+    }
+    .live-tabs > div{
+      padding:5px 0;text-align:center;
+      border-right:1px solid var(--line);
+    }
+    .live-tabs > div:first-child{border-right:1px solid var(--line-2)}
+    .live-rows{flex:1;display:flex;flex-direction:column}
+    .live-row{
+      display:grid;
+      grid-template-columns:32px repeat(4,1fr);
+      flex:1;border-bottom:1px solid var(--line);
+    }
+    .live-row:last-child{border-bottom:none}
+    .live-rh{
+      background:var(--bg-2);
+      display:flex;align-items:center;justify-content:center;
+      font-family:'JetBrains Mono',monospace;font-size:10px;
+      color:var(--text-3);
+      border-right:1px solid var(--line-2);
+    }
+    .lc{
+      padding:0 12px;display:flex;align-items:center;
+      font-family:'JetBrains Mono',monospace;font-size:12.5px;
+      color:var(--text-3);
+      border-right:1px solid var(--line);
+      position:relative;
+      transition:background .3s,color .3s,transform .2s;
+    }
+    .lc:last-child{border-right:none}
+    .lc.empty::before{
+      content:'—';opacity:0.25;font-size:11px;
+    }
+    .lc.label{color:var(--text-2);font-weight:500}
+    .lc.filled{
+      background:rgba(0,255,170,0.06);
+      color:var(--text);
+      animation:cellPop .4s cubic-bezier(.2,.7,.2,1) backwards;
+    }
+    .lc.filled.num{justify-content:flex-end;color:var(--accent);font-weight:500;font-variant-numeric:tabular-nums}
+    .lc.filled.formula{
+      background:rgba(0,255,170,0.10);
+      color:var(--accent);
+      font-weight:500;
+    }
+    .lc.filled.total{
+      background:linear-gradient(135deg,var(--accent),var(--green-2));
+      color:#fff;font-weight:600;
+      box-shadow:0 0 20px rgba(0,255,170,0.4);
+    }
+    .lc.filled.warn{
+      background:rgba(255,180,84,0.10);
+      color:var(--amber);font-weight:500;
+    }
+    .lc.filled.muted{
+      background:rgba(255,107,107,0.06);
+      color:var(--red);
+      text-decoration:line-through;text-decoration-color:rgba(255,107,107,0.4);
+    }
+    .lc.active-cell{
+      outline:2px solid var(--accent);outline-offset:-2px;
+    }
+    @keyframes cellPop{
+      from{opacity:0;transform:scale(0.85) translateY(2px);background:rgba(0,255,170,0.18)}
+      to{opacity:1;transform:scale(1) translateY(0)}
+    }
+    .lc.filling{
+      animation:cellFill .5s cubic-bezier(.2,.7,.2,1);
+    }
+    @keyframes cellFill{
+      0%{background:rgba(0,255,170,0.3);transform:scale(1.05)}
+      100%{transform:scale(1)}
+    }
+    .live-footbar{
+      display:flex;align-items:center;gap:14px;
+      padding:8px 14px;
+      background:var(--bg-2);
+      border-top:1px solid var(--line);
+      font-family:'JetBrains Mono',monospace;font-size:10.5px;
+      color:var(--text-3);
+    }
+    .live-footbar .ok{color:var(--accent)}
+    .live-footbar .run-stats{margin-left:auto;display:flex;gap:14px}
+    @media(max-width:1024px){
+      .live-stage{grid-template-columns:1fr}
+      .live-controls{border-right:none;border-bottom:1px solid var(--line)}
+    }
+    @media(max-width:768px){
+      .live-sheet{min-height:380px}
+      .lc{font-size:11px;padding:0 8px}
+    }
     .what-copy .lede{margin-bottom:32px}
     .what-points{list-style:none;display:grid;gap:0}
     .what-points li{display:grid;grid-template-columns:auto 1fr;gap:16px;align-items:flex-start;padding:18px 0;border-bottom:1px solid var(--line);}
@@ -324,6 +518,115 @@
             </div>
             <div class="e-ticker ticker-5">
               <span class="l">fx</span>=<span class="v">IRR(B3:B18)</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- LIVE DEMO -->
+    <section class="demo-live" id="provalo">
+      <div class="container">
+        <div class="section-head" style="text-align:center;max-width:640px;margin:0 auto 48px">
+          <div class="eyebrow reveal" style="justify-content:center">● Live · Provalo adesso</div>
+          <h2 class="reveal reveal-d1">Scrivi un prompt. <em>Guarda il foglio riempirsi.</em></h2>
+          <p class="lede reveal reveal-d2" style="margin-left:auto;margin-right:auto">
+            Nessuna registrazione. Scegli uno scenario, premi Run, guarda le celle popolarsi una a una
+            come farebbe l'agente in tempo reale.
+          </p>
+        </div>
+        <div class="live-stage reveal">
+          <div class="live-controls">
+            <h3>Comandi rapidi</h3>
+            <div class="hsub">// click o scrivi un prompt</div>
+            <div class="prompt-box" id="livePrompt">Crea un modello DCF con WACC 8% e terminal growth 2%<span class="cur">_</span></div>
+            <div class="chips" id="chipBar">
+              <button class="chip active" data-preset="dcf">DCF 8% / 2%</button>
+              <button class="chip" data-preset="recon">Riconcilia B↔D</button>
+              <button class="chip" data-preset="dashboard">Dashboard KPI</button>
+              <button class="chip" data-preset="forecast">Forecast 2026</button>
+              <button class="chip" data-preset="mismatch">Trova anomalie</button>
+            </div>
+            <div class="run-row">
+              <button class="run-btn" id="runBtn"><span class="pulse"></span><span id="runLabel">Run scenario</span><span>→</span></button>
+            </div>
+            <div class="log" id="liveLog">
+              <div class="log-line in"><span class="ts">--:--:--</span><span class="muted">Sistema pronto. Seleziona uno scenario e premi Run.</span></div>
+            </div>
+          </div>
+          <div class="live-sheet">
+            <div class="live-fxbar">
+              <span class="fx">fx</span>
+              <div class="fxinput" id="liveFx"><span class="fn">=</span>DCF(WACC, g, ...)</div>
+              <span class="badge" id="liveBadge">demo</span>
+            </div>
+            <div class="live-tabs">
+              <div></div><div>A</div><div>B</div><div>C</div><div>D</div>
+            </div>
+            <div class="live-rows" id="liveRows">
+              <div class="live-row">
+                <div class="live-rh">1</div>
+                <div class="lc label" data-c="A1">WACC</div>
+                <div class="lc empty" data-c="B1"></div>
+                <div class="lc empty" data-c="C1"></div>
+                <div class="lc empty" data-c="D1"></div>
+              </div>
+              <div class="live-row">
+                <div class="live-rh">2</div>
+                <div class="lc label" data-c="A2">Terminal g</div>
+                <div class="lc empty" data-c="B2"></div>
+                <div class="lc empty" data-c="C2"></div>
+                <div class="lc empty" data-c="D2"></div>
+              </div>
+              <div class="live-row">
+                <div class="live-rh">3</div>
+                <div class="lc label" data-c="A3">Ricavi</div>
+                <div class="lc empty" data-c="B3"></div>
+                <div class="lc empty" data-c="C3"></div>
+                <div class="lc empty" data-c="D3"></div>
+              </div>
+              <div class="live-row">
+                <div class="live-rh">4</div>
+                <div class="lc label" data-c="A4">EBIT</div>
+                <div class="lc empty" data-c="B4"></div>
+                <div class="lc empty" data-c="C4"></div>
+                <div class="lc empty" data-c="D4"></div>
+              </div>
+              <div class="live-row">
+                <div class="live-rh">5</div>
+                <div class="lc label" data-c="A5">Tax rate</div>
+                <div class="lc empty" data-c="B5"></div>
+                <div class="lc empty" data-c="C5"></div>
+                <div class="lc empty" data-c="D5"></div>
+              </div>
+              <div class="live-row">
+                <div class="live-rh">6</div>
+                <div class="lc label" data-c="A6">PV cash flow</div>
+                <div class="lc empty" data-c="B6"></div>
+                <div class="lc empty" data-c="C6"></div>
+                <div class="lc empty" data-c="D6"></div>
+              </div>
+              <div class="live-row">
+                <div class="live-rh">7</div>
+                <div class="lc label" data-c="A7">Terminal value</div>
+                <div class="lc empty" data-c="B7"></div>
+                <div class="lc empty" data-c="C7"></div>
+                <div class="lc empty" data-c="D7"></div>
+              </div>
+              <div class="live-row">
+                <div class="live-rh">8</div>
+                <div class="lc label" data-c="A8">Enterprise Value</div>
+                <div class="lc empty" data-c="B8"></div>
+                <div class="lc empty" data-c="C8"></div>
+                <div class="lc empty" data-c="D8"></div>
+              </div>
+            </div>
+            <div class="live-footbar">
+              <span><span class="ok" id="liveCellCount">●</span> <span id="liveCount">0</span> celle popolate</span>
+              <span class="run-stats">
+                <span>latency <span class="ok" id="liveLatency">0ms</span></span>
+                <span id="liveState">idle</span>
+              </span>
             </div>
           </div>
         </div>
@@ -1447,12 +1750,356 @@
     });
 
     /* ═══════════════════════════════════════
-       12. HIDE CURSOR GHOST ON TOUCH DEVICES
+       13. LIVE DEMO — preset scenarios
        ═══════════════════════════════════════ */
-    if('ontouchstart' in window){
-      const c = document.getElementById('cursorGhost');
-      if(c) c.style.display = 'none';
-    }
+    (function liveDemo(){
+      const log = document.getElementById('liveLog');
+      const fxBar = document.getElementById('liveFx');
+      const badge = document.getElementById('liveBadge');
+      const runBtn = document.getElementById('runBtn');
+      const runLabel = document.getElementById('runLabel');
+      const chipBar = document.getElementById('chipBar');
+      const promptEl = document.getElementById('livePrompt');
+      const cellCountEl = document.getElementById('liveCount');
+      const latencyEl = document.getElementById('liveLatency');
+      const stateEl = document.getElementById('liveState');
+      const rowsEl = document.getElementById('liveRows');
+      if(!runBtn) return;
+
+      const fmt = n => n.toLocaleString('it-IT');
+      const ts = () => new Date().toISOString().slice(11, 19);
+
+      function addLog(msg, type){
+        const div = document.createElement('div');
+        div.className = 'log-line';
+        div.innerHTML = `<span class="ts">${ts()}</span><span class="${type || 'muted'}">${msg}</span>`;
+        log.appendChild(div);
+        requestAnimationFrame(() => div.classList.add('in'));
+        log.scrollTop = log.scrollHeight;
+        while(log.children.length > 30) log.removeChild(log.firstChild);
+      }
+
+      function clearLog(){
+        log.innerHTML = '';
+      }
+
+      function resetCells(){
+        rowsEl.querySelectorAll('.lc').forEach(c => {
+          if(c.classList.contains('label')) return;
+          c.className = 'lc empty';
+          c.textContent = '';
+        });
+        cellCountEl.textContent = '0';
+        latencyEl.textContent = '0ms';
+        stateEl.textContent = 'idle';
+      }
+
+      function setCell(coord, value, type){
+        const el = rowsEl.querySelector(`[data-c="${coord}"]`);
+        if(!el) return;
+        el.classList.remove('empty');
+        el.classList.remove('filled','num','formula','total','warn','muted','active-cell');
+        if(type) el.classList.add(type);
+        else el.classList.add('filled');
+        el.textContent = value;
+        el.classList.add('filling');
+        setTimeout(() => el.classList.remove('filling'), 500);
+        cellCountEl.textContent = parseInt(cellCountEl.textContent) + 1;
+      }
+
+      function countUp(coord, target, duration, type){
+        const el = rowsEl.querySelector(`[data-c="${coord}"]`);
+        if(!el) return Promise.resolve();
+        el.classList.remove('empty');
+        el.classList.add('filled', type || 'num');
+        const start = performance.now();
+        return new Promise(resolve => {
+          function frame(now){
+            const t = Math.min(1, (now - start) / duration);
+            const eased = 1 - Math.pow(1 - t, 3);
+            const val = target * eased;
+            el.textContent = fmt(Math.round(val));
+            if(t < 1) requestAnimationFrame(frame);
+            else { el.textContent = fmt(target); resolve(); }
+          }
+          requestAnimationFrame(frame);
+        });
+      }
+
+      function typewrite(coord, text, type, speed){
+        const el = rowsEl.querySelector(`[data-c="${coord}"]`);
+        if(!el) return Promise.resolve();
+        el.classList.remove('empty');
+        el.classList.add('filled', type || 'filled');
+        let i = 0;
+        el.textContent = '';
+        return new Promise(resolve => {
+          function step(){
+            if(i < text.length){
+              el.textContent = text.slice(0, ++i);
+              setTimeout(step, speed || 30);
+            } else resolve();
+          }
+          step();
+        });
+      }
+
+      function highlightCell(coord, type){
+        const el = rowsEl.querySelector(`[data-c="${coord}"]`);
+        if(!el) return;
+        el.classList.remove('empty');
+        el.classList.add('active-cell');
+        if(type) el.classList.add(type);
+        el.classList.add('filling');
+        setTimeout(() => el.classList.remove('filling','active-cell'), 600);
+      }
+
+      function setFxBar(text){
+        fxBar.innerHTML = text;
+      }
+
+      function setBadge(text, color){
+        badge.textContent = text;
+        if(color) badge.style.background = color;
+      }
+
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+      // ═══ PRESETS ═══
+      const PRESETS = {
+        dcf: {
+          prompt: 'Crea un modello DCF con WACC 8% e terminal growth 2%',
+          fx: '<span class="fn">=</span>DCF(WACC=<b style="color:var(--accent)">B1</b>, g=<b style="color:var(--accent)">B2</b>, cashflows=<b style="color:var(--accent)">B3:B7</b>)',
+          run: async () => {
+            addLog('Analizzo struttura del foglio...', 'info');
+            await sleep(450);
+            addLog('Trovate 5 voci rilevanti per il calcolo DCF', 'muted');
+            await sleep(300);
+            addLog('Applico WACC = 8% a <b style="color:var(--accent)">B1</b>', 'ok');
+            setFxBar('<span class="fn">fx </span>WACC = 0.08');
+            setCell('B1', '8%', 'formula');
+            await sleep(350);
+            setCell('B2', '2%', 'formula');
+            addLog('Terminal growth = 2% a <b style="color:var(--accent)">B2</b>', 'ok');
+            await sleep(500);
+            addLog('Popolo dati input da fonti interne...', 'info');
+            await countUp('B3', 1250000, 600);
+            await sleep(200);
+            await countUp('B4', 440000, 500);
+            await sleep(150);
+            setCell('B5', '25%', 'formula');
+            addLog('Tax rate = 25% (aliquota standard Italia)', 'muted');
+            await sleep(500);
+            addLog('Calcolo PV cash flow...', 'info');
+            await countUp('B6', 8421000, 700, 'formula');
+            await sleep(300);
+            addLog('Calcolo terminal value...', 'info');
+            await countUp('B7', 4180000, 600, 'formula');
+            await sleep(400);
+            addLog('▸ <b style="color:var(--accent)">EV calcolato</b> = € 12.601.000', 'ok');
+            await countUp('B8', 12601000, 800, 'total');
+            highlightCell('B8');
+            latencyEl.innerHTML = '<span class="ok">4.2s</span>';
+            stateEl.innerHTML = '<span class="ok">✓ done</span>';
+            addLog('Salvataggio audit log: 8 operazioni · ID: <b>#DCF-' + Date.now().toString().slice(-6) + '</b>', 'ok');
+          }
+        },
+        recon: {
+          prompt: 'Riconcilia la colonna B con la D per data e importo',
+          fx: '<span class="fn">=</span>RICONCILIA(B:B, D:D, key=importo, key=date)',
+          run: async () => {
+            addLog('Carico estratti: 1.247 righe da colonna B, 1.251 da D', 'info');
+            await sleep(400);
+            addLog('Match per chiave (importo + data)...', 'info');
+            await sleep(300);
+            const matches = [['B1','D1','€ 12.400'],['B2','D2','€ 8.950'],['B3','D3','€ 23.100'],['B4','D4','€ 5.600']];
+            const mismatches = [['B5','D5','€ 11.230 vs € 11.230'],['B6','D6','€ 7.450 vs € 7.480']];
+            for(let i = 0; i < matches.length; i++){
+              const [b, d, val] = matches[i];
+              setCell(b, val, 'num');
+              setCell(d, '✓', 'num');
+              await sleep(220);
+            }
+            addLog('<b style="color:var(--accent)">4 match</b> trovati · controllo discrepanze...', 'ok');
+            await sleep(400);
+            for(let i = 0; i < mismatches.length; i++){
+              const [b, d, val] = mismatches[i];
+              setCell(b, val, 'warn');
+              setCell(d, 'Δ', 'warn');
+              await sleep(280);
+            }
+            addLog('<b style="color:var(--amber)">2 discrepanze</b> evidenziate (Δ 0.4% / 30€)', 'warn');
+            latencyEl.innerHTML = '<span class="ok">1.8s</span>';
+            stateEl.innerHTML = '<span class="ok">✓ done</span>';
+            addLog('Report salvato in <b>Foglio2 "Recon_Marzo"</b> · 6 celle modificate', 'ok');
+          }
+        },
+        dashboard: {
+          prompt: 'Crea dashboard con KPI principali di questo foglio',
+          fx: '<span class="fn">=</span>KPI(ricavi, ebitda, margin, nps)',
+          run: async () => {
+            addLog('Calcolo aggregati sui 12 mesi...', 'info');
+            await sleep(400);
+            setFxBar('<span class="fn">Σ </span>=SUM(B3:B14)');
+            await countUp('B3', 14820000, 700, 'total');
+            addLog('▸ <b>Ricavi YTD</b> = € 14.820.000', 'ok');
+            await sleep(250);
+            setCell('B4', '32.4%', 'formula');
+            addLog('▸ <b>EBITDA margin</b> = 32.4% (+2.1pp YoY)', 'ok');
+            await sleep(250);
+            setCell('B5', '€ 4.8M', 'formula');
+            addLog('▸ <b>EBITDA</b> = € 4.800.000', 'ok');
+            await sleep(250);
+            await countUp('B6', 847, 500, 'num');
+            addLog('▸ <b>NPS</b> = 847 (eccellente)', 'ok');
+            await sleep(300);
+            setCell('B7', '3.2x', 'formula');
+            addLog('▸ <b>LTV/CAC</b> = 3.2x (target >3)', 'ok');
+            await sleep(300);
+            await countUp('B8', 2800000, 700, 'total');
+            addLog('▸ <b>ARR run-rate</b> = € 2.8M', 'ok');
+            highlightCell('B8');
+            latencyEl.innerHTML = '<span class="ok">2.3s</span>';
+            stateEl.innerHTML = '<span class="ok">✓ done</span>';
+            addLog('Dashboard generata: 5 KPI, 2 sparkline, 1 gauge', 'ok');
+          }
+        },
+        forecast: {
+          prompt: 'Genera forecast 2026 con scenari base / ottimistico / pessimistico',
+          fx: '<span class="fn">=</span>FORECAST(2026, scenari=[base, +5%, -8%], metodo=monte_carlo)',
+          run: async () => {
+            addLog('Carico serie storica 2022-2025 (48 trimestri)', 'info');
+            await sleep(450);
+            addLog('Eseguo simulazione Monte Carlo (n=10.000)...', 'info');
+            await sleep(600);
+            setFxBar('<span class="fn">fx </span>2026.B = € 15.4M');
+            await countUp('B3', 15400000, 800);
+            addLog('▸ <b>Scenario base</b>: € 15.4M (+4.0%)', 'ok');
+            await sleep(200);
+            await countUp('C3', 16170000, 600, 'num');
+            addLog('▸ <b>Scenario ottimistico</b>: € 16.2M (+9.0%)', 'ok');
+            await sleep(200);
+            await countUp('D3', 14170000, 600, 'num');
+            addLog('▸ <b>Scenario pessimistico</b>: € 14.2M (-4.2%)', 'warn');
+            await sleep(300);
+            setCell('B4', '+12%', 'formula');
+            setCell('C4', '+18%', 'formula');
+            setCell('D4', '+4%', 'formula');
+            addLog('Calcolo crescita EBIT per scenario...', 'info');
+            await sleep(300);
+            setCell('B5', '26%', 'formula');
+            setCell('C5', '29%', 'formula');
+            setCell('D5', '22%', 'formula');
+            addLog('Calcolo tax rate...', 'info');
+            await sleep(300);
+            await countUp('B6', 8200000, 500, 'formula');
+            await countUp('C6', 9100000, 500, 'formula');
+            await countUp('D6', 6800000, 500, 'formula');
+            addLog('Calcolo PV scenari...', 'info');
+            await sleep(300);
+            await countUp('B7', 4500000, 500, 'formula');
+            await countUp('C7', 5200000, 500, 'formula');
+            await countUp('D7', 3600000, 500, 'formula');
+            await sleep(400);
+            addLog('▸ <b>EV medio</b> = € 14.7M (range 11.9-17.2M)', 'ok');
+            await countUp('B8', 14700000, 800, 'total');
+            await countUp('C8', 17200000, 600, 'total');
+            await countUp('D8', 11900000, 600, 'total');
+            highlightCell('B8');
+            highlightCell('C8');
+            highlightCell('D8');
+            latencyEl.innerHTML = '<span class="ok">3.4s</span>';
+            stateEl.innerHTML = '<span class="ok">✓ done</span>';
+            addLog('Forecast generato: 3 scenari · confidenza 87%', 'ok');
+          }
+        },
+        mismatch: {
+          prompt: 'Trova anomalie nei dati di questo foglio',
+          fx: '<span class="fn">=</span>ANOMALY.DETECT(metodo=isolation_forest, soglia=0.05)',
+          run: async () => {
+            addLog('Carico dataset (4.847 righe, 12 colonne)', 'info');
+            await sleep(500);
+            addLog('Addestro Isolation Forest (n_estimators=200)...', 'info');
+            await sleep(700);
+            addLog('Score anomalie: distribuzione ok, <b style="color:var(--amber)">7 outlier</b> rilevati', 'warn');
+            await sleep(400);
+            setCell('B3', '€ 1.250.000', 'warn');
+            addLog('▸ <b>Ricavi riga 3</b>: outlier (+3.2σ) → possibile refuso', 'warn');
+            await sleep(300);
+            setCell('B4', '€ -45.000', 'warn');
+            addLog('▸ <b>EBIT riga 4</b>: negativo anomalo, controllare Dare/Avere', 'warn');
+            await sleep(300);
+            setCell('B5', '32%', 'warn');
+            addLog('▸ <b>Tax rate riga 5</b>: 32% vs media 25% → aliquota errata?', 'warn');
+            await sleep(300);
+            setCell('B6', '€ 89.000', 'warn');
+            addLog('▸ <b>Costi riga 6</b>: sopra 2.5σ rispetto al trend', 'warn');
+            await sleep(300);
+            setCell('B7', '€ 412', 'muted');
+            addLog('▸ <b>Margine unitario riga 7</b>: valore 2023 duplicato', 'muted');
+            await sleep(300);
+            setCell('B8', 'OK', 'formula');
+            addLog('▸ Score finale: <b style="color:var(--accent)">6 issue / 4.847 righe</b> (0.12%)', 'ok');
+            highlightCell('B8');
+            latencyEl.innerHTML = '<span class="ok">2.7s</span>';
+            stateEl.innerHTML = '<span class="ok">✓ done</span>';
+            addLog('Report anomalie salvato in <b>Foglio3 "Anomalie"</b>', 'ok');
+          }
+        }
+      };
+
+      let currentPreset = 'dcf';
+      let running = false;
+
+      function selectPreset(key){
+        if(running) return;
+        currentPreset = key;
+        chipBar.querySelectorAll('.chip').forEach(c => c.classList.toggle('active', c.dataset.preset === key));
+        const p = PRESETS[key];
+        promptEl.innerHTML = p.prompt.replace(/ /g, '&nbsp;') + '<span class="cur">_</span>';
+        setFxBar(p.fx);
+        setBadge(key.toUpperCase(), 'var(--accent-soft)');
+        resetCells();
+        clearLog();
+        addLog('Scenario <b style="color:var(--accent)">' + key.toUpperCase() + '</b> caricato. Premi Run.', 'muted');
+      }
+
+      async function run(){
+        if(running) return;
+        running = true;
+        runBtn.disabled = true;
+        runBtn.classList.add('running');
+        runLabel.textContent = 'In esecuzione…';
+        resetCells();
+        clearLog();
+        setBadge('running', 'rgba(255,180,84,0.1)');
+        addLog('▸ Avvio scenario <b style="color:var(--accent)">' + currentPreset.toUpperCase() + '</b>', 'ok');
+        const t0 = performance.now();
+        try {
+          await PRESETS[currentPreset].run();
+          const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+          latencyEl.innerHTML = '<span class="ok">' + elapsed + 's</span>';
+          if(stateEl.textContent.trim() === 'idle') stateEl.innerHTML = '<span class="ok">✓ done</span>';
+          setBadge('done', 'var(--accent-soft)');
+        } catch(e){
+          addLog('⚠ Errore: ' + e.message, 'warn');
+          stateEl.innerHTML = '<span style="color:var(--red)">✗ errore</span>';
+        }
+        running = false;
+        runBtn.disabled = false;
+        runBtn.classList.remove('running');
+        runLabel.textContent = 'Run di nuovo';
+      }
+
+      chipBar.addEventListener('click', e => {
+        const c = e.target.closest('.chip');
+        if(c) selectPreset(c.dataset.preset);
+      });
+      runBtn.addEventListener('click', run);
+
+      // Init
+      selectPreset('dcf');
+    })();
   </script>
 </body>
 </html>

@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Registrati — Excel AI</title>
+  <link rel="icon" type="image/svg+xml" href="/public/favicon.svg">
+  <meta name="description" content="Crea il tuo account Excel AI.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    :root{--bg:#060709;--bg-1:#0a0c11;--bg-2:#0f1219;--bg-3:#141823;--line:#1a1f2c;--line-2:#252b3a;--text:#e8ecf2;--text-2:#9aa4b6;--text-3:#5a6478;--text-4:#3a4252;--green:#107c41;--green-2:#1a9c54;--accent:#00ffaa;--accent-2:#00d4aa;--accent-soft:rgba(0,255,170,0.08);--accent-glow:rgba(0,255,170,0.25);--amber:#ffb454;--red:#ff6b6b;--r:8px;--r-lg:14px}
+    html,body{min-height:100vh}
+    body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased;overflow-x:hidden;display:flex;align-items:center;justify-content:center;padding:24px}
+    body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(ellipse 60% 50% at 50% 30%, rgba(0,255,170,0.08), transparent 70%),radial-gradient(ellipse 100% 100% at 50% 100%, var(--bg) 0%, transparent 80%)}
+    .card{position:relative;z-index:1;width:100%;max-width:460px;background:var(--bg-1);border:1px solid var(--line);border-radius:var(--r-lg);padding:36px;box-shadow:0 24px 60px rgba(0,0,0,0.5)}
+    .brand{display:flex;align-items:center;gap:10px;margin-bottom:28px;text-decoration:none;color:var(--text)}
+    .brand-mark{width:30px;height:30px;background:linear-gradient(135deg,var(--green-2),var(--green));border-radius:5px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-weight:700;font-size:14px;color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,0.15),0 2px 8px rgba(16,124,65,0.4)}
+    .brand-name{font-family:'Space Grotesk',sans-serif;font-size:15px;font-weight:600;letter-spacing:-0.02em}
+    h1{font-family:'Space Grotesk',sans-serif;font-size:24px;font-weight:600;letter-spacing:-0.02em;margin-bottom:6px}
+    .sub{color:var(--text-2);font-size:14px;margin-bottom:24px}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    label{display:block;font-size:12px;color:var(--text-2);margin-bottom:6px;font-weight:500;font-family:'JetBrains Mono',monospace}
+    label b{color:var(--accent)}
+    input,select{width:100%;padding:11px 14px;background:var(--bg-2);border:1px solid var(--line-2);border-radius:6px;color:var(--text);font-size:14px;font-family:inherit;margin-bottom:14px;transition:all .2s}
+    input::placeholder{color:var(--text-4)}
+    input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(0,255,170,0.1)}
+    select{cursor:pointer;appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--text-2) 50%),linear-gradient(135deg,var(--text-2) 50%,transparent 50%);background-position:calc(100% - 16px) center,calc(100% - 11px) center;background-size:5px 5px;background-repeat:no-repeat;padding-right:36px}
+    .btn{width:100%;padding:12px;background:var(--accent);color:var(--bg);border:none;border-radius:6px;font-family:inherit;font-size:14px;font-weight:600;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:8px}
+    .btn:hover{background:#1affb8;box-shadow:0 0 24px var(--accent-glow)}
+    .btn:disabled{opacity:0.6;cursor:not-allowed}
+    .err{color:var(--red);font-size:12.5px;background:rgba(255,107,107,0.08);border:1px solid rgba(255,107,107,0.25);border-radius:4px;padding:8px 10px;margin-bottom:14px;font-family:'JetBrains Mono',monospace;display:none}
+    .ok{color:var(--accent);font-size:12.5px;background:var(--accent-soft);border:1px solid rgba(0,255,170,0.25);border-radius:4px;padding:8px 10px;margin-bottom:14px;font-family:'JetBrains Mono',monospace;display:none}
+    .alt{text-align:center;margin-top:18px;font-size:13px;color:var(--text-2)}
+    .alt a{color:var(--accent);text-decoration:none}
+    .footer-link{position:fixed;top:20px;left:20px;z-index:10;color:var(--text-3);text-decoration:none;font-size:12px;font-family:'JetBrains Mono',monospace;display:flex;align-items:center;gap:6px}
+    .check{display:flex;align-items:flex-start;gap:8px;font-size:12.5px;color:var(--text-2);margin-bottom:14px;line-height:1.5}
+    .check input{margin:0;width:auto;margin-top:2px;accent-color:var(--accent)}
+    .check a{color:var(--accent);text-decoration:none}
+    .pw-strength{height:3px;background:var(--line-2);border-radius:2px;margin-top:-10px;margin-bottom:14px;overflow:hidden}
+    .pw-strength div{height:100%;width:0;background:var(--red);transition:all .2s}
+    .pw-hint{font-size:11px;color:var(--text-3);font-family:'JetBrains Mono',monospace;margin-top:-10px;margin-bottom:14px}
+  </style>
+</head>
+<body>
+  <a class="footer-link" href="/">← torna al sito</a>
+  <div class="card">
+    <a class="brand" href="/">
+      <div class="brand-mark">E</div>
+      <span class="brand-name">Excel AI</span>
+    </a>
+    <h1>Crea il tuo account</h1>
+    <p class="sub">30 secondi e sei dentro. Niente carta di credito.</p>
+
+    <div class="err" id="err"></div>
+    <div class="ok" id="ok"></div>
+
+    <form id="signupForm">
+      <div class="row">
+        <div><label><b>nome</b></label><input type="text" name="nome" placeholder="Mario" required autocomplete="given-name"></div>
+        <div><label><b>cognome</b></label><input type="text" name="cognome" placeholder="Rossi" required autocomplete="family-name"></div>
+      </div>
+      <label><b>email</b></label>
+      <input type="email" name="email" placeholder="mario@azienda.it" required autocomplete="email">
+
+      <label><b>azienda</b></label>
+      <input type="text" name="azienda" placeholder="Nome azienda" required>
+
+      <label><b>ruolo</b></label>
+      <select name="ruolo" required>
+        <option value="">Seleziona...</option>
+        <option>Analista finanziario</option>
+        <option>Commercialista</option>
+        <option>CFO / Controller</option>
+        <option>Investment Banker</option>
+        <option>Consulente</option>
+        <option>Startup founder</option>
+        <option>Altro</option>
+      </select>
+
+      <label><b>password</b></label>
+      <input type="password" name="password" placeholder="Almeno 8 caratteri" required minlength="8" autocomplete="new-password" id="pw">
+      <div class="pw-strength"><div id="pwBar"></div></div>
+      <div class="pw-hint" id="pwHint">Minimo 8 caratteri, con numero e maiuscola.</div>
+
+      <label class="check">
+        <input type="checkbox" required id="tos">
+        <span>Accetto la <a href="/privacy.html">Privacy Policy</a> e i <a href="/faq.html">Termini di servizio</a>.</span>
+      </label>
+
+      <button class="btn" type="submit" id="submitBtn">Crea account <span>→</span></button>
+    </form>
+
+    <p class="alt">Hai già un account? <a href="/login.html">Accedi</a></p>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script>
+    (async () => {
+      const { supabaseUrl, supabaseAnonKey } = await fetch('/api/config').then(r => r.json());
+      window.__sb = window.supabase.createClient(supabaseUrl, supabaseAnonKey, {
+        auth: { persistSession: true, autoRefreshToken: true, storage: window.localStorage }
+      });
+      window.dispatchEvent(new Event('supabase-ready'));
+    })();
+  </script>
+  <script>
+    const errEl = document.getElementById('err');
+    const okEl = document.getElementById('ok');
+    const btn = document.getElementById('submitBtn');
+    const form = document.getElementById('signupForm');
+    const pw = document.getElementById('pw');
+    const pwBar = document.getElementById('pwBar');
+    const pwHint = document.getElementById('pwHint');
+
+    function showErr(msg){ errEl.textContent='⚠ '+msg; errEl.style.display='block'; okEl.style.display='none'; }
+    function showOk(msg){ okEl.textContent='✓ '+msg; okEl.style.display='block'; errEl.style.display='none'; }
+    function clear(){ errEl.style.display='none'; okEl.style.display='none'; }
+
+    pw.addEventListener('input', () => {
+      const v = pw.value;
+      let score = 0;
+      if(v.length >= 8) score++;
+      if(/[A-Z]/.test(v)) score++;
+      if(/[0-9]/.test(v)) score++;
+      if(/[^A-Za-z0-9]/.test(v)) score++;
+      const pct = (score/4)*100;
+      const colors = ['#ff6b6b','#ff8e53','#ffb454','#00ffaa','#00ffaa'];
+      pwBar.style.width = pct + '%';
+      pwBar.style.background = colors[score];
+      const hints = ['Troppo corta','Debole','Accettabile','Buona','Forte'];
+      pwHint.textContent = v ? hints[score] : 'Minimo 8 caratteri, con numero e maiuscola.';
+      pwHint.style.color = score >= 2 ? 'var(--accent)' : 'var(--text-3)';
+    });
+
+    window.addEventListener('supabase-ready', () => {
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        clear();
+        btn.disabled = true;
+        btn.textContent = 'Creazione account…';
+        const data = Object.fromEntries(new FormData(form));
+        const { nome, cognome, email, password, azienda, ruolo } = data;
+
+        const { data: res, error } = await window.__sb.auth.signUp({
+          email, password,
+          options: {
+            data: { nome, cognome, azienda, ruolo },
+            emailRedirectTo: window.location.origin + '/dashboard.html'
+          }
+        });
+
+        if(error){
+          showErr(error.message.includes('already registered') ? 'Email già registrata. Prova ad accedere.' : error.message);
+          btn.disabled = false;
+          btn.innerHTML = 'Crea account <span>→</span>';
+          return;
+        }
+
+        if(res.session){
+          showOk('Account creato. Reindirizzamento…');
+          setTimeout(() => location.href = '/dashboard.html', 400);
+        } else {
+          showOk('Controlla la tua email: ti abbiamo inviato il link di conferma. Clicca per attivare l\'account.');
+          form.style.display = 'none';
+        }
+      });
+    });
+  </script>
+</body>
+</html>
