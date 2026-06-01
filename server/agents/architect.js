@@ -1387,12 +1387,20 @@ function validateBlueprint(raw, context = {}) {
     waves[d].push(s.id);
   }
 
-  // Within each wave, sheets/ranges must be disjoint
+  // Within each wave, sheets/ranges must be disjoint — except scaffold-like
+  // slices which create empty sheets and pre-list ranges that content
+  // workers will fill. Past failure: the LLM-emitted blueprint put both
+  // a `scaffold` slice and `populate_assumptions` slice at wave 1 with
+  // overlapping `ranges_owned`, validator rejected, run fell back to the
+  // single-agent loop (1 action per iteration → stagnation). Scaffold's
+  // ranges_owned is an informational scope, not a write claim, so exclude
+  // it from overlap registration.
   for (let w = 0; w < waves.length; w++) {
     const seenSheets = new Map(); // sheet → slice_id
     const seenRanges = new Map(); // range → slice_id
     for (const sid of waves[w]) {
       const slice = normalizedSlices.find(x => x.id === sid);
+      if (isScaffoldLikeSlice(slice)) continue;
       for (const sh of slice.scope.sheets_owned) {
         // If sheet appears in two slices in same wave AND both claim full sheet ownership (no specific ranges), conflict.
         // If at least one constrains via ranges_owned, allow sharing.
