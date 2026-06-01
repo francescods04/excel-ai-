@@ -335,6 +335,7 @@ function rangeAddrCellCount(addr) {
   if (typeof addr !== 'string') return 1;
   const raw = addr.replace(/\$/g, '');
   const withoutSheet = raw.includes('!') ? raw.split('!').pop() : raw;
+  if (/^[A-Z]+:[A-Z]+$/i.test(withoutSheet) || /^\d+:\d+$/.test(withoutSheet)) return Infinity;
   const m = withoutSheet.match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/i);
   if (!m) return 1;
   const colNum = (s) => {
@@ -350,6 +351,10 @@ function rangeAddrCellCount(addr) {
 }
 
 const FLOOD_FILL_CELL_THRESHOLD = 20;
+const MAX_SET_CELL_RANGE_LITERAL_KEYS = Math.max(50, Number(process.env.AGENT_MAX_LITERAL_WRITE_KEYS) || 1200);
+const MAX_SET_CELL_RANGE_ACTION_CELLS = Math.max(1000, Number(process.env.AGENT_MAX_WRITE_ACTION_CELLS) || 12000);
+const MAX_BULK_SET_CELL_RANGE_CELLS = Math.max(MAX_SET_CELL_RANGE_ACTION_CELLS, Number(process.env.AGENT_MAX_BULK_WRITE_CELLS) || 12000);
+const MAX_FORMAT_TARGET_CELLS = Math.max(1000, Number(process.env.AGENT_MAX_FORMAT_TARGET_CELLS) || 12000);
 
 function isFormulaSpec(spec) {
   if (!spec || typeof spec !== 'object') return false;
@@ -404,6 +409,188 @@ function detectScalarTextFloodFill(cells, copyToRange) {
   }
 
   return { ok: true };
+}
+
+function parseSimpleA1Bounds(addr) {
+  if (typeof addr !== 'string') return null;
+  const raw = addr.replace(/\$/g, '').trim();
+  const withoutSheet = raw.includes('!') ? raw.split('!').pop() : raw;
+  const m = withoutSheet.match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/i);
+  if (!m) return null;
+  const c1 = colToIndex(m[1]);
+  const r1 = Number(m[2]);
+  const c2 = m[3] ? colToIndex(m[3]) : c1;
+  const r2 = m[4] ? Number(m[4]) : r1;
+  return {
+    c1: Math.min(c1, c2),
+    c2: Math.max(c1, c2),
+    r1: Math.min(r1, r2),
+    r2: Math.max(r1, r2)
+  };
+}
+
+function boundsToA1(bounds) {
+  if (!bounds) return null;
+  const left = `${indexToCol(bounds.c1)}${bounds.r1}`;
+  const right = `${indexToCol(bounds.c2)}${bounds.r2}`;
+  return left === right ? left : `${left}:${right}`;
+}
+
+function formulaBoundsForCells(cells) {
+  const formulaAddrs = Object.entries(cells || {})
+    .filter(([, spec]) => isFormulaSpec(spec))
+    .map(([addr]) => parseSimpleA1Bounds(addr))
+    .filter(Boolean);
+  if (formulaAddrs.length === 0) return null;
+  return {
+    c1: Math.min(...formulaAddrs.map(b => b.c1)),
+    c2: Math.max(...formulaAddrs.map(b => b.c2)),
+    r1: Math.min(...formulaAddrs.map(b => b.r1)),
+    r2: Math.max(...formulaAddrs.map(b => b.r2))
+  };
+}
+
+function rewriteCopyToFormulaRange(cells, copyToRange) {
+  if (!copyToRange || !cells || typeof cells !== 'object') return { copyToRange, warning: null };
+  const entries = Object.entries(cells);
+  if (entries.length === 0 || !isTextScalar(entries[0][1])) return { copyToRange, warning: null };
+  const copyBounds = parseSimpleA1Bounds(copyToRange);
+  const formulaBounds = formulaBoundsForCells(cells);
+  if (!copyBounds || !formulaBounds) return { copyToRange, warning: null };
+  const c1 = Math.max(copyBounds.c1, formulaBounds.c1);
+  const c2 = copyBounds.c2;
+  if (c1 > c2) return { copyToRange, warning: null };
+  const rewritten = boundsToA1({ c1, c2, r1: copyBounds.r1, r2: copyBounds.r2 });
+  if (!rewritten || rewritten === copyToRange) return { copyToRange, warning: null };
+  return {
+    copyToRange: rewritten,
+    warning: `Adjusted copyToRange from ${copyToRange} to ${rewritten} so formula cells fill while text labels are written once.`
+  };
+}
+
+function splitFormulaCopyWrite(cells, copyToRange) {
+  const rewrite = rewriteCopyToFormulaRange(cells, copyToRange);
+  const entries = Object.entries(cells || {});
+  const hasFormula = entries.some(([, spec]) => isFormulaSpec(spec));
+  const hasStatic = entries.some(([, spec]) => !isFormulaSpec(spec));
+  const copyBounds = parseSimpleA1Bounds(copyToRange);
+  const formulaBounds = formulaBoundsForCells(cells);
+  const canSplitSameColumns = Boolean(copyBounds && formulaBounds &&
+    copyBounds.c1 === formulaBounds.c1 &&
+    copyBounds.c2 === formulaBounds.c2 &&
+    copyBounds.r1 >= formulaBounds.r1);
+  const shouldSplitMixedCopy = Boolean(copyToRange && hasFormula && hasStatic && (rewrite.warning || canSplitSameColumns));
+  if (!rewrite.warning && !shouldSplitMixedCopy) {
+    return {
+      warning: null,
+      writes: [{ cells, copyToRange }]
+    };
+  }
+
+  const staticCells = {};
+  const formulaCells = {};
+  for (const [addr, spec] of entries) {
+    if (isFormulaSpec(spec)) formulaCells[addr] = spec;
+    else staticCells[addr] = spec;
+  }
+
+  if (Object.keys(formulaCells).length === 0) {
+    return {
+      warning: rewrite.warning,
+      writes: [{ cells, copyToRange: rewrite.copyToRange }]
+    };
+  }
+
+  const writes = [];
+  if (Object.keys(staticCells).length > 0) {
+    writes.push({ cells: staticCells, copyToRange: null });
+  }
+  writes.push({ cells: formulaCells, copyToRange: rewrite.copyToRange });
+  return {
+    warning: rewrite.warning || `Split static labels from copyToRange ${copyToRange} so only formula cells are copied.`,
+    writes
+  };
+}
+
+function estimateSetCellRangeCells(cells, copyToRange) {
+  if (!cells || typeof cells !== 'object') return 0;
+  let total = 0;
+  for (const addr of Object.keys(cells)) {
+    const n = rangeAddrCellCount(addr);
+    if (!Number.isFinite(n)) return Infinity;
+    total += n;
+  }
+  if (copyToRange) {
+    const copied = rangeAddrCellCount(copyToRange);
+    if (!Number.isFinite(copied)) return Infinity;
+    total += copied;
+  }
+  return total;
+}
+
+function validateSetCellRangeSize(cells, copyToRange, label = 'set_cell_range') {
+  const literalKeys = cells && typeof cells === 'object' ? Object.keys(cells).length : 0;
+  if (literalKeys > MAX_SET_CELL_RANGE_LITERAL_KEYS) {
+    return {
+      ok: false,
+      reason: `${label}: too many explicit cell entries (${literalKeys}, max ${MAX_SET_CELL_RANGE_LITERAL_KEYS}). For dense 1000-row schedules, write the first formula/driver row and use copyToRange instead of enumerating every row.`
+    };
+  }
+  const cellsTotal = estimateSetCellRangeCells(cells, copyToRange);
+  if (!Number.isFinite(cellsTotal)) {
+    return {
+      ok: false,
+      reason: `${label}: unbounded range detected. Use a finite A1 range like A1:J1000; never format/write whole columns or rows such as A:J.`
+    };
+  }
+  if (cellsTotal > MAX_SET_CELL_RANGE_ACTION_CELLS) {
+    return {
+      ok: false,
+      reason: `${label}: target covers ${cellsTotal} cells (max ${MAX_SET_CELL_RANGE_ACTION_CELLS}). Split into smaller sheet sections, or use one formula row plus copyToRange for each schedule block.`
+    };
+  }
+  return { ok: true, cellsTotal };
+}
+
+function validateCellMapShape(cells, label = 'set_cell_range') {
+  if (!cells || typeof cells !== 'object' || Array.isArray(cells)) {
+    return { ok: false, reason: `${label}: "cells" must be an object keyed by A1 addresses.` };
+  }
+  const keys = Object.keys(cells);
+  if (keys.length === 0) {
+    return { ok: false, reason: `${label}: "cells" must contain at least one A1 address.` };
+  }
+  const invalid = keys.filter(addr => !parseSimpleA1Bounds(addr));
+  if (invalid.length > 0) {
+    return {
+      ok: false,
+      reason: `${label}: invalid cell key(s) ${invalid.slice(0, 6).join(', ')}. Use A1 addresses like A1 or A1:H10; do not pass history summaries such as cellCount/sample as cells.`
+    };
+  }
+  return { ok: true };
+}
+
+function formatOptionsAllowUnboundedTarget(options = {}) {
+  const keys = Object.keys(options || {});
+  return keys.length > 0 && keys.every(k => ['columnWidth', 'rowHeight'].includes(k));
+}
+
+function validateFormatTargetSize(target, label = 'set_format', options = {}) {
+  const cellsTotal = rangeAddrCellCount(target);
+  if (!Number.isFinite(cellsTotal)) {
+    if (formatOptionsAllowUnboundedTarget(options)) return { ok: true, cellsTotal: 0 };
+    return {
+      ok: false,
+      reason: `${label}: unbounded format target "${target}" would touch whole rows/columns and can freeze Excel. Use a finite range like A1:J1000.`
+    };
+  }
+  if (cellsTotal > MAX_FORMAT_TARGET_CELLS) {
+    return {
+      ok: false,
+      reason: `${label}: format target "${target}" covers ${cellsTotal} cells (max ${MAX_FORMAT_TARGET_CELLS}). Split formatting into narrower blocks.`
+    };
+  }
+  return { ok: true, cellsTotal };
 }
 
 /** Expand for format-tool options: preset goes through cellStyles too. */
@@ -1657,6 +1844,114 @@ function formatToolResultForMessages(toolResult, toolName, opts = {}) {
   return `Tool result for ${toolName} [HARD-TRUNCATED ${compact.length} -> ${cap} chars; the original was too large to fit the agent context]:\n${compact.slice(0, cap)}\n...[truncated]`;
 }
 
+function compactCellSpecForHistory(spec) {
+  if (!spec || typeof spec !== 'object') return spec;
+  const out = {};
+  if (spec.formula !== undefined) out.formula = String(spec.formula).slice(0, 180);
+  if (spec.value !== undefined) out.value = String(spec.value).slice(0, 120);
+  if (spec.numberFormat !== undefined) out.numberFormat = spec.numberFormat;
+  if (spec.style !== undefined) out.style = spec.style;
+  if (spec.preset !== undefined) out.preset = spec.preset;
+  return out;
+}
+
+function summarizeCellMapForHistory(cells, sampleLimit = 8) {
+  const entries = Object.entries(cells || {});
+  let formulas = 0;
+  let values = 0;
+  for (const [, spec] of entries) {
+    if (spec && typeof spec === 'object' && spec.formula !== undefined) formulas++;
+    else values++;
+  }
+  return {
+    cellCount: entries.length,
+    formulas,
+    values,
+    sample: entries.slice(0, sampleLimit).map(([addr, spec]) => ({ addr, ...compactCellSpecForHistory(spec) }))
+  };
+}
+
+function shouldCompactCellMapForHistory(cells) {
+  const entries = Object.entries(cells || {});
+  if (entries.length > 80) return true;
+  try {
+    return JSON.stringify(cells || {}).length > 12000;
+  } catch (_) {
+    return true;
+  }
+}
+
+function compactWriteForHistory(write) {
+  const out = {
+    sheet: write?.sheet || write?.sheetName || write?.sheet_name,
+    target: write?.target || write?.range,
+    copyToRange: typeof write?.copyToRange === 'string' ? write.copyToRange : write?.copyToRange?.range
+  };
+  if (write?.allow_overwrite !== undefined) out.allow_overwrite = write.allow_overwrite;
+  if (shouldCompactCellMapForHistory(write?.cells)) {
+    out.cellsOmitted = true;
+    out.cellsSummary = summarizeCellMapForHistory(write?.cells);
+  } else {
+    out.cells = write?.cells || {};
+  }
+  return out;
+}
+
+function compactToolParamsForHistory(toolName, params) {
+  if (!params || typeof params !== 'object') return params || {};
+  if (toolName === 'set_cell_range') {
+    return compactWriteForHistory(params);
+  }
+  if (toolName === 'bulk_set_cell_ranges') {
+    const writes = Array.isArray(params.writes || params.ranges) ? (params.writes || params.ranges) : [];
+    return {
+      writeCount: writes.length,
+      writes: writes.slice(0, 16).map(compactWriteForHistory),
+      truncatedWrites: Math.max(0, writes.length - 16)
+    };
+  }
+  if (toolName === 'set_format') {
+    const options = params.options || params.format || params.style || params.cellStyles || params.cell_styles || params.styles || params.formatting || params.props || params.properties || {};
+    return {
+      sheet: params.sheet || params.sheetName || params.sheet_name,
+      target: params.target || params.range || params.addr || params.address,
+      optionKeys: Object.keys(options || {})
+    };
+  }
+  if (toolName === 'bulk_set_format') {
+    const formats = Array.isArray(params.formats || params.writes || params.ranges) ? (params.formats || params.writes || params.ranges) : [];
+    return {
+      formatCount: formats.length,
+      formats: formats.slice(0, 24).map(f => ({
+        sheet: f?.sheet || f?.sheetName || f?.sheet_name,
+        target: f?.target || f?.range || f?.addr || f?.address,
+        optionKeys: Object.keys(f?.options || f?.format || f?.style || {})
+      })),
+      truncatedFormats: Math.max(0, formats.length - 24)
+    };
+  }
+  if (toolName === 'execute_office_js' || toolName === 'run_javascript') {
+    const code = params.code || params.script || params.js || params.source || params.body || '';
+    return { codeChars: String(code).length, codePreview: String(code).slice(0, 500) };
+  }
+  if (toolName === 'bulk_set_notes') {
+    const notes = Array.isArray(params.notes || params.writes) ? (params.notes || params.writes) : [];
+    return { noteCount: notes.length, sample: notes.slice(0, 12).map(n => ({ sheet: n?.sheet, target: n?.target || n?.cell })) };
+  }
+  return params;
+}
+
+function makeAssistantToolMessage(thought, toolName, params) {
+  return {
+    role: 'assistant',
+    content: JSON.stringify({
+      thought,
+      tool: toolName,
+      params: compactToolParamsForHistory(toolName, params)
+    })
+  };
+}
+
 function compactAgentContext(context) {
   if (!context || typeof context !== 'object') return {};
   const out = {
@@ -2314,10 +2609,7 @@ async function runAgentLoop(objective, context, options = {}) {
       onEvent('thought', { iteration, thought: thought.slice(0, 300), tool: toolName });
 
       // Append assistant message
-      messages.push({
-        role: 'assistant',
-        content: JSON.stringify({ thought, tool: toolName, params })
-      });
+      messages.push(makeAssistantToolMessage(thought, toolName, params));
 
       // Empty/noop tool — never auto-done. Force LLM to either call `done` or continue.
       if (!toolName || toolName === '' || toolName === 'noop' || toolName === 'none') {
@@ -2928,12 +3220,20 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
             maxRows: params.maxRows || 200,
             maxCols: params.maxCols || 20
           });
+          // Trim oversized arrays to head+tail preview so prompt context stays
+          // small. Worker can re-read a specific range if it needs more.
+          const MAX_ROWS_INLINE = Number(process.env.AGENT_READ_MAX_ROWS_INLINE) || 20;
+          const values = Array.isArray(data.values) ? data.values : [];
+          const trimmedData = values.length > MAX_ROWS_INLINE * 2
+            ? [...values.slice(0, MAX_ROWS_INLINE), `… [${values.length - MAX_ROWS_INLINE * 2} rows trimmed — use get_cell_ranges with a specific A1 range to inspect]`, ...values.slice(-MAX_ROWS_INLINE)]
+            : values;
           return {
             sheet: data.sheet || params.sheet,
             usedRange: data.usedRange,
-            usedRangeData: data.values || [],
+            usedRangeData: trimmedData,
             rowCount: data.rowCount || 0,
-            columnCount: data.columnCount || 0
+            columnCount: data.columnCount || 0,
+            _trimmed: values.length > MAX_ROWS_INLINE * 2 ? { original_rows: values.length, head: MAX_ROWS_INLINE, tail: MAX_ROWS_INLINE } : undefined
           };
         } catch (err) {
           logger.warn(`[AgentLoop] Client read failed for read_sheet: ${err.message}. Falling back to static context.`);
@@ -3084,7 +3384,23 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
           sheet: '', target: '', values: [], formulas: [], rowCount: 0, columnCount: 0,
           error: r.reason?.message || 'Promise rejected'
         });
-        return { ranges: results };
+        // Trim oversized 2D arrays so they don't bloat worker context. Workers
+        // rarely need full 1000-row reads — head+tail is enough to confirm
+        // layout and detect issues. Reduces prompt tokens 5-10× per read.
+        const MAX_ROWS_INLINE = Number(process.env.AGENT_READ_MAX_ROWS_INLINE) || 20;
+        const trimmed = results.map(r => {
+          const rows = Array.isArray(r.values) ? r.values.length : 0;
+          if (rows <= MAX_ROWS_INLINE * 2) return r;
+          return {
+            ...r,
+            values: [...r.values.slice(0, MAX_ROWS_INLINE), `… [${rows - MAX_ROWS_INLINE * 2} rows trimmed]`, ...r.values.slice(-MAX_ROWS_INLINE)],
+            formulas: Array.isArray(r.formulas) && r.formulas.length === rows
+              ? [...r.formulas.slice(0, MAX_ROWS_INLINE), null, ...r.formulas.slice(-MAX_ROWS_INLINE)]
+              : r.formulas,
+            _trimmed: { original_rows: rows, head: MAX_ROWS_INLINE, tail: MAX_ROWS_INLINE }
+          };
+        });
+        return { ranges: trimmed };
       }
       // Fallback: extract from static context (allSheetsData or selectedValues)
       logger.warn('[AgentLoop] get_cell_ranges called without client connection. Using static context.');
@@ -3249,16 +3565,35 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       if (copyToRange && typeof copyToRange === 'object' && copyToRange.range) {
         copyToRange = copyToRange.range;
       }
+      const shapeCheck = validateCellMapShape(params.cells, 'set_cell_range');
+      if (!shapeCheck.ok) return { error: shapeCheck.reason };
+      const splitWrite = splitFormulaCopyWrite(params.cells, copyToRange);
       const targetSheet = params.sheet || context?.activeSheet;
       if (!params.sheet) {
         logger.warn(`[AgentLoop] set_cell_range called without 'sheet' param; defaulting to activeSheet="${targetSheet}". LLM should specify sheet explicitly.`);
       }
 
       // Anti-flood-fill guard — reject scalar text replicated across many cells
-      const floodCheck = detectScalarTextFloodFill(params.cells, copyToRange);
-      if (!floodCheck.ok) {
-        logger.warn(`[AgentLoop] ${floodCheck.reason}`);
-        return { error: floodCheck.reason };
+      let cellsTotal = 0;
+      for (let i = 0; i < splitWrite.writes.length; i++) {
+        const write = splitWrite.writes[i];
+        const label = splitWrite.writes.length > 1 ? `set_cell_range part ${i + 1}` : 'set_cell_range';
+        const floodCheck = detectScalarTextFloodFill(write.cells, write.copyToRange);
+        if (!floodCheck.ok) {
+          logger.warn(`[AgentLoop] ${floodCheck.reason}`);
+          return { error: floodCheck.reason };
+        }
+        const sizeCheck = validateSetCellRangeSize(write.cells, write.copyToRange, label);
+        if (!sizeCheck.ok) {
+          logger.warn(`[AgentLoop] ${sizeCheck.reason}`);
+          return { error: sizeCheck.reason };
+        }
+        cellsTotal += sizeCheck.cellsTotal;
+      }
+      if (cellsTotal > MAX_SET_CELL_RANGE_ACTION_CELLS) {
+        const reason = `set_cell_range: split write covers ${cellsTotal} cells (max ${MAX_SET_CELL_RANGE_ACTION_CELLS}). Split into smaller sheet sections.`;
+        logger.warn(`[AgentLoop] ${reason}`);
+        return { error: reason };
       }
 
       // Preflight read: verify target cells are empty before writing (trust UX)
@@ -3297,14 +3632,15 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       }
 
       return {
-        actions: [{
+        _message: splitWrite.warning || undefined,
+        actions: splitWrite.writes.map((write) => ({
           type: 'setCellRange',
           sheet: targetSheet,
-          cells: expandPresetsInCells(params.cells),
-          copyToRange: copyToRange,
+          cells: expandPresetsInCells(write.cells),
+          copyToRange: write.copyToRange || undefined,
           allow_overwrite: params.allow_overwrite,
-          explanation: `Write ${Object.keys(params.cells || {}).length} cells to ${targetSheet}`
-        }]
+          explanation: `Write ${Object.keys(write.cells || {}).length} cells to ${targetSheet}`
+        }))
       };
     }
     case 'set_format': {
@@ -3323,6 +3659,8 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       if (!options || Object.keys(options).length === 0) {
         return { error: `set_format: no supported format options after normalization. Provided keys: [${Object.keys(rawOptions).join(', ') || 'none'}].` };
       }
+      const sizeCheck = validateFormatTargetSize(target, 'set_format', options);
+      if (!sizeCheck.ok) return { error: sizeCheck.reason };
       return {
         actions: [{
           type: 'setCellFormat',
@@ -3344,6 +3682,7 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       const actions = [];
       const accepted = [];
       const errors = [];
+      let cellsTotal = 0;
       for (let i = 0; i < writes.length; i++) {
         const w = writes[i] || {};
         const sheet = w.sheet || context?.activeSheet;
@@ -3351,29 +3690,60 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
           errors.push({ index: i, reason: 'missing sheet' });
           continue;
         }
-        if (!w.cells || typeof w.cells !== 'object' || Object.keys(w.cells).length === 0) {
-          errors.push({ index: i, sheet, reason: 'missing or empty cells map' });
+        const shapeCheck = validateCellMapShape(w.cells, `bulk_set_cell_ranges entry ${i}`);
+        if (!shapeCheck.ok) {
+          errors.push({ index: i, sheet, reason: shapeCheck.reason });
           continue;
         }
         let copyToRange = w.copyToRange;
         if (copyToRange && typeof copyToRange === 'object' && copyToRange.range) {
           copyToRange = copyToRange.range;
         }
-        const floodCheck = detectScalarTextFloodFill(w.cells, copyToRange);
-        if (!floodCheck.ok) {
-          logger.warn(`[AgentLoop] bulk_set_cell_ranges entry ${i} (${sheet}): ${floodCheck.reason}`);
-          errors.push({ index: i, sheet, reason: floodCheck.reason });
+        const splitWrite = splitFormulaCopyWrite(w.cells, copyToRange);
+        const entryActions = [];
+        let entryCellsTotal = 0;
+        let entryError = null;
+        for (let part = 0; part < splitWrite.writes.length; part++) {
+          const write = splitWrite.writes[part];
+          const label = splitWrite.writes.length > 1
+            ? `bulk_set_cell_ranges entry ${i} part ${part + 1}`
+            : `bulk_set_cell_ranges entry ${i}`;
+          const floodCheck = detectScalarTextFloodFill(write.cells, write.copyToRange);
+          if (!floodCheck.ok) {
+            entryError = floodCheck.reason;
+            break;
+          }
+          const sizeCheck = validateSetCellRangeSize(write.cells, write.copyToRange, label);
+          if (!sizeCheck.ok) {
+            entryError = sizeCheck.reason;
+            break;
+          }
+          entryCellsTotal += sizeCheck.cellsTotal;
+          entryActions.push({
+            type: 'setCellRange',
+            sheet,
+            cells: expandPresetsInCells(write.cells),
+            copyToRange: write.copyToRange || undefined,
+            allow_overwrite: w.allow_overwrite,
+            explanation: `Write ${Object.keys(write.cells).length} cells to ${sheet}`
+          });
+        }
+        if (entryError) {
+          logger.warn(`[AgentLoop] bulk_set_cell_ranges entry ${i} (${sheet}): ${entryError}`);
+          errors.push({ index: i, sheet, reason: entryError });
           continue;
         }
-        accepted.push({ sheet, cellCount: Object.keys(w.cells).length });
-        actions.push({
-          type: 'setCellRange',
-          sheet,
-          cells: expandPresetsInCells(w.cells),
-          copyToRange,
-          allow_overwrite: w.allow_overwrite,
-          explanation: `Write ${Object.keys(w.cells).length} cells to ${sheet}`
-        });
+        if (cellsTotal + entryCellsTotal > MAX_BULK_SET_CELL_RANGE_CELLS) {
+          errors.push({
+            index: i,
+            sheet,
+            reason: `bulk_set_cell_ranges: accepted entries already cover ${cellsTotal} cells; adding ${entryCellsTotal} would exceed max ${MAX_BULK_SET_CELL_RANGE_CELLS}. Split this workbook section into a later iteration.`
+          });
+          continue;
+        }
+        cellsTotal += entryCellsTotal;
+        accepted.push({ sheet, cellCount: entryCellsTotal, warning: splitWrite.warning || undefined });
+        actions.push(...entryActions);
       }
       if (actions.length === 0) {
         return { error: 'bulk_set_cell_ranges: no valid writes', errors };
@@ -3383,6 +3753,7 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
         applied: accepted.length,
         sheets: Array.from(new Set(accepted.map(a => a.sheet))),
         cellsTotal: accepted.reduce((s, a) => s + a.cellCount, 0),
+        warnings: accepted.map(a => a.warning).filter(Boolean),
         errors: errors.length ? errors : undefined,
         actions
       };
@@ -3439,6 +3810,11 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
             target,
             reason: `no supported format options after normalization. Provided keys: [${Object.keys(rawOptions).join(', ') || 'none'}]. Use backgroundColor / fontColor / bold / italic / numberFormat / columnWidth / rowHeight / horizontalAlignment / borders.`
           });
+          continue;
+        }
+        const sizeCheck = validateFormatTargetSize(target, `bulk_set_format entry ${i}`, options);
+        if (!sizeCheck.ok) {
+          errors.push({ index: i, sheet, target, reason: sizeCheck.reason });
           continue;
         }
         accepted.push({ sheet, target });
@@ -4369,7 +4745,7 @@ async function runAgentStep(state, clientResult, deps = {}) {
     const toolName = llmResult.tool || llmResult.action || '';
     const params = llmResult.params || llmResult.parameters || llmResult.arguments || {};
     onProgress('thought', { iteration: state.iteration, thought: String(thought).slice(0, 300), tool: toolName });
-    state.messages.push({ role: 'assistant', content: JSON.stringify({ thought, tool: toolName, params }) });
+    state.messages.push(makeAssistantToolMessage(thought, toolName, params));
 
     if (!toolName || toolName === 'noop' || toolName === 'none') {
       state.messages.push(makeUserMessage('No tool was called. If task is complete, call tool "done" with a summary. Otherwise continue with the next tool.'));
@@ -4398,13 +4774,39 @@ async function runAgentStep(state, clientResult, deps = {}) {
     const SEQUENTIAL_FORCE_BULK = {
       create_named_range: 'bulk_create_named_ranges',
       create_sheet: 'bulk_create_sheets',
-      set_format: 'bulk_set_format'
+      set_format: 'bulk_set_format',
+      set_cell_range: 'bulk_set_cell_ranges'
     };
     const bulkReplacement = SEQUENTIAL_FORCE_BULK[toolName];
-    if (bulkReplacement) {
+    if (bulkReplacement && (toolName !== 'set_cell_range' || state.context?._sliceId)) {
       const recent = state.recentToolTrail.slice(-2).map(e => e.toolName);
       if (recent.length === 2 && recent.every(n => n === toolName)) {
         const forceMsg = `STAGNATION GUARD: "${toolName}" was called 3 times in a row. Your NEXT call MUST be "${bulkReplacement}" with ALL remaining items in one payload. Sequential one-at-a-time calls have killed prior slices by exhausting the iteration budget. This call is rejected; retry as ${bulkReplacement}.`;
+        state.messages.push(makeUserMessage(forceMsg));
+        state.results.push({ type: 'error', error: forceMsg, blocked: true, tool: toolName });
+        onProgress('iterationError', { iteration: state.iteration, error: forceMsg });
+        state.iteration = Math.max(0, state.iteration - 1);
+        return { state, control: 'continue', payload: { thought } };
+      }
+    }
+
+    if (toolName === 'set_cell_range' && state.context?._sliceId) {
+      const priorSmallWrites = state.results.filter(r =>
+        r && r.type === 'tool' &&
+        r.tool === 'set_cell_range' &&
+        r.params &&
+        !r.params.copyToRange &&
+        r.params.cells &&
+        typeof r.params.cells === 'object' &&
+        Object.keys(r.params.cells).length < 12
+      ).length;
+      const currentSmallWrite = params &&
+        !params.copyToRange &&
+        params.cells &&
+        typeof params.cells === 'object' &&
+        Object.keys(params.cells).length < 12;
+      if (currentSmallWrite && priorSmallWrites >= 2) {
+        const forceMsg = `MICRO-WRITE GUARD: this slice already used ${priorSmallWrites} small set_cell_range calls. Retry with bulk_set_cell_ranges and include ALL remaining rows/sections in one payload. If you are finished, call done instead of writing another tiny batch.`;
         state.messages.push(makeUserMessage(forceMsg));
         state.results.push({ type: 'error', error: forceMsg, blocked: true, tool: toolName });
         onProgress('iterationError', { iteration: state.iteration, error: forceMsg });
@@ -4536,6 +4938,7 @@ module.exports = {
   formatToolStagnationReason,
   executeAgentTool,
   formatToolResultForMessages,
+  compactToolParamsForHistory,
   trimDeepArrays,
   compactMessagesToSummary,
   shouldAutoCompactMessages,

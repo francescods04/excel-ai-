@@ -128,6 +128,8 @@ async function test_triage_iterations_clamped() {
   console.log('  ✓ iteration count clamped to safe range');
 }
 
+const VAIRANO_PROMPT = 'fai un excel super completo per fare la valutazione della realizzazione di un progetto immobiliare da 0, l immobile sarà un 10 piani a vairano scalo in provincia di caserta di circa 1000mq2 per piano  fai un analisi super cpmplessa di costi e ricavi, finanziamenti, dividi i costi in vari sottocosto. l excel deve essere completo con ogni foglio circa 1000 righe';
+
 function test_extractScaleHints_reads_explicit_signals() {
   // Real estate prompt that under-delivered before: 10 piani × 1000mq + 1000 rows + sensitivity.
   const re = extractScaleHints('valutazione progetto immobiliare a vairano scalo, 10 piani di palazzo, 1000mq per piano +- analizza tutti i costi, vari scenario, sensitivity analysis e circa 1000 righe diverse');
@@ -149,6 +151,48 @@ function test_extractScaleHints_reads_explicit_signals() {
   assert.strictEqual(plain.detailLevel, null);
 
   console.log('  ✓ extractScaleHints reads rows/periods/units/detail signals');
+}
+
+function test_extractScaleHints_reads_rows_per_sheet() {
+  const hints = extractScaleHints(VAIRANO_PROMPT);
+  assert.strictEqual(hints.rowsPerSheetRequested, 1000, `expected 1000 rows per sheet, got ${hints.rowsPerSheetRequested}`);
+  assert.strictEqual(hints.rowsRequested, null, 'rows per sheet should not be downgraded to workbook total rows');
+  assert.strictEqual(hints.units, 10, `expected 10 floors, got ${hints.units}`);
+  console.log('  ✓ extractScaleHints distinguishes rows per sheet from total rows');
+}
+
+async function test_large_real_estate_prompt_forces_architect_when_llm_underclassifies() {
+  const mock = makeMockLLM([{
+    complexity: 'moderate',
+    parallelizable: false,
+    mode: 'single_agent',
+    estimated_iterations: 12,
+    reasoning: 'wrongly treated as one sheet'
+  }]);
+  const result = await triageObjective({
+    objective: VAIRANO_PROMPT,
+    context: { activeSheet: 'Sheet1', workbookSheets: ['Sheet1'] },
+    callLLMFn: mock
+  });
+  assert.strictEqual(result.complexity, 'institutional');
+  assert.strictEqual(result.parallelizable, true);
+  assert.strictEqual(result.mode, 'architect_then_parallel');
+  assert.ok(result.estimated_iterations >= 60, `expected high iteration budget, got ${result.estimated_iterations}`);
+  assert.strictEqual(result.scale_hints.rowsPerSheetRequested, 1000);
+  console.log('  ✓ large real-estate prompt forces architect mode even if LLM underclassifies');
+}
+
+async function test_large_real_estate_fallback_uses_architect() {
+  const result = await triageObjective({
+    objective: VAIRANO_PROMPT,
+    context: { activeSheet: 'Sheet1', workbookSheets: ['Sheet1'] },
+    callLLMFn: makeMockLLM([new Error('network down')])
+  });
+  assert.strictEqual(result.mode, 'architect_then_parallel');
+  assert.strictEqual(result.parallelizable, true);
+  assert.strictEqual(result.scale_hints.rowsPerSheetRequested, 1000);
+  assert.ok(result._meta.fallback, 'fallback flag set');
+  console.log('  ✓ large real-estate fallback routes to architect mode');
 }
 
 async function test_triage_user_content_includes_context() {
@@ -176,6 +220,9 @@ async function test_triage_user_content_includes_context() {
   await test_triage_iterations_clamped();
   await test_triage_user_content_includes_context();
   test_extractScaleHints_reads_explicit_signals();
+  test_extractScaleHints_reads_rows_per_sheet();
+  await test_large_real_estate_prompt_forces_architect_when_llm_underclassifies();
+  await test_large_real_estate_fallback_uses_architect();
   console.log('All triage tests passed.\n');
 })().catch(err => {
   console.error('Triage test failed:', err);

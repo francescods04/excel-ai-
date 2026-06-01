@@ -822,6 +822,7 @@ function buildTurn(message, context, parentTurnId = null, options = {}) {
       plannerModelOverride: options.plannerModelOverride || null
     },
     speedMode: speedModeFlags,
+    forceWorkerTier: options.forceWorkerTier || null,
     executionEngineOverride: (options.executionEngineOverride === 'stepwise' || options.executionEngineOverride === 'legacy')
       ? options.executionEngineOverride
       : null,
@@ -1442,7 +1443,8 @@ function buildTurnExecutionContext(turn) {
     recentSheets: conversationMemory.getRecentSheets(),
     lastModelState: conversationMemory.getLastModelState(),
     parentResults,
-    parentPlan
+    parentPlan,
+    forceWorkerTier: turn.forceWorkerTier || null
   };
 }
 

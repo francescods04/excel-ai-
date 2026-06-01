@@ -20,7 +20,7 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     assert.strictEqual(r.applied, 3);
     assert.strictEqual(r.actions.length, 3);
     assert.deepStrictEqual(r.sheets.sort(), ['Assumptions', 'Debt Schedule', 'Sources & Uses'].sort());
-    assert.strictEqual(r.cellsTotal, 4);
+    assert.strictEqual(r.cellsTotal, 8);
     assert.strictEqual(r.actions[0].type, 'setCellRange');
     assert.strictEqual(r.actions[0].sheet, 'Assumptions');
     assert.strictEqual(r.actions[1].copyToRange, 'A2:A5');
@@ -64,6 +64,27 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     const r2 = await executeAgentTool('bulk_set_cell_ranges', {}, { messages: [], iteration: 0 }, null);
     assert.match(r2.error, /non-empty/);
     console.log('OK bulk_set_cell_ranges rejects empty / missing writes');
+  }
+
+  // 4b) Dense write payloads are still capped, but the cap allows sub-1000 row tables.
+  {
+    const cells = Object.fromEntries(Array.from({ length: 1201 }, (_, i) => [`A${i + 1}`, { value: i + 1 }]));
+    const r = await executeAgentTool('set_cell_range', { sheet: 'X', cells }, { messages: [], iteration: 0 }, null);
+    assert.match(r.error, /too many explicit cell entries/);
+    console.log('OK set_cell_range rejects huge literal cell maps');
+  }
+
+  // 4c) Large bulk writes are bounded so Excel receives incremental batches
+  {
+    const writes = [
+      { sheet: 'X', cells: { A1: { formula: '=ROW()' } }, copyToRange: 'A1:A8000' },
+      { sheet: 'X', cells: { B1: { formula: '=ROW()' } }, copyToRange: 'B1:B8000' }
+    ];
+    const r = await executeAgentTool('bulk_set_cell_ranges', { writes }, { messages: [], iteration: 0 }, null);
+    assert.strictEqual(r.ok, true, 'first write should still be accepted');
+    assert.strictEqual(r.applied, 1, 'second write should be deferred/rejected from this batch');
+    assert.match(r.errors[0].reason, /exceed max/);
+    console.log('OK bulk_set_cell_ranges enforces aggregate cell cap');
   }
 
   // 5) bulk_set_format emits N setCellFormat actions
@@ -241,6 +262,23 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     console.log('OK bulk_set_format error reports the unknown keys the LLM passed');
   }
 
+  // 10e) Formatting guards reject unbounded or oversized targets that can freeze Excel
+  {
+    const unbounded = await executeAgentTool('set_format', {
+      sheet: 'X',
+      target: 'A:J',
+      options: { backgroundColor: '#FFFFFF' }
+    }, { messages: [], iteration: 0 }, null);
+    assert.match(unbounded.error, /unbounded format target/);
+
+    const tooWide = await executeAgentTool('bulk_set_format', {
+      formats: [{ sheet: 'X', target: 'A1:Z1000', options: { backgroundColor: '#FFFFFF' } }]
+    }, { messages: [], iteration: 0 }, null);
+    assert.match(tooWide.error, /no valid formats/);
+    assert.match(tooWide.errors[0].reason, /covers 26000 cells/);
+    console.log('OK format guards reject unbounded and oversized targets');
+  }
+
   // 11) bulk_set_notes fans many notes into ONE setNotes action; sheet defaults to active
   {
     const r = await executeAgentTool(
@@ -357,6 +395,80 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     assert.strictEqual(r.actions.length, 1);
     assert.strictEqual(r.actions[0].copyToRange, 'F3:J6');
     console.log('OK set_cell_range still accepts copyToRange when source has a formula');
+  }
+
+  // 18) copyToRange can be narrowed to formula columns when a label leads the row
+  {
+    const r = await executeAgentTool(
+      'set_cell_range',
+      {
+        sheet: 'Per Floor Detail',
+        cells: {
+          A2: { value: 'Piano 1' },
+          B2: { formula: '=ROW()-1' },
+          C2: { formula: '=B2*1000' }
+        },
+        copyToRange: 'A2:C11'
+      },
+      { messages: [], iteration: 0 },
+      null
+    );
+    assert.strictEqual(r.actions.length, 2);
+    assert.deepStrictEqual(Object.keys(r.actions[0].cells), ['A2']);
+    assert.strictEqual(r.actions[0].copyToRange, undefined);
+    assert.deepStrictEqual(Object.keys(r.actions[1].cells), ['B2', 'C2']);
+    assert.strictEqual(r.actions[1].copyToRange, 'B2:C11');
+    assert.match(r._message, /Adjusted copyToRange/);
+    console.log('OK set_cell_range splits labels from narrowed formula copyToRange');
+  }
+
+  // 19) copyToRange splits header rows from same-column formula seeds
+  {
+    const r = await executeAgentTool(
+      'set_cell_range',
+      {
+        sheet: 'RevenueSchedule',
+        cells: {
+          A1: { value: 'Mese' },
+          B1: { value: 'Piano' },
+          C1: { value: 'Ricavo' },
+          A2: { formula: '=INT((ROW()-2)/10)+1' },
+          B2: { formula: '=MOD(ROW()-2,10)+1' },
+          C2: { formula: '=Assumptions!$B$5*B2' }
+        },
+        copyToRange: 'A3:C601'
+      },
+      { messages: [], iteration: 0 },
+      null
+    );
+    assert.strictEqual(r.actions.length, 2);
+    assert.deepStrictEqual(Object.keys(r.actions[0].cells), ['A1', 'B1', 'C1']);
+    assert.strictEqual(r.actions[0].copyToRange, undefined);
+    assert.deepStrictEqual(Object.keys(r.actions[1].cells), ['A2', 'B2', 'C2']);
+    assert.strictEqual(r.actions[1].copyToRange, 'A3:C601');
+    assert.match(r._message, /Split static labels/);
+    console.log('OK set_cell_range splits header labels from same-column formula copyToRange');
+  }
+
+  // 20) history-summary-shaped cell maps are rejected before reaching the Excel writer
+  {
+    const r = await executeAgentTool(
+      'set_cell_range',
+      {
+        sheet: 'PnL',
+        cells: {
+          cellCount: 4,
+          formulas: 0,
+          values: 4,
+          sample: [{ addr: 'A1', value: 'Header' }]
+        }
+      },
+      { messages: [], iteration: 0 },
+      null
+    );
+    assert.match(r.error, /invalid cell key\(s\).*cellCount/);
+    assert.match(r.error, /do not pass history summaries/i);
+    console.log('OK set_cell_range rejects compacted history summaries as cell maps');
   }
 
   console.log('\nbulk write + format tests completed.');

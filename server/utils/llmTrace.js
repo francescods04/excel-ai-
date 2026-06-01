@@ -6,6 +6,9 @@ const logger = require('./logger');
 const TRACE_DIR = process.env.LLM_TRACE_DIR || path.join(__dirname, '..', '..', 'data', 'llm-traces');
 const TRACE_ENABLED = process.env.LLM_TRACE_ENABLED !== 'false';
 const TRACE_CAPTURE_CONTENT = process.env.LLM_TRACE_CAPTURE_CONTENT !== 'false';
+// Persist every LLM Q/A to Supabase so prod (Vercel ephemeral fs) survives cold-starts.
+// Set LLM_TRACE_SUPABASE=false to disable.
+const TRACE_SUPABASE_ENABLED = process.env.LLM_TRACE_SUPABASE !== 'false';
 const TRACE_MAX_STRING_CHARS = Math.max(500, Number(process.env.LLM_TRACE_MAX_STRING_CHARS) || 50000);
 const TRACE_MAX_ARRAY_ITEMS = Math.max(10, Number(process.env.LLM_TRACE_MAX_ARRAY_ITEMS) || 200);
 const TRACE_MAX_OBJECT_KEYS = Math.max(10, Number(process.env.LLM_TRACE_MAX_OBJECT_KEYS) || 200);
@@ -125,13 +128,64 @@ function writeLlmTrace(record = {}) {
   if (record.extra !== undefined) payload.extra = sanitizeValue(record.extra);
   if (record.context !== undefined) payload.context = sanitizeValue(record.context);
 
+  let fsOk = false;
   try {
     fs.appendFileSync(getTraceFileName(payload.ts), JSON.stringify(payload) + '\n');
-    return true;
+    fsOk = true;
   } catch (error) {
-    logger.warn(`[LLMTrace] Cannot write trace: ${error.message}`);
-    return false;
+    // Vercel: fs is read-only outside /tmp — fall through to Supabase
+    if (process.env.VERCEL !== '1' && process.env.NODE_ENV !== 'production') {
+      logger.warn(`[LLMTrace] Cannot write trace to fs: ${error.message}`);
+    }
   }
+
+  if (TRACE_SUPABASE_ENABLED) {
+    // Fire-and-forget — never block the LLM call path on DB write
+    writeTraceToSupabase(payload).catch(err => {
+      logger.warn(`[LLMTrace] Supabase write failed: ${err.message}`);
+    });
+  }
+
+  return fsOk || TRACE_SUPABASE_ENABLED;
+}
+
+async function writeTraceToSupabase(payload) {
+  let getSupabase;
+  try { getSupabase = require('../supabase/client').getSupabase; }
+  catch { return; }
+  let client;
+  try { client = getSupabase(); }
+  catch { return; }
+
+  const row = {
+    ts: payload.ts || new Date().toISOString(),
+    turn_id: payload.turnId || null,
+    trace_id: payload.traceId || null,
+    parent_turn_id: payload.parentTurnId || null,
+    user_id: payload.userId || null,
+    event_type: payload.eventType || 'unknown',
+    label: payload.label || null,
+    role: payload.role || null,
+    phase: payload.phase || null,
+    provider: payload.provider || null,
+    model: payload.model || null,
+    attempt: payload.attempt || 'primary',
+    workflow: payload.workflow || null,
+    source: payload.source || null,
+    latency_ms: Number.isFinite(payload.latencyMs) ? payload.latencyMs : null,
+    prompt_tokens: payload.usage?.prompt_tokens ?? null,
+    completion_tokens: payload.usage?.completion_tokens ?? null,
+    json_mode: typeof payload.jsonMode === 'boolean' ? payload.jsonMode : null,
+    message_summary: payload.messageSummary || null,
+    messages: payload.messages || null,
+    response_text: typeof payload.responseText === 'string' ? payload.responseText : null,
+    response_json: payload.response && typeof payload.response === 'object' ? payload.response : null,
+    error_json: payload.error && typeof payload.error === 'object' ? payload.error : (payload.error ? { message: String(payload.error) } : null),
+    extra_json: payload.extra || null,
+    context_json: payload.context || null,
+  };
+
+  await client.from('llm_traces').insert(row);
 }
 
 function listTraceFiles() {
@@ -215,6 +269,64 @@ function readLlmTraces(filters = {}) {
     }
   }
   return records;
+}
+
+// Async variant that reads from Supabase first (durable on Vercel) and falls
+// back to local fs. Used by /api/admin/llm-traces in prod.
+async function readLlmTracesAsync(filters = {}) {
+  const limit = Math.max(1, Number(filters.limit) || 100);
+  let getSupabase;
+  try { getSupabase = require('../supabase/client').getSupabase; }
+  catch { return readLlmTraces(filters); }
+  let client;
+  try { client = getSupabase(); }
+  catch { return readLlmTraces(filters); }
+
+  let q = client.from('llm_traces').select('*').order('ts', { ascending: filters.descending === false }).limit(limit);
+  if (filters.turnId) q = q.eq('turn_id', filters.turnId);
+  if (filters.traceId) q = q.eq('trace_id', filters.traceId);
+  if (filters.eventType) q = q.eq('event_type', filters.eventType);
+  if (filters.label) q = q.eq('label', filters.label);
+  if (filters.role) q = q.eq('role', filters.role);
+  if (filters.attempt) q = q.eq('attempt', filters.attempt);
+  if (filters.provider) q = q.eq('provider', filters.provider);
+  if (filters.model) q = q.eq('model', filters.model);
+  if (filters.sinceMs) q = q.gte('ts', new Date(filters.sinceMs).toISOString());
+
+  const { data, error } = await q;
+  if (error) {
+    logger.warn(`[LLMTrace] Supabase read failed: ${error.message}; falling back to fs`);
+    return readLlmTraces(filters);
+  }
+  if (!data || data.length === 0) return readLlmTraces(filters);
+
+  // Normalize Supabase rows back to the legacy fs record shape
+  return data.map(r => ({
+    ts: r.ts,
+    turnId: r.turn_id,
+    traceId: r.trace_id,
+    parentTurnId: r.parent_turn_id,
+    userId: r.user_id,
+    eventType: r.event_type,
+    label: r.label,
+    role: r.role,
+    phase: r.phase,
+    provider: r.provider,
+    model: r.model,
+    attempt: r.attempt,
+    workflow: r.workflow,
+    source: r.source,
+    latencyMs: r.latency_ms,
+    usage: { prompt_tokens: r.prompt_tokens, completion_tokens: r.completion_tokens },
+    jsonMode: r.json_mode,
+    messageSummary: r.message_summary,
+    messages: r.messages,
+    responseText: r.response_text,
+    response: r.response_json,
+    error: r.error_json,
+    extra: r.extra_json,
+    context: r.context_json,
+  }));
 }
 
 function summarizeLlmTraces(filters = {}) {
@@ -306,8 +418,10 @@ module.exports = {
   TRACE_DIR,
   TRACE_ENABLED,
   TRACE_CAPTURE_CONTENT,
+  TRACE_SUPABASE_ENABLED,
   makeTraceId,
   writeLlmTrace,
   readLlmTraces,
+  readLlmTracesAsync,
   summarizeLlmTraces,
 };

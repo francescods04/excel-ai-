@@ -25,7 +25,7 @@ Given a user objective and the current workbook state, decide:
    - "trivial"        — single-cell edit, formula tweak, format change (<5 actions)
    - "moderate"       — single-sheet build, ~1 section (~5-15 actions)
    - "complex"        — multi-sheet work, cross-sheet refs, multiple sections (~15-40 actions)
-   - "institutional"  — full models (DCF, LBO, 3-statement, comps, M&A), multi-sheet with circular/sequential deps (~40+ actions)
+   - "institutional"  — full models (DCF, LBO, 3-statement, comps, M&A, real-estate development / project-finance pro formas), multi-sheet with circular/sequential deps (~40+ actions)
 
 2. parallelizable: true when the work decomposes naturally into independent sheet/section slices
    that can be built concurrently without conceptual conflicts. False for tightly coupled work
@@ -159,14 +159,27 @@ function extractScaleHints(objective) {
   const text = String(objective || '');
   const hints = {
     rowsRequested: null,
+    rowsPerSheetRequested: null,
     periods: null,
     periodGranularity: null,
     units: null,
     detailLevel: null
   };
 
+  const rowsPerSheetPatterns = [
+    /(?:ogni|ciascun[oa]?|per)\s+(?:foglio|sheet)\D{0,40}?(\d{2,5})\s*(?:rig?h?[ae]|rows?|linee?|voci|line[- ]?items?)\b/i,
+    /(\d{2,5})\s*(?:rig?h?[ae]|rows?|linee?|voci|line[- ]?items?)\s*(?:per|ogni|each)\s+(?:foglio|sheet)\b/i
+  ];
+  for (const re of rowsPerSheetPatterns) {
+    const match = text.match(re);
+    if (match) {
+      hints.rowsPerSheetRequested = Number(match[1]);
+      break;
+    }
+  }
+
   const rowMatch = text.match(/(\d{2,5})\s*(?:rig?h?[ae]|rows?|linee?|voci|line[- ]?items?)\b/i);
-  if (rowMatch) hints.rowsRequested = Number(rowMatch[1]);
+  if (rowMatch && hints.rowsPerSheetRequested == null) hints.rowsRequested = Number(rowMatch[1]);
 
   const monthMatch = text.match(/(\d{1,3})\s*(?:mesi|months?)\b/i);
   const yearMatch = text.match(/(\d{1,2})\s*(?:anni|years?)\b/i);
@@ -203,7 +216,7 @@ function extractScaleHints(objective) {
     hints.detailLevel = 'high';
   }
 
-  if (hints.rowsRequested == null) {
+  if (hints.rowsRequested == null && hints.rowsPerSheetRequested == null) {
     let inferred = 0;
     if (hints.periods && hints.units) inferred = hints.periods * hints.units;
     else if (hints.periods) inferred = hints.periods * 10;
@@ -214,10 +227,19 @@ function extractScaleHints(objective) {
   return hints;
 }
 
+function shouldForceArchitectMode(objective, scale) {
+  const text = String(objective || '');
+  const realEstate = /\b(immobiliare|real estate|development|progetto immobiliare|costruzione|construction|palazzo|building|finanziament|loan|mutuo)\b/i.test(text);
+  const largeRows = (scale.rowsPerSheetRequested || 0) >= 500 || (scale.rowsRequested || 0) >= 800;
+  const detailedModel = scale.detailLevel === 'high' && ((scale.rowsRequested || 0) >= 500 || realEstate);
+  const multiUnitRealEstate = realEstate && ((scale.units || 0) >= 5 || /costi|ricavi|finanziament|sensitivity|scenar/i.test(text));
+  return largeRows || detailedModel || multiUnitRealEstate;
+}
+
 function validateTriageDecision(decision, objective) {
-  const complexity = VALID_COMPLEXITY.has(decision.complexity) ? decision.complexity : 'moderate';
+  let complexity = VALID_COMPLEXITY.has(decision.complexity) ? decision.complexity : 'moderate';
   let mode = VALID_MODE.has(decision.mode) ? decision.mode : 'single_agent';
-  const parallelizable = decision.parallelizable === true;
+  let parallelizable = decision.parallelizable === true;
   let estimated = Number(decision.estimated_iterations);
   if (!Number.isFinite(estimated) || estimated <= 0) {
     estimated = complexity === 'institutional' ? 50 : (complexity === 'complex' ? 25 : (complexity === 'moderate' ? 10 : 4));
@@ -232,6 +254,13 @@ function validateTriageDecision(decision, objective) {
   if (complexity === 'trivial' && mode !== 'single_agent') {
     mode = 'single_agent';
   }
+  const scaleHints = extractScaleHints(objective);
+  if (shouldForceArchitectMode(objective, scaleHints)) {
+    complexity = 'institutional';
+    parallelizable = true;
+    mode = 'architect_then_parallel';
+    estimated = Math.max(estimated, 60);
+  }
 
   return {
     complexity,
@@ -240,12 +269,26 @@ function validateTriageDecision(decision, objective) {
     estimated_iterations: estimated,
     reasoning: String(decision.reasoning || '').slice(0, 400) || `Auto-classified as ${complexity}.`,
     objective_excerpt: String(objective).slice(0, 200),
-    scale_hints: extractScaleHints(objective)
+    scale_hints: scaleHints
   };
 }
 
 function buildSafeFallback(objective, latencyMs, errorTag) {
-  // No LLM available / parse failed. Be conservative: use moderate single_agent which is what the system did before.
+  const scaleHints = extractScaleHints(objective);
+  if (shouldForceArchitectMode(objective, scaleHints)) {
+    return {
+      complexity: 'institutional',
+      parallelizable: true,
+      mode: 'architect_then_parallel',
+      estimated_iterations: 70,
+      reasoning: `Fallback: triage LLM unavailable (${errorTag}); large-scale workbook build routed to architect mode.`,
+      objective_excerpt: String(objective).slice(0, 200),
+      scale_hints: scaleHints,
+      _meta: { latencyMs, model: null, raw: null, fallback: true, errorTag }
+    };
+  }
+  // No LLM available / parse failed. Be conservative for small edits, but large
+  // workbook builds are handled above.
   return {
     complexity: 'moderate',
     parallelizable: false,
@@ -253,7 +296,7 @@ function buildSafeFallback(objective, latencyMs, errorTag) {
     estimated_iterations: 15,
     reasoning: `Fallback: triage LLM unavailable (${errorTag}); defaulting to single_agent loop.`,
     objective_excerpt: String(objective).slice(0, 200),
-    scale_hints: extractScaleHints(objective),
+    scale_hints: scaleHints,
     _meta: { latencyMs, model: null, raw: null, fallback: true, errorTag }
   };
 }

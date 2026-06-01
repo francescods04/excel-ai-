@@ -99,6 +99,12 @@ async function main() {
     assert.throws(() => assertActionBatchWithinLimits(actions, { id: 't10' }), /troppe celle Excel/);
   });
 
+  await test('action safety counts format target cell volume', () => {
+    const actions = [{ type: 'setCellFormat', sheet: 'Sheet1', target: `A1:A${LIMITS.maxActionCellsPerBatch + 1}`, options: { bold: true } }];
+    assert.strictEqual(estimateActionBatchCells(actions), LIMITS.maxActionCellsPerBatch + 1);
+    assert.throws(() => assertActionBatchWithinLimits(actions, { id: 't11' }), /troppe celle Excel/);
+  });
+
   await test('turn router prefers fast agent loop for local workbook continuation', () => {
     const strategy = chooseTurnStrategy('analizza questo excel e completalo', {
       activeSheet: 'DCF',

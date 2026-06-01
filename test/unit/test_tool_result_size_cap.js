@@ -1,6 +1,7 @@
 const assert = require('assert');
 const {
   formatToolResultForMessages,
+  compactToolParamsForHistory,
   trimDeepArrays,
   compactMessagesToSummary,
   shouldAutoCompactMessages
@@ -120,6 +121,64 @@ const {
     assert.strictEqual(largeHistoryDecision.shouldCompact, true, 'large history compacts by char threshold');
     assert.strictEqual(largeHistoryDecision.reason, 'char_count');
     console.log('OK auto-compaction is size-aware and keeps message-count limit opt-in');
+  }
+
+  // 9) Large write params are summarized before entering assistant history
+  {
+    const cells = {};
+    for (let i = 1; i <= 500; i++) {
+      cells[`A${i}`] = { formula: `=SUM(B${i}:Z${i})`, value: i };
+    }
+    const compact = compactToolParamsForHistory('set_cell_range', {
+      sheet: 'Dense',
+      cells,
+      copyToRange: 'A1:Z1000'
+    });
+    const serialized = JSON.stringify(compact);
+    assert.strictEqual(compact.sheet, 'Dense');
+    assert.strictEqual(compact.cells, undefined, 'dense history must not expose fake cells params');
+    assert.strictEqual(compact.cellsOmitted, true);
+    assert.strictEqual(compact.cellsSummary.cellCount, 500);
+    assert.strictEqual(compact.cellsSummary.sample.length, 8);
+    assert.ok(serialized.length < 2500, `history params should stay compact, got ${serialized.length}`);
+    assert.ok(!serialized.includes('A499'), 'tail cell payload omitted from prompt history');
+    console.log('OK dense write params are summarized for agent history');
+  }
+
+  // 10) Small writes keep real cell params so the model does not learn fake summary shapes
+  {
+    const compact = compactToolParamsForHistory('set_cell_range', {
+      sheet: 'RevenueSchedule',
+      cells: {
+        A1: { value: 'Mese' },
+        A2: { formula: '=ROW()-1' },
+        B1: { value: 'Ricavo' },
+        B2: { formula: '=Assumptions!$B$5' }
+      },
+      copyToRange: 'A3:B601'
+    });
+    assert.ok(compact.cells.A2.formula, 'small write should preserve actual formula cells');
+    assert.strictEqual(compact.cellsSummary, undefined);
+    console.log('OK small write params remain reusable in agent history');
+  }
+
+  // 11) Bulk writes preserve per-sheet/range intent without carrying full payloads
+  {
+    const writes = Array.from({ length: 40 }, (_, i) => ({
+      sheet: `S${i}`,
+      cells: Object.fromEntries(Array.from({ length: 120 }, (_, row) => [
+        `A${row + 1}`,
+        row === 0 ? { value: 'Header' } : { formula: `=B${row + 1}*${i + 1}` }
+      ])),
+      copyToRange: `B2:B${100 + i}`
+    }));
+    const compact = compactToolParamsForHistory('bulk_set_cell_ranges', { writes });
+    assert.strictEqual(compact.writeCount, 40);
+    assert.strictEqual(compact.writes.length, 16);
+    assert.strictEqual(compact.truncatedWrites, 24);
+    assert.strictEqual(compact.writes[0].cells, undefined, 'dense bulk entries must not expose fake cells params');
+    assert.strictEqual(compact.writes[0].cellsSummary.cellCount, 120);
+    console.log('OK bulk write params keep intent and cap history size');
   }
 
   console.log('\ntool result size cap tests completed.');

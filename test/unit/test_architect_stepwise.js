@@ -192,6 +192,73 @@ async function testActionsTakePriorityOverReads() {
   console.log('OK architect stepwise applies writes before serving parallel read requests');
 }
 
+async function testDenseMaterialWriteAutoCompletesSlice() {
+  const state = initArchitectRun(blueprint([
+    {
+      id: 'dense',
+      title: 'Dense Schedule',
+      deps: [],
+      scope: { sheets_owned: ['Dense'], ranges_owned: ['Dense!A1:G1005'], may_read_from: [] },
+      instructions: 'Build dense schedule with copyToRange.',
+      estimated_iters: 12
+    },
+    {
+      id: 'final',
+      title: 'Format and Verify',
+      deps: ['dense'],
+      scope: { sheets_owned: [], ranges_owned: [], may_read_from: [] },
+      instructions: 'Verify.',
+      estimated_iters: 3
+    }
+  ]));
+  const mock = makeStepMock((agent) => {
+    if (agent.sliceId === 'dense') {
+      return {
+        state: { ...agent, status: 'running', iteration: agent.iteration + 1 },
+        control: 'emit_actions',
+        payload: {
+          actions: [
+            {
+              type: 'setCellRange',
+              sheet: 'Dense',
+              cells: {
+                A1: { value: 'Dense Schedule' },
+                A6: { formula: '=ROW()-5' }
+              },
+              copyToRange: 'A6:G1005'
+            }
+          ]
+        }
+      };
+    }
+    return {
+      state: { ...agent, status: 'completed', summary: 'final done', iteration: agent.iteration + 1 },
+      control: 'done',
+      payload: { summary: 'final done' }
+    };
+  });
+
+  const first = await advanceArchitectRun(state, {
+    context: {},
+    initAgentRunFn: initAgentRunMock,
+    runAgentStepFn: mock.runAgentStepFn,
+    maxParallel: 1
+  });
+  assert.strictEqual(first.control, 'emit_actions');
+  assert.strictEqual(first.state.sliceStates.dense, 'succeeded');
+  assert.strictEqual(first.state.sliceResults.dense.status, 'completed_after_material_write');
+  assert.ok(first.state.sliceResults.dense.cells >= 800);
+
+  const second = await advanceArchitectRun(state, {
+    context: {},
+    initAgentRunFn: initAgentRunMock,
+    runAgentStepFn: mock.runAgentStepFn,
+    maxParallel: 1
+  });
+  assert.strictEqual(second.control, 'done');
+  console.log('OK dense material writes auto-complete slice without waiting for ceremonial done');
+}
+
 async function testSliceWorkerPromptForcesReadBeforeWriteAndBansOfficeJs() {
   const bp = blueprint([
     { id: 'a',  title: 'A', deps: [], scope: { sheets_owned: ['A'], may_read_from: [] }, instructions: 'Build A', estimated_iters: 4 },
@@ -212,6 +279,8 @@ async function testSliceWorkerPromptForcesReadBeforeWriteAndBansOfficeJs() {
 }
 
 async function testDeterministicSliceActionsBypassWorkerLlm() {
+  const prev = process.env.ALLOW_DETERMINISTIC_SLICES;
+  process.env.ALLOW_DETERMINISTIC_SLICES = 'true';
   const state = initArchitectRun(blueprint([
     {
       id: 'det',
@@ -233,6 +302,8 @@ async function testDeterministicSliceActionsBypassWorkerLlm() {
       ]
     }
   ]));
+  if (prev === undefined) delete process.env.ALLOW_DETERMINISTIC_SLICES;
+  else process.env.ALLOW_DETERMINISTIC_SLICES = prev;
 
   const first = await advanceArchitectRun(state, {
     context: {},
@@ -287,6 +358,7 @@ async function testLegacySliceWithoutActionsUsesWorkerLlm() {
   await testParallelRootsThenFinal();
   await testMultiSliceClientReadBatch();
   await testActionsTakePriorityOverReads();
+  await testDenseMaterialWriteAutoCompletesSlice();
   await testSliceWorkerPromptForcesReadBeforeWriteAndBansOfficeJs();
   await testDeterministicSliceActionsBypassWorkerLlm();
   await testLegacySliceWithoutActionsUsesWorkerLlm();

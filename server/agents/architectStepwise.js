@@ -12,6 +12,7 @@
 
 const { initAgentRun, runAgentStep, executeAgentTool } = require('./agentLoop');
 const { buildSliceWorkerPrompt } = require('./architect');
+const { estimateActionCells } = require('../runtime/safetyLimits');
 
 // Bumped from 4 → 6: typical blueprints have 5-8 build slices in their first wave,
 // and 4 forced them into two sequential LLM batches. Six fits the common 5-7 slice
@@ -39,6 +40,7 @@ function initArchitectRun(blueprint) {
     sliceResults: {},
     sliceAgents: {},
     sliceWriteCounts: {},
+    sliceWriteCells: {},
     pendingBatch: null,
     roundIndex: 0,
     startedAt: null,
@@ -68,6 +70,7 @@ function ensureArchitectRun(state) {
   if (!state.sliceResults) state.sliceResults = {};
   if (!state.sliceAgents) state.sliceAgents = {};
   if (!state.sliceWriteCounts) state.sliceWriteCounts = {};
+  if (!state.sliceWriteCells) state.sliceWriteCells = {};
   if (!state.metrics) state.metrics = {};
   state.metrics.llmRoundTrips = Number(state.metrics.llmRoundTrips || 0);
   state.metrics.sliceStepCalls = Number(state.metrics.sliceStepCalls || 0);
@@ -77,6 +80,124 @@ function ensureArchitectRun(state) {
   state.metrics.peakActiveSlices = Number(state.metrics.peakActiveSlices || 0);
   state.metrics.deterministicSlices = Number(state.metrics.deterministicSlices || 0);
   return state;
+}
+
+function estimateMaterialWriteCells(actions = []) {
+  let total = 0;
+  for (const action of actions) {
+    if (!action || typeof action !== 'object') continue;
+    if (action.type === 'setCellFormat' || action.type === 'addConditionalFormat' || action.type === 'setConditionalFormat') {
+      continue;
+    }
+    const n = estimateActionCells(action);
+    if (Number.isFinite(n)) total += n;
+  }
+  return total;
+}
+
+function canAcceptMaxIterationSlice(state, sliceId, errorMsg) {
+  if (!/Reached max iterations/i.test(String(errorMsg || ''))) return false;
+  const actions = Number(state.sliceWriteCounts?.[sliceId] || 0);
+  const cells = Number(state.sliceWriteCells?.[sliceId] || 0);
+  const minActions = Math.max(1, Number(process.env.SLICE_MAX_ITER_ACCEPT_MIN_ACTIONS) || 12);
+  const minCells = Math.max(1, Number(process.env.SLICE_MAX_ITER_ACCEPT_MIN_CELLS) || 100);
+  return actions >= minActions || cells >= minCells;
+}
+
+function rangeMaxRow(rangeText) {
+  const raw = String(rangeText || '').replace(/\$/g, '').trim();
+  const target = raw.includes('!') ? raw.split('!').pop() : raw;
+  const match = target.match(/^[A-Z]+(\d+)(?::[A-Z]+(\d+))?$/i);
+  if (!match) return 0;
+  return Math.max(Number(match[1]) || 0, Number(match[2]) || Number(match[1]) || 0);
+}
+
+function isFinalOrReadOnlySlice(slice) {
+  const id = String(slice?.id || '').toLowerCase();
+  const title = String(slice?.title || '').toLowerCase();
+  if (/format.*verify|verify.*format|finali[sz]e|audit|review/.test(`${id} ${title}`)) return true;
+  const scope = slice?.scope || {};
+  return (!scope.sheets_owned || scope.sheets_owned.length === 0) &&
+    (!scope.ranges_owned || scope.ranges_owned.length === 0);
+}
+
+function isAssumptionLikeSlice(slice) {
+  const text = [
+    slice?.id,
+    slice?.title,
+    ...(slice?.scope?.sheets_owned || [])
+  ].join(' ').toLowerCase();
+  return /assumptions?|inputs?|drivers?/.test(text);
+}
+
+function canAutoCompleteMaterialSlice(state, sliceId) {
+  if (process.env.SLICE_AUTO_COMPLETE_MATERIAL_WRITES === 'false') return false;
+  const slice = sliceById(state, sliceId);
+  if (!slice || isFinalOrReadOnlySlice(slice)) return false;
+  const actions = Number(state.sliceWriteCounts?.[sliceId] || 0);
+  const cells = Number(state.sliceWriteCells?.[sliceId] || 0);
+  if (actions < 1 || cells < 1) return false;
+
+  if (isAssumptionLikeSlice(slice)) {
+    const minAssumptionCells = Math.max(20, Number(process.env.SLICE_AUTO_COMPLETE_ASSUMPTION_MIN_CELLS) || 120);
+    return cells >= minAssumptionCells;
+  }
+
+  const ownedMaxRow = Math.max(0, ...((slice.scope?.ranges_owned || []).map(rangeMaxRow)));
+  const denseByScope = ownedMaxRow >= 500;
+  const denseByInstructions = /1000|dense|copyToRange|formula[- ]?copy|schedule|schedul/i.test(String(slice.instructions || ''));
+  if (!denseByScope && !denseByInstructions) return false;
+  const minDenseCells = Math.max(100, Number(process.env.SLICE_AUTO_COMPLETE_DENSE_MIN_CELLS) || 500);
+  return cells >= minDenseCells;
+}
+
+function autoCompleteMaterialSlice(state, sliceId, onEvent = () => {}) {
+  const slice = sliceById(state, sliceId) || { title: sliceId };
+  const writes = state.sliceWriteCounts[sliceId] || 0;
+  const cells = state.sliceWriteCells[sliceId] || 0;
+  const agent = state.sliceAgents[sliceId] || {};
+  state.sliceStates[sliceId] = 'succeeded';
+  state.sliceResults[sliceId] = {
+    ok: true,
+    status: 'completed_after_material_write',
+    summary: `${slice.title} wrote ${writes} material action(s) covering ~${cells} cells; completed early after sufficient generated workbook content.`,
+    iteration: agent.iteration || 0,
+    writes,
+    cells,
+    autoCompleted: true
+  };
+  delete state.sliceAgents[sliceId];
+  onEvent('sliceCompleted', {
+    sliceId,
+    status: 'completed_after_material_write',
+    summary: state.sliceResults[sliceId].summary,
+    iteration: state.sliceResults[sliceId].iteration,
+    elapsedMs: null
+  });
+}
+
+function acceptMaxIterationSlice(state, sliceId, result, onEvent = () => {}) {
+  const slice = sliceById(state, sliceId) || { title: sliceId };
+  const writes = state.sliceWriteCounts[sliceId] || 0;
+  const cells = state.sliceWriteCells[sliceId] || 0;
+  state.sliceStates[sliceId] = 'succeeded';
+  state.sliceResults[sliceId] = {
+    ok: true,
+    status: 'completed_max_iterations',
+    summary: `${slice.title} wrote ${writes} action(s) covering ~${cells} cells; accepted after max iterations because the worker omitted done.`,
+    iteration: result.state?.iteration || 0,
+    writes,
+    cells,
+    maxIterationAccepted: true
+  };
+  delete state.sliceAgents[sliceId];
+  onEvent('sliceCompleted', {
+    sliceId,
+    status: 'completed_max_iterations',
+    summary: state.sliceResults[sliceId].summary,
+    iteration: state.sliceResults[sliceId].iteration,
+    elapsedMs: null
+  });
 }
 
 function computeArchitectSummary(state) {
@@ -233,7 +354,7 @@ function hasDeterministicActions(slice) {
 function recoverDeterministicSliceAsLLMWorker(state, slice, context, originalError, onEvent) {
   try {
     const userObjective = context.userObjective || context.objective || '';
-    const sliceTier = slice.tier === 'flash' ? 'flash' : 'pro';
+    const sliceTier = context.forceWorkerTier || (slice.tier === 'pro' ? 'pro' : 'flash');
     const slicePrompt = buildSliceWorkerPrompt(slice, state.blueprint, userObjective);
     const sliceObjective = `${slice.title}\n\n${slice.instructions || ''}`;
     const workerContext = { ...context, _sliceId: slice.id, _sliceScope: slice.scope };
@@ -336,7 +457,7 @@ function initReadySlices(state, {
       });
       continue;
     }
-    const sliceTier = slice.tier === 'flash' ? 'flash' : 'pro';
+    const sliceTier = context.forceWorkerTier || (slice.tier === 'pro' ? 'pro' : 'flash');
     const slicePrompt = buildSliceWorkerPrompt(slice, state.blueprint, userObjective);
     let sliceInstructions = slice.instructions;
     const isRetry = state.sliceStates[slice.id] === 'retrying';
@@ -392,6 +513,7 @@ function retryFailedSlice(state, sliceId, status, errorMsg, onEvent = () => {}) 
     error: errorMsg,
     iteration: (state.sliceAgents[sliceId] && state.sliceAgents[sliceId].iteration) || 0,
     writes: state.sliceWriteCounts[sliceId] || 0,
+    cells: state.sliceWriteCells?.[sliceId] || 0,
     retry: retriesUsed + 1
   };
   delete state.sliceAgents[sliceId];
@@ -414,6 +536,10 @@ function ingestSliceStep(state, sliceId, result, sinks, onEvent = () => {}) {
     if (actions.length > 0) {
       sinks.actions.push(...actions.map(action => ({ ...action, _sliceId: sliceId })));
       state.sliceWriteCounts[sliceId] = (state.sliceWriteCounts[sliceId] || 0) + actions.length;
+      state.sliceWriteCells[sliceId] = (state.sliceWriteCells[sliceId] || 0) + estimateMaterialWriteCells(actions);
+    }
+    if (canAutoCompleteMaterialSlice(state, sliceId)) {
+      autoCompleteMaterialSlice(state, sliceId, onEvent);
     }
     return;
   }
@@ -458,7 +584,8 @@ function ingestSliceStep(state, sliceId, result, sinks, onEvent = () => {}) {
       status: 'completed',
       summary: result.payload?.summary || result.state.summary || `${slice.title} completed`,
       iteration: result.state.iteration || 0,
-      writes: state.sliceWriteCounts[sliceId] || 0
+      writes: state.sliceWriteCounts[sliceId] || 0,
+      cells: state.sliceWriteCells[sliceId] || 0
     };
     delete state.sliceAgents[sliceId];
     const autoFormatActions = Array.isArray(result.payload?.autoFormatActions) ? result.payload.autoFormatActions : [];
@@ -475,13 +602,19 @@ function ingestSliceStep(state, sliceId, result, sinks, onEvent = () => {}) {
 
   if (result.control === 'aborted') {
     const errorMsg = result.payload?.reason || result.state.abortReason || 'aborted';
+    if (canAcceptMaxIterationSlice(state, sliceId, errorMsg)) {
+      acceptMaxIterationSlice(state, sliceId, result, onEvent);
+      return;
+    }
     if (retryFailedSlice(state, sliceId, 'aborted', errorMsg, onEvent)) return;
     state.sliceStates[sliceId] = 'failed';
     state.sliceResults[sliceId] = {
       ok: false,
       status: 'aborted',
       error: errorMsg,
-      iteration: result.state.iteration || 0
+      iteration: result.state.iteration || 0,
+      writes: state.sliceWriteCounts[sliceId] || 0,
+      cells: state.sliceWriteCells[sliceId] || 0
     };
     delete state.sliceAgents[sliceId];
     onEvent('sliceFailed', {
@@ -578,6 +711,7 @@ async function advanceRunningSlices(state, {
       sinks.actions.push(...materialized.actions);
       state.metrics.deterministicSlices = Number(state.metrics.deterministicSlices || 0) + 1;
       state.sliceWriteCounts[sliceId] = materialized.actions.length;
+      state.sliceWriteCells[sliceId] = estimateMaterialWriteCells(materialized.actions);
       state.sliceStates[sliceId] = 'succeeded';
       state.sliceResults[sliceId] = {
         ok: true,
@@ -586,6 +720,7 @@ async function advanceRunningSlices(state, {
         summary: `${slice.title} emitted ${materialized.actions.length} deterministic action(s)`,
         iteration: 0,
         writes: materialized.actions.length,
+        cells: state.sliceWriteCells[sliceId] || 0,
         toolActions: slice.actions.length
       };
       delete state.sliceAgents[sliceId];

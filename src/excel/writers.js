@@ -79,10 +79,19 @@ async function processQueue(excelActionQueue, showActionsPreview, hideActionsPre
     queueProcessTimer = null;
   }
   isExecutingQueue = true;
+  let chunksProcessed = 0;
+  // Inter-chunk yield so Office.js context.sync settles before the next batch.
+  // Prevents the "Excel froze / crashed" pattern when parallel slice workers
+  // emit actions back-to-back faster than Office.js can apply them.
+  const INTER_CHUNK_YIELD_MS = Number(typeof window !== 'undefined' && window.EXCEL_INTER_CHUNK_YIELD_MS) || 80;
   try {
     while (excelActionQueue.length > 0) {
       const group = takeNextQueueGroup(excelActionQueue);
       if (!group || group.actions.length === 0) continue;
+      if (chunksProcessed > 0 && INTER_CHUNK_YIELD_MS > 0) {
+        await new Promise(r => setTimeout(r, INTER_CHUNK_YIELD_MS));
+      }
+      chunksProcessed += 1;
       try {
         showActionsPreview(group.actions);
         if (group.batches.length > 1) {
@@ -146,6 +155,7 @@ const SLOW_CHUNK_MS = 5000;
 const FAST_CHUNK_MS = 800;
 const UI_YIELD_MS = 16;
 const MAX_NATIVE_NOTE_ATTEMPTS_PER_BATCH = 8;
+const MAX_DIRECT_FORMAT_CELLS = 12000;
 const QUEUE_BATCH_KEY = '__excelQueueBatchKey';
 let adaptiveChunkCostLimit = BASE_EXCEL_CHUNK_COST;
 
@@ -1162,6 +1172,18 @@ async function execSetCellFormat(context, sheetCache, defaultSheet, action) {
   const range = sheet.getRange(target);
   const opts = action.options || {};
   const dims = dimsFromA1(target);
+  const estimatedCells = estimateTargetCells(target);
+  const formatKeys = Object.keys(opts || {});
+  const unboundedAllowed = formatKeys.length > 0 && formatKeys.every(k => ['columnWidth', 'rowHeight'].includes(k));
+
+  if (!Number.isFinite(estimatedCells) && !unboundedAllowed) {
+    addLog(`Formattazione saltata su ${target}: range non limitato (usa A1 finito, non colonne/righe intere).`, 'warn');
+    return;
+  }
+  if (Number.isFinite(estimatedCells) && estimatedCells > MAX_DIRECT_FORMAT_CELLS) {
+    addLog(`Formattazione saltata su ${target}: ${estimatedCells} celle supera il limite ${MAX_DIRECT_FORMAT_CELLS}. Dividi in blocchi piu piccoli.`, 'warn');
+    return;
+  }
 
   // numberFormat must be a matrix matching the range. When dims can't be derived
   // from the A1 address (named range or unbounded "A:A"), measure the range —

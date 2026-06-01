@@ -17,6 +17,7 @@
 const Ajv = require('ajv');
 const { callLLM } = require('../tools/llm');
 const { TOOL_DEFINITIONS } = require('./agentLoop');
+const { extractScaleHints } = require('./triage');
 const logger = require('../utils/logger');
 
 const ARCHITECT_ACTION_TOOLS = new Set([
@@ -33,6 +34,10 @@ const ARCHITECT_ACTION_TOOLS = new Set([
 
 const ACTION_ALLOWED_KEYS = new Set(['tool', 'params']);
 const ACTION_BANNED_PARAM_KEYS = new Set(['control', 'message', 'thought', 'payload']);
+const ARCHITECT_MAX_LITERAL_WRITE_KEYS = Math.max(50, Number(process.env.AGENT_MAX_LITERAL_WRITE_KEYS) || 1200);
+const ARCHITECT_MAX_WRITE_ACTION_CELLS = Math.max(1000, Number(process.env.AGENT_MAX_WRITE_ACTION_CELLS) || 12000);
+const ARCHITECT_MAX_BULK_WRITE_CELLS = Math.max(ARCHITECT_MAX_WRITE_ACTION_CELLS, Number(process.env.AGENT_MAX_BULK_WRITE_CELLS) || 12000);
+const ARCHITECT_MAX_FORMAT_TARGET_CELLS = Math.max(1000, Number(process.env.AGENT_MAX_FORMAT_TARGET_CELLS) || 12000);
 const actionAjv = new Ajv({ allErrors: true, strict: false, useDefaults: false, coerceTypes: false });
 const actionSchemaValidators = new Map();
 
@@ -59,26 +64,233 @@ function validateAgentToolParams(toolName, params) {
   return { ok: true, errors: [] };
 }
 
+function architectColToIndex(col) {
+  let n = 0;
+  for (const ch of String(col || '').toUpperCase()) n = n * 26 + (ch.charCodeAt(0) - 64);
+  return n;
+}
+
+function architectIndexToCol(index) {
+  let n = Number(index);
+  let s = '';
+  while (n > 0) {
+    const r = (n - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
+function parseA1Bounds(addr) {
+  if (typeof addr !== 'string') return null;
+  const raw = addr.replace(/\$/g, '').trim();
+  const withoutSheet = raw.includes('!') ? raw.split('!').pop() : raw;
+  if (!withoutSheet || withoutSheet.includes(',')) return null;
+  const m = withoutSheet.match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/i);
+  if (!m) return null;
+  const startCol = architectColToIndex(m[1]);
+  const startRow = Number(m[2]);
+  const endCol = m[3] ? architectColToIndex(m[3]) : startCol;
+  const endRow = m[4] ? Number(m[4]) : startRow;
+  return {
+    startCol: Math.min(startCol, endCol),
+    endCol: Math.max(startCol, endCol),
+    startRow: Math.min(startRow, endRow),
+    endRow: Math.max(startRow, endRow),
+  };
+}
+
+function getA1RangeStats(addr) {
+  if (typeof addr !== 'string') return { cells: 1, maxRow: null, bounded: true, valid: true };
+  const raw = addr.replace(/\$/g, '').trim();
+  const withoutSheet = raw.includes('!') ? raw.split('!').pop() : raw;
+  if (!withoutSheet || withoutSheet.includes(',')) return { cells: Infinity, maxRow: null, bounded: false, valid: false };
+  if (/^[A-Z]+:[A-Z]+$/i.test(withoutSheet) || /^\d+:\d+$/i.test(withoutSheet)) {
+    return { cells: Infinity, maxRow: null, bounded: false, valid: true };
+  }
+  const m = withoutSheet.match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/i);
+  if (!m) return { cells: Infinity, maxRow: null, bounded: false, valid: false };
+  const c1 = architectColToIndex(m[1]);
+  const r1 = Number(m[2]);
+  const c2 = m[3] ? architectColToIndex(m[3]) : c1;
+  const r2 = m[4] ? Number(m[4]) : r1;
+  return {
+    cells: (Math.abs(r2 - r1) + 1) * (Math.abs(c2 - c1) + 1),
+    maxRow: Math.max(r1, r2),
+    bounded: true,
+    valid: true
+  };
+}
+
+function inferFormulaCopyRange(seedAddr, copyToRange) {
+  const seed = parseA1Bounds(seedAddr);
+  const dest = parseA1Bounds(copyToRange);
+  if (!seed || !dest || seed.startCol !== seed.endCol || seed.startRow !== seed.endRow) return null;
+  const seedCol = seed.startCol;
+  const seedRow = seed.startRow;
+  if (seedRow === dest.startRow - 1 && seedCol >= dest.startCol && seedCol <= dest.endCol) {
+    const col = architectIndexToCol(seedCol);
+    return `${col}${dest.startRow}:${col}${dest.endRow}`;
+  }
+  if (seedCol === dest.startCol - 1 && seedRow >= dest.startRow && seedRow <= dest.endRow) {
+    return `${architectIndexToCol(dest.startCol)}${seedRow}:${architectIndexToCol(dest.endCol)}${seedRow}`;
+  }
+  if (seedRow === dest.startRow && seedCol === dest.startCol) {
+    return copyToRange;
+  }
+  return null;
+}
+
+function splitBulkWritesByCellLimit(writes) {
+  const chunks = [];
+  let current = [];
+  let currentCells = 0;
+  for (const write of writes) {
+    const writeCells = estimateCellMapCells(write.cells, write.copyToRange);
+    if (current.length > 0 && Number.isFinite(writeCells) && currentCells + writeCells > ARCHITECT_MAX_BULK_WRITE_CELLS) {
+      chunks.push(current);
+      current = [];
+      currentCells = 0;
+    }
+    current.push(write);
+    currentCells += Number.isFinite(writeCells) ? writeCells : ARCHITECT_MAX_BULK_WRITE_CELLS + 1;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
+function normalizeBulkCopyWrite(write) {
+  if (!write?.copyToRange || !write.cells || typeof write.cells !== 'object' || Array.isArray(write.cells)) {
+    return [write];
+  }
+  if (isFormulaCellSpec(firstCellSpec(write.cells))) return [write];
+
+  const formulaEntries = Object.entries(write.cells)
+    .filter(([, spec]) => isFormulaCellSpec(spec))
+    .map(([addr, spec]) => ({ addr, spec, copyToRange: inferFormulaCopyRange(addr, write.copyToRange) }))
+    .filter(entry => entry.copyToRange);
+  if (formulaEntries.length === 0) return [write];
+
+  const staticWrite = { ...write };
+  delete staticWrite.copyToRange;
+  const out = [staticWrite];
+  for (const entry of formulaEntries) {
+    out.push({
+      sheet: write.sheet,
+      cells: { [entry.addr]: entry.spec },
+      copyToRange: entry.copyToRange
+    });
+  }
+  return out;
+}
+
+function normalizeDeterministicAction(tool, params) {
+  if (tool !== 'bulk_set_cell_ranges') return [{ tool, params }];
+  const expandedWrites = [];
+  for (const write of Array.isArray(params.writes) ? params.writes : []) {
+    expandedWrites.push(...normalizeBulkCopyWrite(write));
+  }
+  return splitBulkWritesByCellLimit(expandedWrites).map(writes => ({
+    tool,
+    params: { ...params, writes }
+  }));
+}
+
+function estimateCellMapCells(cells, copyToRange) {
+  if (!cells || typeof cells !== 'object') return 0;
+  let total = 0;
+  for (const addr of Object.keys(cells)) {
+    const stats = getA1RangeStats(addr);
+    if (!Number.isFinite(stats.cells)) return Infinity;
+    total += stats.cells;
+  }
+  if (copyToRange) {
+    const copyStats = getA1RangeStats(copyToRange);
+    if (!Number.isFinite(copyStats.cells)) return Infinity;
+    total += copyStats.cells;
+  }
+  return total;
+}
+
+function firstCellSpec(cells) {
+  const entries = Object.entries(cells || {});
+  return entries.length ? entries[0][1] : null;
+}
+
+function isFormulaCellSpec(spec) {
+  return !!formulaLiteralFromCellSpec(spec);
+}
+
+function validateWriteDensityShape({ cells, copyToRange, label }) {
+  const errors = [];
+  const literalKeys = cells && typeof cells === 'object' ? Object.keys(cells).length : 0;
+  if (literalKeys > ARCHITECT_MAX_LITERAL_WRITE_KEYS) {
+    errors.push(`${label}: too many explicit cell entries (${literalKeys}, max ${ARCHITECT_MAX_LITERAL_WRITE_KEYS}); use a seed formula plus copyToRange`);
+  }
+  if (copyToRange && !isFormulaCellSpec(firstCellSpec(cells))) {
+    errors.push(`${label}: copyToRange must copy a formula seed cell, not a text/value seed`);
+  }
+  const cellsTotal = estimateCellMapCells(cells, copyToRange);
+  if (!Number.isFinite(cellsTotal)) {
+    errors.push(`${label}: unbounded or invalid A1 range detected; use finite ranges like A1:J1000 and never comma-separated target lists`);
+  } else if (cellsTotal > ARCHITECT_MAX_WRITE_ACTION_CELLS) {
+    errors.push(`${label}: write covers ${cellsTotal} cells (max ${ARCHITECT_MAX_WRITE_ACTION_CELLS}); split the schedule into smaller finite copyToRange blocks`);
+  }
+  return { errors, cellsTotal };
+}
+
+function formatOptionsAllowUnboundedTarget(options = {}) {
+  const keys = Object.keys(options || {});
+  return keys.length > 0 && keys.every(key => key === 'columnWidth' || key === 'rowHeight');
+}
+
 function validateActionSemanticShape(toolName, params) {
   const errors = [];
   if (toolName === 'set_cell_range') {
     if (!params.cells || typeof params.cells !== 'object' || Array.isArray(params.cells) || Object.keys(params.cells).length === 0) {
       errors.push('params.cells must be a non-empty object');
+    } else {
+      errors.push(...validateWriteDensityShape({
+        cells: params.cells,
+        copyToRange: params.copyToRange,
+        label: 'set_cell_range'
+      }).errors);
     }
   }
   if (toolName === 'bulk_set_cell_ranges') {
     const writes = Array.isArray(params.writes) ? params.writes : [];
+    let aggregateCells = 0;
     writes.forEach((write, index) => {
       if (!write.cells || typeof write.cells !== 'object' || Array.isArray(write.cells) || Object.keys(write.cells).length === 0) {
         errors.push(`params.writes[${index}].cells must be a non-empty object`);
+        return;
       }
+      const check = validateWriteDensityShape({
+        cells: write.cells,
+        copyToRange: write.copyToRange,
+        label: `bulk_set_cell_ranges writes[${index}]`
+      });
+      errors.push(...check.errors);
+      aggregateCells += Number.isFinite(check.cellsTotal) ? check.cellsTotal : ARCHITECT_MAX_BULK_WRITE_CELLS + 1;
     });
+    if (aggregateCells > ARCHITECT_MAX_BULK_WRITE_CELLS) {
+      errors.push(`bulk_set_cell_ranges: aggregate write covers ${aggregateCells} cells (max ${ARCHITECT_MAX_BULK_WRITE_CELLS}); split dense sheets across multiple actions`);
+    }
   }
   if (toolName === 'bulk_set_format') {
     const formats = Array.isArray(params.formats) ? params.formats : [];
     formats.forEach((format, index) => {
       if (!format.options || typeof format.options !== 'object' || Array.isArray(format.options) || Object.keys(format.options).length === 0) {
         errors.push(`params.formats[${index}].options must be a non-empty object`);
+        return;
+      }
+      const stats = getA1RangeStats(format.target);
+      if (!stats.valid || !stats.bounded || !Number.isFinite(stats.cells)) {
+        if (!formatOptionsAllowUnboundedTarget(format.options)) {
+          errors.push(`params.formats[${index}].target must be one finite A1 range, not "${format.target}"`);
+        }
+      } else if (stats.cells > ARCHITECT_MAX_FORMAT_TARGET_CELLS) {
+        errors.push(`params.formats[${index}].target covers ${stats.cells} cells (max ${ARCHITECT_MAX_FORMAT_TARGET_CELLS})`);
       }
     });
   }
@@ -128,12 +340,15 @@ function validateSliceActions(sliceId, actions) {
       errors.push(...schemaValidation.errors.map(err => `${prefix} (${tool}): ${err}`));
       return;
     }
-    const semanticErrors = validateActionSemanticShape(tool, params);
-    if (semanticErrors.length > 0) {
-      errors.push(...semanticErrors.map(err => `${prefix} (${tool}): ${err}`));
-      return;
+    const normalizedActions = normalizeDeterministicAction(tool, JSON.parse(JSON.stringify(params)));
+    for (const normalizedAction of normalizedActions) {
+      const semanticErrors = validateActionSemanticShape(normalizedAction.tool, normalizedAction.params);
+      if (semanticErrors.length > 0) {
+        errors.push(...semanticErrors.map(err => `${prefix} (${tool}): ${err}`));
+        return;
+      }
+      normalized.push(normalizedAction);
     }
-    normalized.push({ tool, params: JSON.parse(JSON.stringify(params)) });
   });
 
   if (errors.length > 0) return { ok: false, errors };
@@ -212,7 +427,9 @@ function detectUnquotedSheetNamesWithSpecialChars(formula) {
   let m;
   while ((m = susp.exec(text))) {
     if (isInsideQuotes(m.index)) continue;
-    out.push(m[1].trim());
+    const candidate = m[1].trim();
+    if (/^[A-Z]+\d+\s*-\s*[A-Za-z_][A-Za-z0-9_]*$/i.test(candidate)) continue;
+    out.push(candidate);
   }
   return out;
 }
@@ -495,6 +712,251 @@ function collectActionLiteralCorpus(slices) {
   return { text: normalizeFactText(textParts.join(' ')), numbers };
 }
 
+function collectBlueprintWriteDensity(slices) {
+  const bySheet = new Map();
+  const ensure = (sheet) => {
+    const key = String(sheet || '').trim();
+    if (!key) return null;
+    if (!bySheet.has(key)) bySheet.set(key, { maxRow: 0, copyToRangeCount: 0, writeActions: 0 });
+    return bySheet.get(key);
+  };
+  const touch = (sheet, cells = {}, copyToRange = null) => {
+    const entry = ensure(sheet);
+    if (!entry) return;
+    entry.writeActions += 1;
+    for (const addr of Object.keys(cells || {})) {
+      const stats = getA1RangeStats(addr);
+      if (Number.isFinite(stats.maxRow || 0)) entry.maxRow = Math.max(entry.maxRow, stats.maxRow || 0);
+    }
+    if (copyToRange) {
+      const stats = getA1RangeStats(copyToRange);
+      if (Number.isFinite(stats.maxRow || 0)) entry.maxRow = Math.max(entry.maxRow, stats.maxRow || 0);
+      entry.copyToRangeCount += 1;
+    }
+  };
+  const touchRange = (rangeText, instructions = '') => {
+    const text = String(rangeText || '').trim();
+    if (!text.includes('!')) return;
+    const bang = text.indexOf('!');
+    const sheet = text.slice(0, bang).replace(/^'|'$/g, '');
+    const range = text.slice(bang + 1);
+    const entry = ensure(sheet);
+    if (!entry) return;
+    const stats = getA1RangeStats(range);
+    if (Number.isFinite(stats.maxRow || 0)) entry.maxRow = Math.max(entry.maxRow, stats.maxRow || 0);
+    if (stats.cells >= 200 && /copyToRange|copy[- ]?to[- ]?range|formula[- ]?copy|fill|relative/i.test(String(instructions || ''))) {
+      entry.copyToRangeCount += 1;
+    }
+  };
+
+  for (const slice of slices || []) {
+    const scope = slice.scope || {};
+    for (const range of Array.isArray(scope.ranges_owned) ? scope.ranges_owned : []) {
+      touchRange(range, slice.instructions || '');
+    }
+    for (const action of slice.actions || []) {
+      if (action.tool === 'set_cell_range') {
+        touch(action.params?.sheet, action.params?.cells, action.params?.copyToRange);
+      }
+      if (action.tool === 'bulk_set_cell_ranges') {
+        for (const write of Array.isArray(action.params?.writes) ? action.params.writes : []) {
+          touch(write.sheet, write.cells, write.copyToRange);
+        }
+      }
+    }
+  }
+
+  return bySheet;
+}
+
+function isMajorDensitySheet(sheetName) {
+  const name = String(sheetName || '').toLowerCase();
+  return !!name && !/(assumptions?|inputs?|format|verify|notes?|summary)/i.test(name);
+}
+
+function validateDensityCoverage(slices, context = {}) {
+  const objective = context.objective || context.sourceObjective || '';
+  const scale = extractScaleHints(objective);
+  const targetRows = scale.rowsPerSheetRequested || 0;
+  if (targetRows < 500) return [];
+
+  const errors = [];
+  const densityBySheet = collectBlueprintWriteDensity(slices);
+  const majorEntries = [...densityBySheet.entries()].filter(([sheet]) => isMajorDensitySheet(sheet));
+  const denseThreshold = Math.floor(targetRows * (targetRows >= 1000 ? 0.8 : 0.6));
+  const denseSheets = majorEntries.filter(([, info]) => info.maxRow >= denseThreshold);
+  const copyToRangeCount = majorEntries.reduce((sum, [, info]) => sum + info.copyToRangeCount, 0);
+  const minDenseSheets = targetRows >= 1000 ? 4 : 2;
+  const minCopies = targetRows >= 1000 ? 4 : 2;
+
+  if (denseSheets.length < Math.min(minDenseSheets, Math.max(1, majorEntries.length))) {
+    const observed = majorEntries.map(([sheet, info]) => `${sheet}:${info.maxRow}`).join(', ') || 'none';
+    errors.push(`density coverage failed: only ${denseSheets.length} major sheet(s) reach ~${denseThreshold}+ rows; observed max rows by sheet: ${observed}`);
+  }
+  if (copyToRangeCount < minCopies) {
+    errors.push(`density coverage failed: only ${copyToRangeCount} copyToRange schedule(s); dense workbooks need at least ${minCopies} finite formula-copy blocks`);
+  }
+  return errors;
+}
+
+function sliceOwnsWritableScope(slice) {
+  const scope = slice?.scope || {};
+  return (Array.isArray(scope.sheets_owned) && scope.sheets_owned.length > 0) ||
+    (Array.isArray(scope.ranges_owned) && scope.ranges_owned.length > 0);
+}
+
+function isFinalVerificationSlice(slice) {
+  const id = String(slice?.id || '').toLowerCase();
+  const title = String(slice?.title || '').toLowerCase();
+  if (/format.*verify|verify.*format|finali[sz]e|audit|review/.test(`${id} ${title}`)) return true;
+  return !sliceOwnsWritableScope(slice) && /format|verify|final|audit|review/.test(`${id} ${title}`);
+}
+
+function isAssumptionLikeSlice(slice) {
+  const text = [
+    slice?.id,
+    slice?.title,
+    ...(slice?.scope?.sheets_owned || [])
+  ].join(' ').toLowerCase();
+  return /assumptions?|inputs?|drivers?/.test(text);
+}
+
+function isScaffoldLikeSlice(slice) {
+  const idTitle = [slice?.id, slice?.title].join(' ').toLowerCase();
+  const instructions = String(slice?.instructions || '').toLowerCase();
+  if (/(assumptions?|inputs?|drivers?)/.test(idTitle)) return false;
+  if (/(scaffold|workbook[\s_-]*(setup|structure|skeleton)|sheet[\s_-]*setup|tab[\s_-]*setup)/.test(idTitle)) {
+    return true;
+  }
+  return /(create|crea).{0,50}(tabs?|sheets?|fogli).{0,50}(only|solo)/i.test(instructions) &&
+    !/(formula|revenue|cost|construction|financing|cash flow|valuation|driver table|assumptions?)/i.test(instructions);
+}
+
+function uniqueScaffoldId(slices) {
+  const ids = new Set((slices || []).map(slice => slice.id));
+  if (!ids.has('workbook_scaffold')) return 'workbook_scaffold';
+  let index = 2;
+  while (ids.has(`workbook_scaffold_${index}`)) index += 1;
+  return `workbook_scaffold_${index}`;
+}
+
+function collectDeclaredWorkbookSheets(slices, context = {}) {
+  const existing = new Set((context.workbookSheets || context.sheets || []).map(String));
+  const names = new Set();
+  for (const slice of slices || []) {
+    const scope = slice?.scope || {};
+    for (const sheet of Array.isArray(scope.sheets_owned) ? scope.sheets_owned : []) {
+      if (sheet) names.add(String(sheet));
+    }
+    for (const ref of Array.isArray(scope.ranges_owned) ? scope.ranges_owned : []) {
+      const sheet = extractSheetNameFromReference(ref);
+      if (sheet) names.add(sheet);
+    }
+    for (const ref of Array.isArray(scope.may_read_from) ? scope.may_read_from : []) {
+      const sheet = extractSheetNameFromReference(ref);
+      if (sheet) names.add(sheet);
+    }
+    for (const action of Array.isArray(slice.actions) ? slice.actions : []) {
+      const actionSheets = new Set();
+      collectActionSheetNames(action, actionSheets);
+      for (const sheet of actionSheets) names.add(sheet);
+    }
+  }
+  return [...names]
+    .map(name => String(name || '').trim())
+    .filter(name => name && !existing.has(name));
+}
+
+function appendDenseParallelInstruction(slice, targetRows) {
+  const current = String(slice.instructions || '');
+  const already = /Dense parallel build:/i.test(current);
+  if (already) return current;
+  const parts = [
+    current,
+    '',
+    `Dense parallel build: this workbook is scaffolded before content workers start. If may_read_from sheets are blank, do not wait; write formulas to the declared absolute addresses and let Excel recalculate when the referenced slice fills its sheet. Use formula seeds plus copyToRange for schedules through roughly row ${targetRows || 1000}.`
+  ];
+  if (isAssumptionLikeSlice(slice)) {
+    parts.push('Assumptions speed contract: write the complete two-column driver table in one bulk_set_cell_ranges call, apply at most one bulk_set_format pass, then call done. Do not drip-feed assumptions row by row.');
+  }
+  return parts.join('\n').slice(0, 8000);
+}
+
+function shouldParallelizeDenseBlueprint(slices, context = {}) {
+  if (process.env.ARCHITECT_DENSE_PARALLELISM === 'false') return false;
+  const objective = context.objective || context.sourceObjective || '';
+  const scale = extractScaleHints(objective);
+  const targetRows = scale.rowsPerSheetRequested || 0;
+  if (targetRows < 500) return false;
+  const contentSlices = (slices || []).filter(slice =>
+    sliceOwnsWritableScope(slice) &&
+    !isFinalVerificationSlice(slice) &&
+    !isScaffoldLikeSlice(slice)
+  );
+  if (contentSlices.length < 4) return false;
+  const sheetNames = collectDeclaredWorkbookSheets(slices, context);
+  return sheetNames.length >= 4;
+}
+
+function normalizeDenseBlueprintParallelism(slices, context = {}) {
+  if (!shouldParallelizeDenseBlueprint(slices, context)) return { slices, addedScaffold: false };
+
+  const objective = context.objective || context.sourceObjective || '';
+  const scale = extractScaleHints(objective);
+  const targetRows = scale.rowsPerSheetRequested || scale.rowsRequested || 1000;
+  const sheetNames = collectDeclaredWorkbookSheets(slices, context);
+  const keptSlices = slices.filter(slice => !isScaffoldLikeSlice(slice));
+  const scaffoldId = uniqueScaffoldId(keptSlices);
+  const scaffoldActionValidation = validateSliceActions(scaffoldId, [
+    { tool: 'bulk_create_sheets', params: { names: sheetNames } }
+  ]);
+  if (!scaffoldActionValidation.ok) {
+    logger.warn({ errors: scaffoldActionValidation.errors }, '[Architect] Dense scaffold action validation failed; keeping original DAG');
+    return { slices, addedScaffold: false };
+  }
+
+  const scaffold = {
+    id: scaffoldId,
+    title: 'Workbook Scaffold',
+    deps: [],
+    scope: { sheets_owned: [], ranges_owned: [], may_read_from: [] },
+    instructions: `Create the declared workbook tabs only: ${sheetNames.join(', ')}. Do not write values, formulas, formats, or notes; this slice exists so parallel content workers can safely write cross-sheet formulas.`,
+    estimated_iters: 3,
+    tier: 'flash',
+    actions: scaffoldActionValidation.actions
+  };
+
+  const cloned = keptSlices.map(slice => ({
+    ...slice,
+    deps: Array.isArray(slice.deps) ? [...slice.deps] : [],
+    scope: {
+      sheets_owned: [...(slice.scope?.sheets_owned || [])],
+      ranges_owned: [...(slice.scope?.ranges_owned || [])],
+      may_read_from: [...(slice.scope?.may_read_from || [])]
+    },
+    actions: Array.isArray(slice.actions) ? [...slice.actions] : []
+  }));
+  const materialIds = cloned
+    .filter(slice => !isFinalVerificationSlice(slice))
+    .map(slice => slice.id);
+  const allContentIds = cloned.map(slice => slice.id);
+
+  for (const slice of cloned) {
+    if (isFinalVerificationSlice(slice)) {
+      slice.deps = [scaffoldId, ...allContentIds.filter(id => id !== slice.id)];
+      continue;
+    }
+    slice.deps = [scaffoldId];
+    slice.instructions = appendDenseParallelInstruction(slice, targetRows);
+  }
+
+  return {
+    slices: [scaffold, ...cloned],
+    addedScaffold: true,
+    materialIds
+  };
+}
+
 function hasApproxNumber(numbers, expected) {
   return numbers.some(n => Math.abs(Number(n) - Number(expected)) < 0.005);
 }
@@ -521,112 +983,44 @@ function validateVerbatimSourceFacts(slices, context = {}) {
   ];
 }
 
-const ARCHITECT_SYSTEM_PROMPT = `You are an architect and deterministic action compiler for Excel workbook builds.
-Given a user objective and current workbook state, produce one BLUEPRINT: a directed acyclic graph (DAG) of slices.
+const ARCHITECT_SYSTEM_PROMPT = `You are an architect for AI-built Excel workbooks.
+Given a user objective and current workbook state, produce one compact BLUEPRINT: a directed acyclic graph (DAG) of focused worker slices.
 
-NEW EXECUTION MODEL:
-- Prefer deterministic slices: put the exact Excel tool calls in slice.actions[].
-- A slice with non-empty actions[] is executed by a pure server executor with ZERO LLM calls. It will not read, infer, repair, or interpret prose. The actions must be complete and valid.
-- A slice with missing or empty actions[] falls back to the legacy worker LLM. Use this only when the slice truly requires live read-back or reasoning after previous writes.
-- If actions[] is present, invalid JSON/tool params fail blueprint validation. Do not emit approximate actions.
+EXECUTION MODEL:
+- Default is AI-only worker execution. Leave slice.actions as [] unless deterministic actions are explicitly required by validation/source fidelity.
+- Do not prebuild the workbook in the blueprint. The blueprint is a routing contract: sheets, ranges, dependencies, and concise instructions for specialist workers.
+- Workers have structured Excel tools and will create sheets, write formulas, use copyToRange, format, read upstream ranges, and verify their own output.
 
 DAG RULES:
-- Each slice owns an exclusive set of sheets/ranges. Two slices in the same dependency wave must never overlap sheets_owned or ranges_owned.
-- A slice may read/reference upstream outputs only when those upstream slice ids are in deps[] transitively.
-- Prefer 3-8 coherent slices for complex tasks. Do not micro-slice.
-- Cross-sheet circular dependencies must be in one sequential slice, or split into explicit first-pass / second-pass slices.
-- Keep a final format_and_verify slice in the last wave. It may be deterministic if ranges are fully known. If it needs live read_format_summary or visual repair, leave actions[] empty and use legacy instructions.
+- Each slice owns an exclusive set of sheets/ranges. Two slices in the same wave must not overlap writable sheets/ranges.
+- A slice may read/reference upstream outputs only when those upstream slice ids are in deps[].
+- Maximize parallelism. For large dense workbooks, create a workbook scaffold first, then let cost, revenue, construction, financing, cash flow, P&L, valuation, and sensitivity run in parallel using formula references to declared ranges.
+- Prefer 2-3 waves for dense builds: workbook scaffold -> parallel content schedules -> format_and_verify. Do not serialize revenue -> cash flow -> P&L unless the user explicitly requires a manual sign-off between sheets.
+- Keep one final format_and_verify slice with no owned sheets.
 
-DETERMINISTIC ACTION TOOL ALLOWLIST:
-- bulk_create_sheets: {"names":["Assumptions","Revenue"]}
-- delete_sheet: {"name":"Old Sheet"}
-- set_cell_range: {"sheet":"S","cells":{"A1":{"value":"Label"},"B1":{"formula":"=A1*2"}}}
-- bulk_set_cell_ranges: {"writes":[{"sheet":"S","cells":{"A1":{"value":1}},"copyToRange":"B1:G1"}]}
-- bulk_set_format: {"formats":[{"sheet":"S","target":"A1:B2","options":{"bold":true,"backgroundColor":"#0D1F2D","fontColor":"#FFFFFF"}}]}
-- bulk_set_notes: {"notes":[{"sheet":"Assumptions","cell":"B5","note":"Rationale"}]}
-- create_named_range: {"name":"TaxRate","refers_to":"=Assumptions!$B$12"}
-- bulk_create_named_ranges: {"ranges":[{"name":"TaxRate","refers_to":"=Assumptions!$B$12"}]}
-- copy_range: {"from_sheet":"Source","from":"A1:B10","to_sheet":"Dest","to":"A1"}
+DENSITY RULES:
+- Match the user's requested scale. "1000 righe per foglio" means major operating sheets need ranges ending near row 1000.
+- For dense sheets, put finite ranges in scope.ranges_owned, e.g. "Revenue Schedule!A1:BI1005".
+- In instructions, explicitly tell workers to use formula patterns and copyToRange for dense schedules. Do not ask them to enumerate 1000 unique rows by hand.
+- For real estate/project finance, include assumptions, per-floor/unit detail, cost breakdown, revenue/absorption, construction schedule, financing/debt, cash flow, P&L or returns, valuation/sensitivity, and formatting/audit.
+- If four or more major sheets need ~1000 rows, make at least four slices own finite ranges reaching ~800+ rows.
 
-ACTION JSON RULES:
-- Each action is exactly {"tool":"<allowed_tool>","params":{...}}. No thought, message, control, payload, or client action types.
-- Tool names are the LLM-facing snake_case tools above, not client action names like setCellRange/createSheet.
-- Params must use canonical keys only. Do not use aliases like sheetName, ranges for writes, entries for formats, fromSheet, refersTo.
-- Use bulk_create_sheets even for one newly-created sheet so the action path stays uniform.
-- Do not put formatting inside cellStyles unless absolutely necessary. Prefer bulk_set_format as a separate action.
-- copyToRange is formulas only. Never use it when the source cell is a text label.
+FORMULA/LAYOUT RULES:
+- Assumptions should be a stable two-column driver sheet: column A label, column B value, with section headers.
+- Dependent slices must read upstream ranges first when may_read_from is non-empty, then write formulas against actual addresses.
+- In a scaffolded parallel build, may_read_from ranges may exist but be blank when a worker starts. That is okay: write formulas against the declared addresses instead of waiting for another worker.
+- Quote sheet names with spaces/punctuation in formulas.
+- Use absolute references for drivers (e.g. =Assumptions!$B$12) and relative references only where copyToRange should drag.
 
-PRESERVE USER DATA VERBATIM:
-- If the user objective contains domain-specific lists, names, menu items, prices, specific counts, regions, asset categories, or account names, write those exact values in actions cells. Do not invent generic substitutes.
-- If a deterministic slice cannot fit every exact item in actions[], make it legacy and include the full verbatim data in instructions.
-- If the objective contains a restaurant menu with prices, create a dedicated "Menu" or "Menu Detail" sheet and write one row per item with the exact item name, base price, and menu price when present. Revenue can aggregate from that Menu sheet, but category-only summaries are not enough.
-- Never replace the user's menu with invented category mix percentages unless the exact line-item menu is also present in the workbook.
+INSTRUCTIONS STYLE:
+- Be specific enough that a worker can build the slice without asking the user.
+- Include target row/column extents, major row groups, formula families, and upstream references.
+- Keep each slice instruction under about 900 words. Do not include huge JSON payloads.
 
-SCALE AND DENSITY (CRITICAL — prior failure mode):
-- The blueprint MUST match the density the user asked for. A 7-slice, 80-row summary in response to "1000 righe" / "molto dettagliato" / "monthly schedule" / "per piano" is a failure, not a fast win.
-- copyToRange is the volume lever. One write entry with a relative-reference formula + copyToRange="B5:B1000" fills 996 rows in a single deterministic action. Use it for any multi-period or multi-unit schedule.
-- For real estate / construction / project finance objectives: include period-by-period schedules — monthly construction (24-36 rows), monthly debt drawdown / interest reserve, monthly cash flow, monthly absorption / sales velocity, per-floor or per-unit cost matrix, per-phase milestones. Do NOT collapse a multi-year build into a single "Total Cost" line.
-- For institutional valuation (DCF / LBO / M&A): include period-by-period projections covering at least the explicit horizon (e.g. 60 months or 10 years × 4 quarters), terminal value calculation, debt schedule with interest expense by period, multi-axis sensitivity tables (3-5 axes × 5-7 steps each = 25-49 cells per table, plus 3-5 separate tables).
-- Slice count scales with density: <200 rows → 5-8 slices; 200-1000 rows → 8-12 slices; >1000 rows → 10-15 slices with explicit per-period / per-unit detail.
-- When the SCALE TARGETS section below contains a row count, period count, or unit count, you MUST allocate that volume across slices. Half-density blueprints will be rejected downstream as "missed the brief".
-
-CRITICAL — HOW TO ACHIEVE DENSITY (anti-loop pattern):
-- DO NOT enumerate individual rows as separate actions. Writing 1000 rows as 1000 individual JSON cell objects is NOT how you achieve density — it will cause the slice worker to hit max iterations (30 cap) after ~300 rows, fail, and skip every dependent slice. This is a KNOWN FAILURE MODE.
-- INSTEAD, use formula patterns + copyToRange + aggregation:
-  * Cost Breakdown: write 30-50 CATEGORY headers with subtotal formulas (=SUMIF, =SUMPRODUCT referencing a compact data table). Do NOT write 200 individual cost line items as deterministic actions. Leave the detailed line items to the legacy worker IF the user genuinely needs per-item granularity, but set estimated_iters high (15-20) and include instructions like "write 10-15 representative items per category, then summarize with subtotals."
-  * Revenue Schedule: write month/year headers in row 1 and use ONE formula row + copyToRange for the time axis (60 months). Revenue per unit can be =Assumptions!$B$X * units_sold_by_month. Do NOT write 40 individual unit rows with 60 columns each.
-  * Cash Flow: use cross-sheet formulas (=CostBreakdown!B100, =RevenueSchedule!B50). One formula row + copyToRange for the time axis.
-  * Debt Schedule: use Excel PMT/IPMT/PPMT functions. One formula row + copyToRange.
-- A slice that writes 50 well-structured rows with formulas is BETTER than one that writes 300 hardcoded rows and crashes. The formulas compute the remaining detail automatically in Excel.
-- For ANY slice targeting >200 rows, the deterministic actions MUST use copyToRange with formula patterns. If the data is truly unique per row (like a menu), make it a legacy worker slice with estimated_iters ≥ 15.
-
-PARALLELISM MAXIMIZATION:
-- The DAG should maximize wave parallelism. A blueprint where every slice depends only on assumptions (root slice) is valid and FASTER than a deep sequential chain.
-- Cost breakdown, revenue schedule, and financing schedule can ALL run in parallel in wave 2 (all depend only on assumptions). They do NOT depend on each other.
-- Cash flow depends on cost+revenue+financing → wave 3. Valuation depends on cash flow → wave 4. Format at the end.
-- Target: 3-4 waves total, not 6-7. Every extra wave adds a client round-trip and Vercel cold-start latency.
-- When in doubt, remove a dependency. Two slices that both read Assumptions but don't write to each other's sheets are INDEPENDENT — put them in the same wave.
-
-FORMULAS AND CELL MAPS:
-- The architect is the single source of truth for cell addresses. Every formula written in actions[] must be a literal Excel formula string.
-- Every cross-sheet reference in actions[] must exactly match a sheet declared in scope.sheets_owned, scope.may_read_from, or bulk_create_sheets.names. Never use shortened aliases: if the sheet is "Cash Flow - Single Location", formulas must use ='Cash Flow - Single Location'!B5, not =Cash Flow!B5.
-- Quote every sheet name that contains spaces, punctuation, apostrophes, ampersands, or hyphens in formulas using Excel syntax: ='P&L - Single Location'!B10.
-- For Assumptions, use a flat 2-column layout: column A = driver label, column B = driver value. Section headers may live in column A with blank B. Year headers belong on operating sheets, not Assumptions.
-- Before emitting dependent formulas, verify every Assumptions!$B$X reference points to the row you actually wrote in the Assumptions actions.
-- Do not write driver values inline on dependent sheets when they should reference Assumptions. Use absolute references like =Assumptions!$B$5.
-- For time series, write the first formula and use copyToRange only when relative references should drag correctly.
-
-EXAMPLE DETERMINISTIC SLICE:
-{
-  "id": "revenue",
-  "title": "Revenue build",
-  "deps": ["assumptions"],
-  "scope": {
-    "sheets_owned": ["Revenue"],
-    "ranges_owned": [],
-    "may_read_from": ["Assumptions!A1:B40"]
-  },
-  "instructions": "Deterministic revenue build. Actions are authoritative.",
-  "estimated_iters": 3,
-  "tier": "pro",
-  "actions": [
-    { "tool": "bulk_create_sheets", "params": { "names": ["Revenue"] } },
-    { "tool": "bulk_set_cell_ranges", "params": { "writes": [
-      { "sheet": "Revenue", "cells": {
-        "A1": { "value": "Revenue" },
-        "B3": { "value": 2025 },
-        "C3": { "value": 2026 },
-        "A5": { "value": "Net Revenue" },
-        "B5": { "formula": "=Assumptions!$B$5*Assumptions!$B$6*Assumptions!$B$7" },
-        "C5": { "formula": "=B5*(1+Assumptions!$B$8)" }
-      }, "copyToRange": "C5:G5" }
-    ] } },
-    { "tool": "bulk_set_format", "params": { "formats": [
-      { "sheet": "Revenue", "target": "A1:G1", "options": { "bold": true, "backgroundColor": "#0D1F2D", "fontColor": "#FFFFFF" } },
-      { "sheet": "Revenue", "target": "B5:G20", "options": { "numberFormat": "#,##0" } }
-    ] } }
-  ]
-}
+OPTIONAL ACTIONS:
+- actions[] is only for tiny deterministic source-fidelity tables or tests. Normal workbook content slices should use [].
+- If actions are present, use only: bulk_create_sheets, delete_sheet, set_cell_range, bulk_set_cell_ranges, bulk_set_format, bulk_set_notes, create_named_range, bulk_create_named_ranges, copy_range.
+- Action params must use canonical keys only and finite A1 ranges.
 
 OUTPUT JSON SCHEMA (strict, no extras):
 {
@@ -644,7 +1038,7 @@ OUTPUT JSON SCHEMA (strict, no extras):
       },
       "instructions": "<legacy fallback instructions or concise deterministic summary>",
       "estimated_iters": <int 3-20>,
-      "tier": "pro",
+      "tier": "flash",
       "actions": [
         { "tool": "<allowed_tool>", "params": { } }
       ]
@@ -698,17 +1092,19 @@ function buildArchitectUserContent({ objective, context = {}, triage = null }) {
   }
 
   const scale = triage && triage.scale_hints ? triage.scale_hints : null;
-  if (scale && (scale.rowsRequested || scale.periods || scale.units || scale.detailLevel)) {
+  if (scale && (scale.rowsRequested || scale.rowsPerSheetRequested || scale.periods || scale.units || scale.detailLevel)) {
     lines.push('');
     lines.push(`SCALE TARGETS (parsed from user objective — match this density in the blueprint):`);
+    if (scale.rowsPerSheetRequested) lines.push(`- target row density: ~${scale.rowsPerSheetRequested} rows PER MAJOR SHEET, not just across the whole workbook`);
     if (scale.rowsRequested) lines.push(`- target row count: ~${scale.rowsRequested} data rows across the workbook`);
     if (scale.periods) lines.push(`- period schedule: ${scale.periods} ${scale.periodGranularity || 'periods'} (use copyToRange for the time axis)`);
     else if (scale.periodGranularity) lines.push(`- period granularity: ${scale.periodGranularity} (size the schedule to the project horizon)`);
     if (scale.units) lines.push(`- unit-level detail: ${scale.units} unit rows (per floor / apartment / space — one row per unit)`);
     if (scale.detailLevel === 'high') lines.push(`- detail level: HIGH — user explicitly requested granular / row-by-row output`);
-    const target = scale.rowsRequested || 0;
+    const target = scale.rowsPerSheetRequested || scale.rowsRequested || 0;
     if (target >= 1000) {
-      lines.push(`- guidance: build dense schedules. Use copyToRange aggressively. Plan 10-15 slices with multi-period AND per-unit detail. Summary-only blueprints will be rejected as "missed the brief".`);
+      lines.push(`- guidance: build dense schedules. Use copyToRange aggressively. Use enough coherent slices for the workbook scope, but density per major sheet matters more than slice count. Summary-only blueprints will be rejected as "missed the brief".`);
+      lines.push(`- validation floor: at least four major operating sheets must reach ~${Math.floor(target * 0.8)}+ rows via finite copyToRange ranges; do not put all row density into one detail sheet.`);
     } else if (target >= 500) {
       lines.push(`- guidance: include 2-3 dense schedules (monthly / per-unit). Plan 8-12 slices. Do NOT collapse the horizon into single-cell totals.`);
     } else if (target >= 200) {
@@ -718,12 +1114,56 @@ function buildArchitectUserContent({ objective, context = {}, triage = null }) {
     }
   }
 
+  // Auto-load a domain skill when objective hints at a known specialty.
+  // Codex-style: surface domain knowledge to the planner BEFORE it commits to
+  // a slice graph, so it puts the right sheets / categories in the blueprint.
+  const skill = autoLoadDomainSkill(objective);
+  if (skill) {
+    lines.push('');
+    lines.push(`DOMAIN SKILL (auto-loaded — incorporate this taxonomy into slice instructions; downstream workers will see it too):`);
+    lines.push('---');
+    lines.push(skill.content.slice(0, 8000));
+    lines.push('---');
+  }
+
   lines.push('');
   lines.push('Produce the blueprint now.');
   return lines.join('\n');
 }
 
-const ARCHITECT_DEFAULT_TIMEOUT_MS = 60000;
+// Heuristic: scan objective for domain keywords, return the matching skill
+// file content. Cheap regex match — no LLM call.
+function autoLoadDomainSkill(objective) {
+  const text = String(objective || '').toLowerCase();
+  const matchers = [
+    { skill: 'real-estate-dev-italy', re: /(immobiliar|piani|costruzion|promozione immobil|oneri urbanizz|mq2?\b|vairano|caserta|sviluppo immobil|btc\/btl|prezzo\s*\/\s*mq)/i },
+    { skill: 'business-plan', re: /(business plan|ristorant|food|menu|location ownership)/i },
+    { skill: 'dcf-model', re: /(dcf|valutazione azienda|company valuation|free cash flow)/i },
+    { skill: 'lbo-model', re: /(\blbo\b|leverage buyout|sponsor return|moic|debt schedule)/i },
+    { skill: 'comps-analysis', re: /(\bcomps\b|comparable compan|trading multiples)/i },
+    { skill: 'three-statement', re: /(three statement|3-statement|balance sheet.*income.*cash)/i },
+  ];
+  for (const { skill, re } of matchers) {
+    if (re.test(text)) {
+      try {
+        const fs = require('fs');
+        const path = require('path');
+        const file = path.join(__dirname, '..', '..', 'skills', `${skill}.md`);
+        if (fs.existsSync(file)) {
+          return { skill, content: fs.readFileSync(file, 'utf8') };
+        }
+      } catch (_) {}
+    }
+  }
+  return null;
+}
+
+// Bumped 60s→120s after benchmark: institutional prompts (real estate IT,
+// 10-piano, 1000-righe-per-sheet) routinely take 28-32s per attempt; with 2
+// retries the original 60s often timed out the WHOLE attempt → fallback to
+// single agent_loop, losing parallel slicing entirely.
+const ARCHITECT_DEFAULT_TIMEOUT_MS = Math.max(60000, Number(process.env.ARCHITECT_TIMEOUT_MS) || 120000);
+const ARCHITECT_MAX_REPAIR_ATTEMPTS = Math.max(1, Number(process.env.ARCHITECT_MAX_REPAIR_ATTEMPTS) || 2);
 
 async function generateBlueprint({ objective, context = {}, triage = null, callLLMFn = callLLM, modelOverride = null } = {}) {
   if (!objective || typeof objective !== 'string') {
@@ -751,39 +1191,53 @@ async function generateBlueprint({ objective, context = {}, triage = null, callL
   if (!parsed) {
     throw new Error('Architect produced unparseable JSON');
   }
-  const validation = validateBlueprint(parsed, { workbookSheets: context.workbookSheets || [], objective });
+  const validation = validateBlueprint(parsed, {
+    workbookSheets: context.workbookSheets || [],
+    objective,
+    stripDeterministicActions: process.env.ALLOW_DETERMINISTIC_SLICES !== 'true'
+  });
   if (!validation.ok) {
-    const retryable = validation.errors.some(err => /verbatim menu coverage|formula references sheet|unquoted sheet reference/i.test(err));
-    if (retryable) {
-      const repairUserContent = `${userContent}\n\nVALIDATION FAILED. Regenerate the full JSON blueprint fixing these errors:\n- ${validation.errors.join('\n- ')}\n\nFor menu coverage errors, add a deterministic Menu/Menu Detail slice whose actions write every extracted item and price exactly, then build revenue formulas from that sheet.`;
-      let retryRaw;
+    let lastValidation = validation;
+    let lastRaw = llmRaw;
+    let repaired = false;
+    for (let repairAttempt = 1; repairAttempt <= ARCHITECT_MAX_REPAIR_ATTEMPTS; repairAttempt++) {
+      const retryable = lastValidation.errors.some(err => /verbatim menu coverage|formula references sheet|unquoted sheet reference|density coverage failed|actions\[\d+\]|copyToRange|unbounded|invalid A1 range|format target|finite A1 range/i.test(err));
+      if (!retryable) break;
+      const repairUserContent = `${userContent}\n\nVALIDATION FAILED${repairAttempt > 1 ? ` AGAIN (repair attempt ${repairAttempt})` : ''}. Regenerate the full JSON blueprint fixing these errors:\n- ${lastValidation.errors.join('\n- ')}\n\nMake the smallest structural change that fixes the errors; do not add thin filler slices.\nFor menu coverage errors, add a deterministic Menu/Menu Detail slice whose actions write every extracted item and price exactly, then build revenue formulas from that sheet.\nFor density coverage errors, make at least four major operating sheets reach the requested row depth with finite formula copyToRange blocks (for example A6:G1005). Do not satisfy a 1000-rows-per-sheet request with only one dense detail sheet.\nFor action-shape errors, emit only finite single A1 ranges; split disjoint formats into multiple formats instead of comma-separated targets. copyToRange source cells must be formulas, so write static headers/labels in a separate action and copy formulas only.\nFor formula reference errors, use the exact declared sheet names from scope/actions. If the sheet is "Cost Breakdown", formulas must reference ='Cost Breakdown'!A1 or 'Cost Breakdown'!A1, never CostBreakdown!A1.`;
+      let repairRaw;
       try {
-        retryRaw = await callLLMFn({
+        repairRaw = await callLLMFn({
           system: ARCHITECT_SYSTEM_PROMPT,
           userText: repairUserContent,
           timeoutMs: ARCHITECT_DEFAULT_TIMEOUT_MS,
           fallbackTimeoutMs: ARCHITECT_DEFAULT_TIMEOUT_MS,
           modelOverride: modelOverride || undefined,
           role: 'architect',
-          label: 'Architect blueprint retry'
+          label: repairAttempt === 1 ? 'Architect blueprint retry' : `Architect blueprint retry ${repairAttempt}`
         });
       } catch (err) {
-        throw new Error(`Architect blueprint validation failed and retry failed: ${validation.errors.join('; ')}; retry error: ${err.message}`);
+        throw new Error(`Architect blueprint validation failed and retry ${repairAttempt} failed: ${lastValidation.errors.join('; ')}; retry error: ${err.message}`);
       }
-      const retryParsed = extractArchitectJson(retryRaw);
-      if (!retryParsed) throw new Error(`Architect blueprint validation failed and retry produced unparseable JSON: ${validation.errors.join('; ')}`);
-      const retryValidation = validateBlueprint(retryParsed, { workbookSheets: context.workbookSheets || [], objective });
-      if (!retryValidation.ok) {
-        throw new Error(`Architect blueprint validation failed after retry: ${retryValidation.errors.join('; ')}`);
+      const repairParsed = extractArchitectJson(repairRaw);
+      if (!repairParsed) throw new Error(`Architect blueprint validation failed and retry ${repairAttempt} produced unparseable JSON: ${lastValidation.errors.join('; ')}`);
+      lastValidation = validateBlueprint(repairParsed, {
+        workbookSheets: context.workbookSheets || [],
+        objective,
+        stripDeterministicActions: process.env.ALLOW_DETERMINISTIC_SLICES !== 'true'
+      });
+      lastRaw = repairRaw;
+      repaired = true;
+      if (lastValidation.ok) {
+        lastValidation.blueprint._meta = {
+          latencyMs: Date.now() - start,
+          model: lastRaw?._model || null,
+          repaired,
+          repairAttempts: repairAttempt
+        };
+        return lastValidation.blueprint;
       }
-      retryValidation.blueprint._meta = {
-        latencyMs: Date.now() - start,
-        model: retryRaw?._model || null,
-        repaired: true
-      };
-      return retryValidation.blueprint;
     }
-    throw new Error(`Architect blueprint validation failed: ${validation.errors.join('; ')}`);
+    throw new Error(`Architect blueprint validation failed${repaired ? ' after retry' : ''}: ${lastValidation.errors.join('; ')}`);
   }
   validation.blueprint._meta = {
     latencyMs: Date.now() - start,
@@ -841,7 +1295,7 @@ function validateBlueprint(raw, context = {}) {
   if (errors.length) return { ok: false, errors };
 
   // Normalize: ensure required fields exist with safe defaults
-  const normalizedSlices = [];
+  let normalizedSlices = [];
   for (const s of raw.slices) {
     const deps = Array.isArray(s.deps) ? s.deps.filter(d => sliceMap.has(d) && d !== s.id) : [];
     const scope = (s.scope && typeof s.scope === 'object') ? s.scope : {};
@@ -849,15 +1303,32 @@ function validateBlueprint(raw, context = {}) {
     const rangesOwned = Array.isArray(scope.ranges_owned) ? scope.ranges_owned.map(String) : [];
     const mayReadFrom = Array.isArray(scope.may_read_from) ? scope.may_read_from.map(String) : [];
     const estIters = Number(s.estimated_iters);
-    // Default tier is now 'pro'. Flash is opt-in (typically only format_and_verify).
-    // Build slices have long prompts + multi-step reasoning over upstream layouts;
-    // flash collapses on them (see 5 bandaid commits on 2026-05-30).
-    const tier = s.tier === 'flash' ? 'flash' : 'pro';
-    const actionValidation = validateSliceActions(s.id, s.actions);
+    // Default tier flipped to 'flash' (2026-05-31 bench: flash beat pro on
+    // Vairano 10-piano IT real-estate prompt — 4 sheet × 1000 rows, ~38K
+    // formulas, 15min. Pro fallback path hit architect timeout + JSON parse
+    // errors and produced 71 formulas total. Flash + skill IT delivers
+    // dense output at ~1/10 the cost per token). 'pro' remains opt-in via
+    // explicit slice.tier='pro' in the architect blueprint.
+    const tier = s.tier === 'pro' ? 'pro' : 'flash';
+
+    // When ALLOW_DETERMINISTIC is off (default), strip ALL pre-baked actions
+    // so each content slice runs through an LLM worker. Even a single
+    // bulk_create_sheets action would mark the slice "deterministic complete"
+    // and the orchestrator would skip the worker entirely — so the LLM never
+    // gets to fill the sheet. Workers create their own sheets via
+    // bulk_create_sheets when needed (idempotent if sheet already exists).
+    const ALLOW_DETERMINISTIC = context.stripDeterministicActions === false ||
+      process.env.ALLOW_DETERMINISTIC_SLICES === 'true';
+    const preStripActions = Array.isArray(s.actions) ? s.actions : [];
+    const actionsToValidate = ALLOW_DETERMINISTIC ? preStripActions : [];
+
+    const actionValidation = validateSliceActions(s.id, actionsToValidate);
     if (!actionValidation.ok) {
       errors.push(...actionValidation.errors);
       continue;
     }
+
+    const finalActions = actionValidation.actions;
 
     normalizedSlices.push({
       id: s.id,
@@ -867,16 +1338,21 @@ function validateBlueprint(raw, context = {}) {
       instructions: String(s.instructions || '').slice(0, 8000),
       estimated_iters: Number.isFinite(estIters) ? Math.max(3, Math.min(20, Math.round(estIters))) : 10,
       tier,
-      actions: actionValidation.actions
+      actions: finalActions
     });
   }
   if (errors.length) return { ok: false, errors };
+
+  const parallelized = normalizeDenseBlueprintParallelism(normalizedSlices, context);
+  normalizedSlices = parallelized.slices;
+  const normalizedSliceMap = new Map(normalizedSlices.map(s => [s.id, s]));
 
   // Cycle detection via Kahn's algorithm
   const indeg = new Map(normalizedSlices.map(s => [s.id, 0]));
   const adj = new Map(normalizedSlices.map(s => [s.id, []]));
   for (const s of normalizedSlices) {
     for (const d of s.deps) {
+      if (!adj.has(d)) continue;
       adj.get(d).push(s.id);
       indeg.set(s.id, indeg.get(s.id) + 1);
     }
@@ -899,7 +1375,7 @@ function validateBlueprint(raw, context = {}) {
   // Compute waves (longest dep depth from any root)
   const depth = new Map();
   for (const id of order) {
-    const slice = sliceMap.get(id);
+    const slice = normalizedSliceMap.get(id);
     const deps = (slice.deps || []).filter(d => depth.has(d));
     const d = deps.length === 0 ? 0 : Math.max(...deps.map(x => depth.get(x))) + 1;
     depth.set(id, d);
@@ -941,13 +1417,19 @@ function validateBlueprint(raw, context = {}) {
 
   errors.push(...validateDeterministicFormulaReferences(normalizedSlices, context));
   errors.push(...validateVerbatimSourceFacts(normalizedSlices, context));
+  errors.push(...validateDensityCoverage(normalizedSlices, context));
   if (errors.length) return { ok: false, errors };
 
   return {
     ok: true,
     blueprint: {
       objective_restated: String(raw.objective_restated || '').slice(0, 500),
-      global_layout_notes: String(raw.global_layout_notes || '').slice(0, 4000),
+      global_layout_notes: [
+        String(raw.global_layout_notes || '').slice(0, 3600),
+        parallelized.addedScaffold
+          ? 'Dense parallel execution: a scaffold slice creates all declared tabs first; content slices may reference scaffolded sheets before values are populated.'
+          : null
+      ].filter(Boolean).join('\n').slice(0, 4000),
       slices: normalizedSlices,
       waves: waves.map(w => [...w])
     }
@@ -967,7 +1449,14 @@ function buildSliceWorkerPrompt(slice, blueprint, userObjective = '') {
 ${String(userObjective).slice(0, 8000)}
 """\n`
     : '';
-  return `<slice-context>
+  // Auto-attach domain skill so worker has the taxonomy without needing
+  // read_skill (which would burn an iteration). Codex-style: hand the worker
+  // the exact reference material it needs at slice start.
+  const skill = autoLoadDomainSkill(userObjective);
+  const skillBlock = skill
+    ? `\n\nDOMAIN SKILL (${skill.skill} — use this taxonomy verbatim; do NOT substitute generic English labels):\n---\n${skill.content.slice(0, 8000)}\n---\n`
+    : '';
+  return `<slice-context>${skillBlock}
 You are a focused worker building ONE slice of a larger blueprint. Other workers are building other slices in parallel.
 
 SLICE: ${slice.id} — ${slice.title}
@@ -976,7 +1465,7 @@ YOUR EXCLUSIVE SCOPE (write here, nowhere else):
 - sheets owned: ${scope.sheets_owned.length ? scope.sheets_owned.join(', ') : '(none — use ranges_owned)'}
 - ranges owned: ${scope.ranges_owned.length ? scope.ranges_owned.join(', ') : '(full sheets above)'}
 
-READ-ONLY references (data from completed slices you may reference, e.g. via formulas):
+READ-ONLY references (completed upstream data or scaffolded parallel sheets you may reference, e.g. via formulas):
 ${hasUpstream ? scope.may_read_from.map(r => '- ' + r).join('\n') : '(none)'}
 
 GLOBAL LAYOUT CONVENTIONS (follow these across the model):
@@ -990,7 +1479,7 @@ HARD RULES:
 - DO NOT call ask_user_question. Make reasonable defaults.${hasUpstream ? `
 - READ BEFORE YOU WRITE: your first tool call MUST be a read (get_cell_ranges / read_sheet) against the upstream ranges listed above. Do NOT guess upstream layout from the slice instructions — in prod runs, workers that skipped this step wrote formulas pointing to wrong cells and had to redo the slice 4-8 times. Confirm exact addresses, then write your formulas against those exact addresses.
 - IF a read returns suspiciously thin data (only A1, zero rows, sheet "doesn't exist"), it is a TOOL ISSUE — the upstream slice succeeded before yours started. Retry ONCE with read_sheet on the same sheet. If still thin, write your formulas anyway using the absolute address from may_read_from (e.g. =Assumptions!$B$5). DO NOT call done with reason "upstream not available" — that is a confabulation; the orchestrator will reject it.` : ''}
-- ITER BUDGET IS TIGHT (~${20}). Consolidate writes: a P&L / cash-flow / balance-sheet slice should be ONE bulk_set_cell_ranges call (up to 32 writes per call) for ALL section rows, then ONE bulk_set_format pass for formatting. Sequential per-row set_cell_range calls burn the budget and cascade-kill downstream waves.
+- ITER BUDGET IS TIGHT (~${20}). Consolidate writes: assumptions/driver tables should be ONE bulk_set_cell_ranges call; a P&L / cash-flow / balance-sheet slice should be ONE bulk_set_cell_ranges call (up to 32 writes per call) for ALL section rows, then ONE bulk_set_format pass for formatting. Sequential per-row set_cell_range calls burn the budget and cascade-kill downstream waves.
 - TOOL PARAMS are not negotiable. Memorize these EXACT shapes (the wrong name burns one iteration every single time):
     bulk_create_sheets:    {"names":["Sheet1","Sheet2"]}                          — NOT "sheets"
     bulk_set_cell_ranges:  {"writes":[{"sheet":"S","cells":{"A1":{"value":1}}}]}  — NOT "entries"/"ranges"/"cells" at top level
@@ -1004,6 +1493,7 @@ HARD RULES:
 - SANITY CHECK before calling done: when you wrote a time series (e.g. revenue across 2025-2030), the year-over-year ratio should be roughly 1±0.5 (anything growing 50,000× year-over-year means you referenced the WRONG cell — most commonly multiplying by an absolute € amount instead of a percentage). Read back B6:G6 of your output, eyeball the ratios, and if a year is >10× the prior year, you MUST rewrite that formula using the LITERAL cell address from the slice instructions (architect provides it — do not invent). Also: if Net Revenue is identical for every year (no compounding visible), your formula chain is broken — fix before done.
 - execute_office_js is BLOCKED for slice workers (and will be rejected before reaching Excel). Use set_cell_range / bulk_set_cell_ranges for data + formulas, bulk_set_format for formatting, create_sheet / bulk_create_sheets for sheet ops, execute_excel_formula for one-off formulas. Do NOT attempt execute_office_js — every attempt is a wasted iteration.
 - copyToRange is FORMULAS ONLY (relative refs adjust per cell). Never use copyToRange with a text label as the source cell — it paints the label into every destination. For headers/titles, write to one cell and merge if you need it visually wide.
+- Range targets must be finite single A1 ranges. Split disjoint formatting into multiple entries; do not use comma-separated targets like "A3,A8" or whole-column targets like "A:J" for normal formatting.
 - DO NOT call done until you have actually written cells in your owned scope. A done with zero writes will be rejected as a failed slice and cascade-kill downstream slices. If you're stuck, write what you can with absolute references and explain in the done summary what is incomplete.
 - When this slice is done, call the "done" tool with a one-line summary describing what you wrote.
 </slice-context>`;

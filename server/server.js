@@ -388,8 +388,8 @@ app.get('/api/admin/llm-traces/summary', authenticate, async (req, res) => {
 app.get('/api/admin/llm-traces', authenticate, async (req, res) => {
   if (req.userPlan !== 'admin') return res.status(403).json({ error: 'Admin only' });
   try {
-    const { readLlmTraces } = require('./utils/llmTrace');
-    const records = readLlmTraces({
+    const { readLlmTracesAsync } = require('./utils/llmTrace');
+    const records = await readLlmTracesAsync({
       sinceMs: parseAdminSince(req.query.since),
       turnId: req.query.turnId || undefined,
       traceId: req.query.traceId || undefined,
@@ -401,8 +401,30 @@ app.get('/api/admin/llm-traces', authenticate, async (req, res) => {
       model: req.query.model || undefined,
       limit: parseAdminLimit(req.query.limit, 40, 200),
       descending: req.query.order !== 'asc',
-    }).map(mapTracePreview);
-    res.json(records);
+    });
+    res.json(records.map(mapTracePreview));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Per-turn endpoint: authenticated user can fetch traces for their own turn.
+// Useful for benchmark scripts run by the turn owner.
+app.get('/api/turn/:turnId/llm-traces', authenticate, async (req, res) => {
+  try {
+    const { turnId } = req.params;
+    const turn = turns.loadTurn(turnId);
+    const ownsTurn = turn && turn.userId && turn.userId === req.userId;
+    if (!ownsTurn && req.userPlan !== 'admin') return res.status(403).json({ error: 'Not your turn' });
+    const { readLlmTracesAsync } = require('./utils/llmTrace');
+    const records = await readLlmTracesAsync({
+      turnId,
+      eventType: req.query.eventType || undefined,
+      label: req.query.label || undefined,
+      limit: parseAdminLimit(req.query.limit, 500, 5000),
+      descending: req.query.order !== 'asc',
+    });
+    res.json({ turnId, count: records.length, records });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -725,7 +747,7 @@ app.get('/api/admin/llm-events', authenticate, async (req, res) => {
 
 app.post('/api/turn/start', authenticate, quotaCheck, async (req, res) => {
   try {
-    const { message, context, parentTurnId, modelOverride, speedMode, executionEngine } = req.body;
+    const { message, context, parentTurnId, modelOverride, speedMode, executionEngine, forceWorkerTier } = req.body;
     if (!message) return res.status(400).json({ error: 'Messaggio richiesto' });
 
     // Map user-facing speed mode to a concrete strategy preset.
@@ -748,7 +770,8 @@ app.post('/api/turn/start', authenticate, quotaCheck, async (req, res) => {
       speedMode: overlay.speedMode,
       thinkingDisabled: overlay.thinkingDisabled,
       postWriteCritic: overlay.postWriteCritic,
-      executionEngineOverride: executionEngine
+      executionEngineOverride: executionEngine,
+      forceWorkerTier: forceWorkerTier === 'flash' || forceWorkerTier === 'pro' ? forceWorkerTier : null
     });
     res.json({
       turnId: turn.id,
@@ -782,7 +805,15 @@ app.post('/api/turn/step', authenticate, async (req, res) => {
     const { turnId, clientResult, stepSeq } = req.body || {};
     if (!turnId) return res.status(400).json({ error: 'turnId richiesto' });
     await turns.getTurnRefAsync(turnId);
-    const result = await turns.stepTurn(turnId, clientResult, stepSeq);
+    const turn = turns.loadTurn(turnId);
+    // Wrap in execution context so worker LLM calls propagate turnId/userId
+    // into llm trace records (otherwise turn_id is null in Supabase).
+    const { runWithExecutionContext } = require('./utils/executionContext');
+    const result = await runWithExecutionContext({
+      turnId, userId: turn?.userId || req.userId || null,
+      parentTurnId: turn?.parentTurnId || null,
+      phase: 'execution', workflow: 'turn', source: 'turn.step',
+    }, () => turns.stepTurn(turnId, clientResult, stepSeq));
     res.json(result);
   } catch (error) {
     logger.error('Errore turn/step:', error.message);

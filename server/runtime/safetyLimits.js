@@ -90,6 +90,9 @@ function estimateActionCells(action = {}) {
     const n = matrixCellCount(action.formulas || action.values);
     return n || estimateTargetCells(action.target);
   }
+  if (action.type === 'setCellFormat' || action.type === 'addConditionalFormat' || action.type === 'setConditionalFormat') {
+    return estimateTargetCells(action.target);
+  }
   if (action.type === 'fillRange') {
     const n = matrixCellCount(action.value);
     return n || estimateTargetCells(action.target);
