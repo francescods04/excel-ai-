@@ -70,17 +70,18 @@
       <label><b>password</b></label>
       <input type="password" name="password" placeholder="••••••••" required autocomplete="current-password" minlength="8">
 
-      <button class="btn" type="submit" id="submitBtn">Accedi <span>→</span></button>
+      <button class="btn" type="submit" id="submitBtn" data-track="login-submit">Accedi <span>→</span></button>
     </form>
 
     <div class="divider">OPPURE</div>
 
-    <button class="btn btn-ghost" type="button" id="magicBtn">Ricevi magic link via email</button>
+    <button class="btn btn-ghost" type="button" id="magicBtn" data-track="login-magic-link">Ricevi magic link via email</button>
 
     <p class="alt">Non hai un account? <a href="/signup.html">Registrati</a></p>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="/public/tracker.js"></script>
   <script>
     (async () => {
       const { supabaseUrl, supabaseAnonKey } = await fetch('/api/config').then(r => r.json());
@@ -110,13 +111,17 @@
         const data = new FormData(form);
         const email = data.get('email').trim();
         const password = data.get('password');
+        window.ExcelAI && window.ExcelAI.track('login_initiated', { method: 'password' });
         const { data: res, error } = await window.__sb.auth.signInWithPassword({ email, password });
         if(error){
           showErr(error.message.includes('Invalid login') ? 'Email o password non corrette.' : error.message);
+          window.ExcelAI && window.ExcelAI.track('login_error', { method: 'password', reason: error.message.slice(0, 100) });
           btn.disabled = false;
           btn.innerHTML = 'Accedi <span>→</span>';
           return;
         }
+        window.ExcelAI && window.ExcelAI.identify(res.user.id);
+        window.ExcelAI && window.ExcelAI.track('login_completed', { method: 'password' });
         showOk('Accesso riuscito. Reindirizzamento…');
         setTimeout(() => location.href = '/dashboard.html', 400);
       });
@@ -127,6 +132,7 @@
         if(!email){ showErr('Inserisci la tua email per ricevere il magic link.'); return; }
         magicBtn.disabled = true;
         magicBtn.textContent = 'Invio link in corso…';
+        window.ExcelAI && window.ExcelAI.track('magic_link_requested', { email_domain: email.split('@')[1] || 'unknown' });
         const { error } = await window.__sb.auth.signInWithOtp({
           email,
           options: { emailRedirectTo: window.location.origin + '/dashboard.html' }

@@ -438,7 +438,7 @@
           <span class="status-dot"></span>
           <span>Sistema operativo</span>
         </div>
-        <a href="#demo" class="btn btn-primary" style="padding:9px 16px;font-size:13px">
+        <a href="#demo" class="btn btn-primary" style="padding:9px 16px;font-size:13px" data-track="ribbon-cta-demo">
           Richiedi demo <span class="btn-arrow">→</span>
         </a>
         <button class="mobile-toggle" id="mobileToggle" aria-label="Menu">≡</button>
@@ -483,10 +483,10 @@
               con anteprima di ogni modifica prima dell'esecuzione.
             </p>
             <div class="hero-actions reveal reveal-d3">
-              <a href="#demo" class="btn btn-primary">
+              <a href="#demo" class="btn btn-primary" data-track="hero-cta-demo">
                 Richiedi accesso demo <span class="btn-arrow">→</span>
               </a>
-              <a href="#come-funziona" class="btn btn-ghost">
+              <a href="#come-funziona" class="btn btn-ghost" data-track="hero-cta-how">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
                 Guarda come funziona
               </a>
@@ -547,14 +547,14 @@
             <div class="hsub">// click o scrivi un prompt</div>
             <div class="prompt-box" id="livePrompt">Crea un modello DCF con WACC 8% e terminal growth 2%<span class="cur">_</span></div>
             <div class="chips" id="chipBar">
-              <button class="chip active" data-preset="dcf">DCF 8% / 2%</button>
-              <button class="chip" data-preset="recon">Riconcilia B↔D</button>
-              <button class="chip" data-preset="dashboard">Dashboard KPI</button>
-              <button class="chip" data-preset="forecast">Forecast 2026</button>
-              <button class="chip" data-preset="mismatch">Trova anomalie</button>
+              <button class="chip active" data-preset="dcf" data-track="demo-chip-dcf">DCF 8% / 2%</button>
+              <button class="chip" data-preset="recon" data-track="demo-chip-recon">Riconcilia B↔D</button>
+              <button class="chip" data-preset="dashboard" data-track="demo-chip-dashboard">Dashboard KPI</button>
+              <button class="chip" data-preset="forecast" data-track="demo-chip-forecast">Forecast 2026</button>
+              <button class="chip" data-preset="mismatch" data-track="demo-chip-mismatch">Trova anomalie</button>
             </div>
             <div class="run-row">
-              <button class="run-btn" id="runBtn"><span class="pulse"></span><span id="runLabel">Run scenario</span><span>→</span></button>
+              <button class="run-btn" id="runBtn" data-track="demo-run"><span class="pulse"></span><span id="runLabel">Run scenario</span><span>→</span></button>
             </div>
             <div class="log" id="liveLog">
               <div class="log-line in"><span class="ts">--:--:--</span><span class="muted">Sistema pronto. Seleziona uno scenario e premi Run.</span></div>
@@ -1408,7 +1408,7 @@
                 <span>Accetto la <a href="/privacy.html">Privacy Policy</a> e i <a href="/faq.html">Termini di servizio</a>.</span>
               </label>
               <div class="form-error" id="demoError" style="display:none;color:var(--red);font-size:12.5px;font-family:'JetBrains Mono',monospace;padding:8px 10px;background:rgba(255,107,107,0.08);border:1px solid rgba(255,107,107,0.25);border-radius:4px"></div>
-              <button type="submit" class="submit" id="demoSubmit">Richiedi accesso <span class="btn-arrow">→</span></button>
+              <button type="submit" class="submit" id="demoSubmit" data-track="form-demo-submit">Richiedi accesso <span class="btn-arrow">→</span></button>
             </form>
             <div class="demo-success" id="demoSuccess">
               <div class="success-icon">✓</div>
@@ -1427,7 +1427,7 @@
               <li>Supporto prioritario con SLA</li>
               <li>Customizzazione prompt per il tuo settore</li>
             </ul>
-            <a href="mailto:enterprise@excelai.app" class="btn btn-ghost" style="width:100%;justify-content:center">
+            <a href="mailto:enterprise@excelai.app" class="btn btn-ghost" style="width:100%;justify-content:center" data-track="enterprise-cta">
               Contatta il team Enterprise →
             </a>
           </div>
@@ -1485,6 +1485,7 @@
 
   <div class="toast" id="toast">Copiato negli appunti</div>
 
+  <script src="/public/tracker.js"></script>
   <script>
     /* ═══════════════════════════════════════
        1. PARALLAX UNIVERSE GENERATOR
@@ -1763,6 +1764,7 @@
         tab.classList.add('active');
         const pane = document.getElementById('pane-' + tab.dataset.pane);
         if(pane) pane.classList.add('active');
+        window.ExcelAI && window.ExcelAI.track('install_tab_clicked', { os: tab.dataset.pane });
       });
     });
 
@@ -1782,6 +1784,7 @@
         } else {
           show();
         }
+        window.ExcelAI && window.ExcelAI.track('install_cmd_copied', { length: text.length });
       });
     });
 
@@ -1792,7 +1795,11 @@
       const item = btn.parentElement;
       const isOpen = item.classList.contains('open');
       document.querySelectorAll('.faq-item').forEach(i => i.classList.remove('open'));
-      if(!isOpen) item.classList.add('open');
+      if(!isOpen){
+        item.classList.add('open');
+        const num = item.querySelector('.fnum')?.textContent || '';
+        window.ExcelAI && window.ExcelAI.track('faq_opened', { question: num });
+      }
     }
     window.toggleFaq = toggleFaq;
 
@@ -1809,6 +1816,7 @@
 
       const data = {};
       new FormData(form).forEach((v, k) => { data[k] = v; });
+      window.ExcelAI && window.ExcelAI.track('form_submit', { form: 'demo_request' });
 
       btn.disabled = true;
       btn.dataset.label = btn.textContent;
@@ -1828,6 +1836,7 @@
             : (json.error || ('Errore ' + res.status));
           err.textContent = '⚠ ' + msg;
           err.style.display = 'block';
+          window.ExcelAI && window.ExcelAI.track('form_error', { form: 'demo_request', status: res.status });
           btn.disabled = false;
           btn.innerHTML = btn.dataset.label;
           return;
@@ -1835,9 +1844,11 @@
 
         form.style.display = 'none';
         document.getElementById('demoSuccess').classList.add('show');
+        window.ExcelAI && window.ExcelAI.track('demo_request_submitted', { id: json.id, fallback: !!json.fallback });
       } catch (e) {
         err.textContent = '⚠ Errore di rete. Controlla la connessione e riprova.';
         err.style.display = 'block';
+        window.ExcelAI && window.ExcelAI.track('form_error', { form: 'demo_request', error: 'network' });
         btn.disabled = false;
         btn.innerHTML = btn.dataset.label;
       }
@@ -2167,6 +2178,7 @@
         resetCells();
         clearLog();
         addLog('Scenario <b style="color:var(--accent)">' + key.toUpperCase() + '</b> caricato. Premi Run.', 'muted');
+        window.ExcelAI && window.ExcelAI.track('demo_preset_selected', { preset: key });
       }
 
       async function run(){
@@ -2179,6 +2191,7 @@
         clearLog();
         setBadge('running', 'rgba(255,180,84,0.1)');
         addLog('▸ Avvio scenario <b style="color:var(--accent)">' + currentPreset.toUpperCase() + '</b>', 'ok');
+        window.ExcelAI && window.ExcelAI.track('demo_run_started', { preset: currentPreset });
         const t0 = performance.now();
         try {
           await PRESETS[currentPreset].run();
@@ -2186,9 +2199,11 @@
           latencyEl.innerHTML = '<span class="ok">' + elapsed + 's</span>';
           if(stateEl.textContent.trim() === 'idle') stateEl.innerHTML = '<span class="ok">✓ done</span>';
           setBadge('done', 'var(--accent-soft)');
+          window.ExcelAI && window.ExcelAI.track('demo_run_completed', { preset: currentPreset, duration_s: parseFloat(elapsed), cells: parseInt(cellCountEl.textContent) });
         } catch(e){
           addLog('⚠ Errore: ' + e.message, 'warn');
           stateEl.innerHTML = '<span style="color:var(--red)">✗ errore</span>';
+          window.ExcelAI && window.ExcelAI.track('js_error', { source: 'live_demo', preset: currentPreset, message: e.message });
         }
         running = false;
         runBtn.disabled = false;

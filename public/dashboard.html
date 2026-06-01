@@ -55,6 +55,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="/public/tracker.js"></script>
   <script>
     (async () => {
       const { supabaseUrl, supabaseAnonKey } = await fetch('/api/config').then(r => r.json());
@@ -74,6 +75,7 @@
       const { data: { session } } = await sb.auth.getSession();
 
       if(!session){
+        window.ExcelAI && window.ExcelAI.track('dashboard_viewed', { authed: false });
         title.textContent = 'Accesso richiesto';
         sub.innerHTML = 'Per accedere alla tua area devi <span class="user-email">fare login</span> o registrarti.';
         stateText.textContent = 'Nessuna sessione attiva';
@@ -92,8 +94,13 @@
         loginLink.style.display = 'none';
         signupLink.style.display = 'none';
 
+        window.ExcelAI && window.ExcelAI.identify(session.user.id);
+        window.ExcelAI && window.ExcelAI.track('dashboard_viewed', { authed: true });
+
         logoutBtn.addEventListener('click', async () => {
+          window.ExcelAI && window.ExcelAI.track('logout');
           await sb.auth.signOut();
+          window.ExcelAI && window.ExcelAI.reset();
           location.reload();
         });
 

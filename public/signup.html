@@ -90,13 +90,14 @@
         <span>Accetto la <a href="/privacy.html">Privacy Policy</a> e i <a href="/faq.html">Termini di servizio</a>.</span>
       </label>
 
-      <button class="btn" type="submit" id="submitBtn">Crea account <span>→</span></button>
+      <button class="btn" type="submit" id="submitBtn" data-track="signup-submit">Crea account <span>→</span></button>
     </form>
 
     <p class="alt">Hai già un account? <a href="/login.html">Accedi</a></p>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="/public/tracker.js"></script>
   <script>
     (async () => {
       const { supabaseUrl, supabaseAnonKey } = await fetch('/api/config').then(r => r.json());
@@ -144,6 +145,8 @@
         const data = Object.fromEntries(new FormData(form));
         const { nome, cognome, email, password, azienda, ruolo } = data;
 
+        window.ExcelAI && window.ExcelAI.track('signup_initiated', { ruolo, email_domain: email.split('@')[1] || 'unknown' });
+
         const { data: res, error } = await window.__sb.auth.signUp({
           email, password,
           options: {
@@ -154,15 +157,19 @@
 
         if(error){
           showErr(error.message.includes('already registered') ? 'Email già registrata. Prova ad accedere.' : error.message);
+          window.ExcelAI && window.ExcelAI.track('signup_error', { reason: error.message.slice(0, 100) });
           btn.disabled = false;
           btn.innerHTML = 'Crea account <span>→</span>';
           return;
         }
 
         if(res.session){
+          window.ExcelAI && window.ExcelAI.identify(res.user.id);
+          window.ExcelAI && window.ExcelAI.track('signup_completed', { ruolo, requires_confirmation: false });
           showOk('Account creato. Reindirizzamento…');
           setTimeout(() => location.href = '/dashboard.html', 400);
         } else {
+          window.ExcelAI && window.ExcelAI.track('signup_completed', { ruolo, requires_confirmation: true });
           showOk('Controlla la tua email: ti abbiamo inviato il link di conferma. Clicca per attivare l\'account.');
           form.style.display = 'none';
         }
