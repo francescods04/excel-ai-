@@ -1347,6 +1347,73 @@ function validateBlueprint(raw, context = {}) {
   normalizedSlices = parallelized.slices;
   const normalizedSliceMap = new Map(normalizedSlices.map(s => [s.id, s]));
 
+  // ── DEPENDENCY INFERENCE FROM may_read_from ─────────────────────────────
+  // The architect prompt (and emitted blueprints) routinely set every content
+  // slice to depend only on the scaffold, leaving runtime cross-sheet reads
+  // racing against the writes that populate the upstream sheet. Observed in
+  // the 2026-06-01 Vairano run: Revenue, Construction, Financing, Cash Flow,
+  // P&L, Valuation, Sensitivity all parallel after scaffold, all referencing
+  // Assumptions which hadn't been written yet → cascade of #VALUE! errors,
+  // health-scan injected blocking errors, valuation_returns trapped in
+  // done_blocked_by_errors forever.
+  //
+  // Auto-infer: if slice A's may_read_from points at a sheet (or sub-range)
+  // owned by slice B, and B is not already in A.deps, add B to A.deps. Kahn's
+  // algorithm below will recompute waves, naturally pushing dependent slices
+  // into later waves while preserving parallelism between independent slices.
+  //
+  // Skip self-references and same-sheet cases where A also owns part of the
+  // sheet via ranges_owned (shared-sheet slices use range partitioning, not
+  // ordering). Skip the scaffold-like slices as sources of dependency: they
+  // create empty sheets, so depending on the scaffold is already covered.
+  const sheetOwners = new Map();   // exact sheet name → slice id that fully owns it
+  const rangeOwners = new Map();   // exact "Sheet!A1:B9" → slice id
+  for (const s of normalizedSlices) {
+    if (isScaffoldLikeSlice(s)) continue;
+    for (const sh of s.scope.sheets_owned) {
+      const sharesByRange = s.scope.ranges_owned.some(r => r.startsWith(sh + '!'));
+      if (!sharesByRange && !sheetOwners.has(sh)) sheetOwners.set(sh, s.id);
+    }
+    for (const r of s.scope.ranges_owned) {
+      if (!rangeOwners.has(r)) rangeOwners.set(r, s.id);
+    }
+  }
+  const inferredDepCount = { added: 0, byTarget: new Map() };
+  for (const slice of normalizedSlices) {
+    if (!Array.isArray(slice.scope.may_read_from) || slice.scope.may_read_from.length === 0) continue;
+    const ownDeps = new Set(slice.deps);
+    for (const readRef of slice.scope.may_read_from) {
+      const trimmed = String(readRef || '').trim();
+      if (!trimmed) continue;
+      // Pull sheet name. Support "Sheet", "Sheet!A1:B2", "'Sheet Name'!A1".
+      const refSheet = trimmed.includes('!')
+        ? trimmed.split('!')[0].replace(/^'/, '').replace(/'$/, '')
+        : trimmed.replace(/^'/, '').replace(/'$/, '');
+      let owner = sheetOwners.get(refSheet) || null;
+      if (!owner) {
+        // Maybe matches an explicit range-owner entry
+        for (const [rng, oid] of rangeOwners.entries()) {
+          if (rng === trimmed || rng.startsWith(refSheet + '!')) { owner = oid; break; }
+        }
+      }
+      if (!owner) continue;
+      if (owner === slice.id) continue;
+      if (ownDeps.has(owner)) continue;
+      // If the slice itself owns a range on the same sheet, treat as shared-sheet (skip)
+      const slicePartialOnSheet = slice.scope.ranges_owned.some(r => r.startsWith(refSheet + '!'));
+      const sliceOwnsSheet = slice.scope.sheets_owned.includes(refSheet);
+      if (slicePartialOnSheet || sliceOwnsSheet) continue;
+      ownDeps.add(owner);
+      inferredDepCount.added++;
+      const key = `${slice.id}<-${owner}`;
+      inferredDepCount.byTarget.set(key, (inferredDepCount.byTarget.get(key) || 0) + 1);
+    }
+    slice.deps = [...ownDeps];
+  }
+  if (inferredDepCount.added > 0) {
+    logger.info(`[Architect] inferred ${inferredDepCount.added} dependency edge(s) from may_read_from → sheets_owned overlap. Sample: ${[...inferredDepCount.byTarget.keys()].slice(0, 6).join(', ')}`);
+  }
+
   // Cycle detection via Kahn's algorithm
   const indeg = new Map(normalizedSlices.map(s => [s.id, 0]));
   const adj = new Map(normalizedSlices.map(s => [s.id, []]));

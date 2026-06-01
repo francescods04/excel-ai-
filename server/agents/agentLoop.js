@@ -411,6 +411,63 @@ function detectScalarTextFloodFill(cells, copyToRange) {
   return { ok: true };
 }
 
+/* ---------- Degenerate copy-seed guard ----------
+ *
+ * Rejects copyToRange writes whose seed formula references a cell in the same
+ * column N rows above (relative ref, not absolute) with a multiplicative
+ * coefficient. Over hundreds of rows this compounds exponentially — observed
+ * in the 2026-06-01 Vairano Per-Floor Detail slice where 1000 mq decayed to
+ * 1E-97 mq across 1000 rows because the seed used "=A_prev*0.1".
+ *
+ * Fix the LLM is nudged toward: absolute ref to an upstream constant
+ * ("=$A$2*<index>") or index arithmetic, never a relative chain.
+ */
+function detectDegenerateCopySeed(cells, copyToRange) {
+  if (!cells || !copyToRange || typeof cells !== 'object') return { ok: true };
+  const entries = Object.entries(cells);
+  if (entries.length === 0) return { ok: true };
+  const [seedAddr, seedSpec] = entries[0];
+  const formula = (seedSpec && seedSpec.formula)
+    || (seedSpec && typeof seedSpec.value === 'string' && seedSpec.value.startsWith('=') ? seedSpec.value : null);
+  if (!formula) return { ok: true };
+  const seedBounds = parseSimpleA1Bounds(seedAddr);
+  const destBounds = parseSimpleA1Bounds(copyToRange);
+  if (!seedBounds || !destBounds) return { ok: true };
+  const rows = destBounds.r2 - destBounds.r1 + 1;
+  if (rows < 20) return { ok: true }; // only worry about tall fills
+  const seedColLetter = indexToCol(seedBounds.c1);
+  const seedRow = seedBounds.r1;
+  // Walk every $?col$?row token in the formula
+  const refRegex = /(\$?)([A-Z]+)(\$?)(\d+)/gi;
+  let m;
+  while ((m = refRegex.exec(formula)) !== null) {
+    const colTok = m[2].toUpperCase();
+    const rowAbsMarker = m[3]; // "$" if absolute row, "" if relative
+    if (colTok !== seedColLetter) continue;
+    if (rowAbsMarker === '$') continue; // absolute row ref does NOT compound
+    const rowNum = Number(m[4]);
+    if (!Number.isFinite(rowNum)) continue;
+    const delta = seedRow - rowNum;
+    if (delta <= 0 || delta > 10) continue; // must point a few rows above seed
+    // Look for a multiplicative coefficient adjacent to this ref
+    const fullRef = m[0];
+    const idx = m.index;
+    const after = formula.slice(idx + fullRef.length, idx + fullRef.length + 10);
+    const before = formula.slice(Math.max(0, idx - 10), idx);
+    const afterCoeff = after.match(/^\s*[*/]\s*(\d+(?:\.\d+)?)/);
+    const beforeCoeff = before.match(/(\d+(?:\.\d+)?)\s*[*/]\s*$/);
+    const coeffStr = (afterCoeff && afterCoeff[1]) || (beforeCoeff && beforeCoeff[1]);
+    const coeff = coeffStr != null ? Number(coeffStr) : null;
+    if (coeff == null) continue;
+    if (coeff === 1) continue; // identity is a noop chain — copy through
+    return {
+      ok: false,
+      reason: `set_cell_range rejected: degenerate copy seed. Seed at "${seedAddr}" formula "${formula.slice(0, 80)}" references "${fullRef}" (${delta} row${delta > 1 ? 's' : ''} above the seed, INSIDE the copyToRange destination "${copyToRange}") with a multiplicative coefficient ~${coeff}. Over ${rows} rows this compounds exponentially — row ${destBounds.r2} would be approximately seed × ${coeff}^${rows}, which underflows to ~0 or overflows to #NUM!. Observed in the 2026-06-01 Vairano Per-Floor Detail slice where 1000 mq decayed to 1E-97 mq across 1000 rows. Fix: use an ABSOLUTE reference to a stable upstream constant (e.g. "=$A$2 * (1 + (ROW()-${seedRow}) * ${coeff})") or index arithmetic from the seed row. Never chain a relative ref to the previous row inside the same copyToRange.`
+    };
+  }
+  return { ok: true };
+}
+
 function parseSimpleA1Bounds(addr) {
   if (typeof addr !== 'string') return null;
   const raw = addr.replace(/\$/g, '').trim();
@@ -2741,6 +2798,7 @@ async function runAgentLoop(objective, context, options = {}) {
   let abortReason = '';
   let forceThinkingNext = options.resumeForceThinkingNext || false;
   let parseFailureStreak = options.resumeParseFailureStreak || 0;
+  let doneBlockedStreak = options.resumeDoneBlockedStreak || 0;
   const pendingCritics = [];
   const loadedSkillNames = new Set(options.resumeLoadedSkillNames || []);
   const recentToolTrail = Array.isArray(options.resumeRecentToolTrail)
@@ -2926,13 +2984,31 @@ async function runAgentLoop(objective, context, options = {}) {
         const verify = collectBlockingErrorsWithHealth(results, healthSeen);
         if (!verify.ok && !options.allowDoneWithErrors) {
           const healthCount = verify.blockingErrors.filter(b => b.tool === 'healthScan').length;
-          const blockMsg = buildDoneBlockedMessageWithHealth(verify.blockingErrors, healthCount);
-          logger.warn(`[AgentLoop] done blocked: ${verify.blockingErrors.length} unresolved error(s) (${healthCount} from health scan)`);
+          doneBlockedStreak++;
+          const maxBlockedRetries = Number(options.maxDoneBlockedRetries) || 3;
+          if (doneBlockedStreak >= maxBlockedRetries) {
+            logger.warn(`[AgentLoop] done force-allowed after ${doneBlockedStreak} consecutive blocks; ${verify.blockingErrors.length} error(s) remain (${healthCount} from health scan)`);
+            results.push({
+              type: 'done',
+              summary: (params.summary || 'Task completed') + ` (degraded: ${verify.blockingErrors.length} unresolved error(s) after ${doneBlockedStreak} retries)`,
+              degraded: true,
+              unresolvedErrors: verify.blockingErrors.slice(0, 10),
+              doneBlockedStreak
+            });
+            messages.push(makeUserMessage(`Task force-completed with ${verify.blockingErrors.length} unresolved error(s) after ${doneBlockedStreak} retries.`));
+            onEvent('agentDone', { summary: params.summary || 'Task completed', iteration, degraded: true });
+            done = true;
+            break;
+          }
+          const blockMsg = buildDoneBlockedMessageWithHealth(verify.blockingErrors, healthCount)
+            + `\n\n[ATTEMPT ${doneBlockedStreak}/${maxBlockedRetries}] After ${maxBlockedRetries} blocked done attempts the slice will be force-completed with degraded status. Spend remaining iterations FIXING the errors (read offending cells, repair formulas), not re-calling done.`;
+          logger.warn(`[AgentLoop] done blocked (${doneBlockedStreak}/${maxBlockedRetries}): ${verify.blockingErrors.length} unresolved error(s) (${healthCount} from health scan)`);
           messages.push(makeUserMessage(blockMsg));
-          results.push({ type: 'error', error: 'done_blocked_by_errors', blocked: true, tool: 'done', errors: verify.blockingErrors.slice(0, 6) });
-          onEvent('iterationError', { iteration, error: 'done_blocked_by_errors' });
+          results.push({ type: 'error', error: 'done_blocked_by_errors', blocked: true, tool: 'done', errors: verify.blockingErrors.slice(0, 6), attempt: doneBlockedStreak });
+          onEvent('iterationError', { iteration, error: 'done_blocked_by_errors', attempt: doneBlockedStreak, maxRetries: maxBlockedRetries });
           continue;
         }
+        doneBlockedStreak = 0;
         done = true;
         // Optional auto-format pass for legacy single-agent runs.
         if (touchedSheets.size > 0 && autoFormatOnDone) {
@@ -3933,6 +4009,11 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
           logger.warn(`[AgentLoop] ${floodCheck.reason}`);
           return { error: floodCheck.reason };
         }
+        const seedCheck = detectDegenerateCopySeed(write.cells, write.copyToRange);
+        if (!seedCheck.ok) {
+          logger.warn(`[AgentLoop] ${seedCheck.reason}`);
+          return { error: seedCheck.reason };
+        }
         const sizeCheck = validateSetCellRangeSize(write.cells, write.copyToRange, label);
         if (!sizeCheck.ok) {
           logger.warn(`[AgentLoop] ${sizeCheck.reason}`);
@@ -4061,6 +4142,11 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
           const floodCheck = detectScalarTextFloodFill(write.cells, write.copyToRange);
           if (!floodCheck.ok) {
             entryError = floodCheck.reason;
+            break;
+          }
+          const seedCheck = detectDegenerateCopySeed(write.cells, write.copyToRange);
+          if (!seedCheck.ok) {
+            entryError = seedCheck.reason;
             break;
           }
           const sizeCheck = validateSetCellRangeSize(write.cells, write.copyToRange, label);
@@ -4625,6 +4711,7 @@ function initAgentRun(objective, context, options = {}) {
     lastErrorMessage: '',
     webSearchCount: 0,
     parseFailureStreak: 0,
+    doneBlockedStreak: 0,
     forceThinkingNext: false,
     loadedSkillNames: [],
     recentToolTrail: [],
@@ -5218,13 +5305,41 @@ async function runAgentStep(state, clientResult, deps = {}) {
       const verify = collectBlockingErrorsWithHealth(state.results, healthSeen);
       if (!verify.ok && !state.config?.allowDoneWithErrors) {
         const healthCount = verify.blockingErrors.filter(b => b.tool === 'healthScan').length;
-        const blockMsg = buildDoneBlockedMessageWithHealth(verify.blockingErrors, healthCount);
-        logger.warn(`[AgentStep] done blocked: ${verify.blockingErrors.length} unresolved error(s) (${healthCount} from health scan)`);
+        state.doneBlockedStreak = (state.doneBlockedStreak || 0) + 1;
+        // Escape hatch: after N consecutive done-blocked, force-complete the slice
+        // with degraded status instead of looping forever. Otherwise health-scan
+        // errors that the slice cannot repair (e.g. cells owned by another slice,
+        // or upstream deps that never landed) trap the loop until Vercel kills
+        // the orchestrator at the 300s function timeout — observed in the
+        // 2026-06-01 Vairano run, valuation_returns slice (4 retries, 6 turn
+        // rehydrations, ultimately FUNCTION_INVOCATION_TIMEOUT).
+        const maxBlockedRetries = Number(state.config?.maxDoneBlockedRetries) || 3;
+        if (state.doneBlockedStreak >= maxBlockedRetries) {
+          logger.warn(`[AgentStep] done force-allowed after ${state.doneBlockedStreak} consecutive blocks; ${verify.blockingErrors.length} error(s) remain (${healthCount} from health scan)`);
+          state.status = 'completed';
+          state.degraded = true;
+          state.summary = (params.summary || 'Task completed') + ` (degraded: ${verify.blockingErrors.length} unresolved error(s) after ${state.doneBlockedStreak} retries)`;
+          state.results.push({
+            type: 'done',
+            summary: state.summary,
+            degraded: true,
+            unresolvedErrors: verify.blockingErrors.slice(0, 10),
+            doneBlockedStreak: state.doneBlockedStreak
+          });
+          state.messages.push(makeUserMessage(`Task force-completed with ${verify.blockingErrors.length} unresolved error(s) after ${state.doneBlockedStreak} retries.`));
+          onProgress('agentDone', { summary: state.summary, iteration: state.iteration, degraded: true });
+          return { state, control: 'done', payload: { summary: state.summary, degraded: true, autoFormatActions: null } };
+        }
+        const blockMsg = buildDoneBlockedMessageWithHealth(verify.blockingErrors, healthCount)
+          + `\n\n[ATTEMPT ${state.doneBlockedStreak}/${maxBlockedRetries}] After ${maxBlockedRetries} blocked done attempts the slice will be force-completed with degraded status. Spend remaining iterations FIXING the errors (read offending cells, repair formulas), not re-calling done.`;
+        logger.warn(`[AgentStep] done blocked (${state.doneBlockedStreak}/${maxBlockedRetries}): ${verify.blockingErrors.length} unresolved error(s) (${healthCount} from health scan)`);
         state.messages.push(makeUserMessage(blockMsg));
-        state.results.push({ type: 'error', error: 'done_blocked_by_errors', blocked: true, tool: 'done', errors: verify.blockingErrors.slice(0, 6) });
-        onProgress('iterationError', { iteration: state.iteration, error: 'done_blocked_by_errors' });
+        state.results.push({ type: 'error', error: 'done_blocked_by_errors', blocked: true, tool: 'done', errors: verify.blockingErrors.slice(0, 6), attempt: state.doneBlockedStreak });
+        onProgress('iterationError', { iteration: state.iteration, error: 'done_blocked_by_errors', attempt: state.doneBlockedStreak, maxRetries: maxBlockedRetries });
         return { state, control: 'continue', payload: { thought } };
       }
+      // Done succeeded: reset streak so the next slice (or this one re-entering after legitimate work) starts fresh
+      state.doneBlockedStreak = 0;
       state.status = 'completed';
       state.summary = params.summary || 'Task completed';
       // Optional legacy auto-format pass before exit.
@@ -5341,5 +5456,6 @@ module.exports = {
   compactMessagesToSummary,
   shouldAutoCompactMessages,
   messageCharCount,
-  detectScalarTextFloodFill
+  detectScalarTextFloodFill,
+  detectDegenerateCopySeed
 };

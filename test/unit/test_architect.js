@@ -238,11 +238,18 @@ function test_validateBlueprint_parallelizes_dense_rows_per_sheet_plan() {
   assert.ok(r.ok, `dense blueprint should parallelize, got: ${(r.errors || []).join('; ')}`);
   assert.strictEqual(r.blueprint.slices[0].id, 'workbook_scaffold');
   assert.strictEqual(r.blueprint.slices[0].actions[0].tool, 'bulk_create_sheets');
-  assert.deepStrictEqual(r.blueprint.slices.find(s => s.id === 'cash_flow').deps, ['workbook_scaffold']);
+  // 2026-06-01: cash_flow.may_read_from declares the Assumptions sheet, so
+  // dep-inference must add 'assumptions' to deps. Without this fix, the
+  // Vairano run had all content slices race assumptions in Wave 2 and
+  // cascaded #VALUE! across every cross-sheet formula.
+  const cashFlowDeps = r.blueprint.slices.find(s => s.id === 'cash_flow').deps;
+  assert.ok(cashFlowDeps.includes('workbook_scaffold'), `cash_flow.deps must include scaffold; got ${cashFlowDeps}`);
+  assert.ok(cashFlowDeps.includes('assumptions'), `cash_flow.deps must include assumptions (inferred from may_read_from); got ${cashFlowDeps}`);
   assert.deepStrictEqual(r.blueprint.waves[0], ['workbook_scaffold']);
-  assert.ok(r.blueprint.waves[1].includes('cash_flow'), 'dense content should move into the first content wave');
-  assert.deepStrictEqual(r.blueprint.waves[2], ['format_and_verify']);
-  console.log('  ✓ dense rows-per-sheet blueprint gets scaffolded and parallelized');
+  assert.deepStrictEqual(r.blueprint.waves[1], ['assumptions'], `assumptions should occupy wave 1 alone; got ${JSON.stringify(r.blueprint.waves[1])}`);
+  assert.ok(r.blueprint.waves[2].includes('cash_flow'), 'dense content should land in wave 2 after assumptions');
+  assert.deepStrictEqual(r.blueprint.waves[r.blueprint.waves.length - 1], ['format_and_verify']);
+  console.log('  ✓ dense rows-per-sheet blueprint gets scaffolded and parallelized (assumptions root, then content)');
 }
 
 function test_validateBlueprint_keeps_assumptions_setup_when_parallelizing() {

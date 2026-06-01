@@ -378,6 +378,15 @@ function estimateBatchCells(actions = []) {
   }, 0);
 }
 
+// Human-friendly count for log lines. Avoids the "~Infinity celle" garble seen
+// in the 2026-06-01 Vairano run when an action targeted a whole column/row
+// (e.g. "A:A"), which is unbounded by nature. We still keep the numeric
+// estimate available for limit comparisons; this just keeps the log readable.
+function formatCellCount(n) {
+  if (!Number.isFinite(n)) return 'range illimitato (intera colonna/riga)';
+  return String(n);
+}
+
 const FORMULA_ERROR_RE = /^#(?:REF!|VALUE!|NAME\?|DIV\/0!|NUM!|N\/A|NULL!)$/i;
 const MAX_FORMULA_VERIFY_TARGETS = 180;
 const MAX_FORMULA_VERIFY_CELLS = 3000;
@@ -646,7 +655,7 @@ function recordChunkTiming(durationMs, actions = []) {
 
   if (durationMs > SLOW_CHUNK_MS) {
     addLog(
-      `Chunk lento: ${Math.round(durationMs / 1000)}s, ${actions.length} azioni, ~${estimateBatchCells(actions)} celle → adatto finestra a ~${adaptiveChunkCostLimit}.`,
+      `Chunk lento: ${Math.round(durationMs / 1000)}s, ${actions.length} azioni, ~${formatCellCount(estimateBatchCells(actions))} celle → adatto finestra a ~${adaptiveChunkCostLimit}.`,
       'warn'
     );
   }
@@ -1181,7 +1190,7 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
           }
         }
         const slowNote = slowChunks > 0 ? ` (${slowChunks} lenti)` : '';
-        addLog(`Batch Excel: ${actions.length} azioni in ${chunks.length} chunk (~${totalCells} celle)${slowNote}.`);
+        addLog(`Batch Excel: ${actions.length} azioni in ${chunks.length} chunk (~${formatCellCount(totalCells)} celle)${slowNote}.`);
         aggregate._snapshotsTaken = snapshotsTaken;
         return aggregate;
       }
@@ -1240,7 +1249,7 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
     if (mutationTargets.length > MAX_SNAPSHOT_TARGETS) {
       addLog(`Snapshot undo saltato: ${mutationTargets.length} target superano il limite sicuro (${MAX_SNAPSHOT_TARGETS}).`, 'warn');
     } else if (estimatedBatchCells > MAX_SNAPSHOT_BATCH_CELLS) {
-      addLog(`Snapshot undo saltato: batch troppo grande (~${estimatedBatchCells} celle, limite ${MAX_SNAPSHOT_BATCH_CELLS}).`, 'warn');
+      addLog(`Snapshot undo saltato: batch troppo grande (~${formatCellCount(estimatedBatchCells)} celle, limite ${MAX_SNAPSHOT_BATCH_CELLS}).`, 'warn');
     } else if (mutationTargets.length > 0) {
       snapshot = await captureSnapshot(context, mutationTargets);
     }

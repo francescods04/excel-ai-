@@ -578,23 +578,26 @@ function ingestSliceStep(state, sliceId, result, sinks, onEvent = () => {}) {
       });
       return;
     }
+    const sliceDegraded = !!(result.payload?.degraded || result.state?.degraded);
     state.sliceStates[sliceId] = 'succeeded';
     state.sliceResults[sliceId] = {
       ok: true,
-      status: 'completed',
+      status: sliceDegraded ? 'completed_degraded' : 'completed',
       summary: result.payload?.summary || result.state.summary || `${slice.title} completed`,
       iteration: result.state.iteration || 0,
       writes: state.sliceWriteCounts[sliceId] || 0,
-      cells: state.sliceWriteCells[sliceId] || 0
+      cells: state.sliceWriteCells[sliceId] || 0,
+      degraded: sliceDegraded
     };
     delete state.sliceAgents[sliceId];
     const autoFormatActions = Array.isArray(result.payload?.autoFormatActions) ? result.payload.autoFormatActions : [];
     if (autoFormatActions.length > 0) sinks.actions.push(...autoFormatActions.map(action => ({ ...action, _sliceId: sliceId })));
     onEvent('sliceCompleted', {
       sliceId,
-      status: 'completed',
+      status: state.sliceResults[sliceId].status,
       summary: state.sliceResults[sliceId].summary,
       iteration: state.sliceResults[sliceId].iteration,
+      degraded: sliceDegraded,
       elapsedMs: null
     });
     return;

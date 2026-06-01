@@ -2552,10 +2552,21 @@ async function executeArchitectParallelTurn(turnId) {
     }
     if (eventType === 'sliceCompleted') {
       const itemId = sliceItemIds.get(data.sliceId);
-      const item = upsertItem(turnId, { id: itemId, type: 'taskExecution', taskId: data.sliceId, status: 'completed', result: { summary: data.summary } });
+      const item = upsertItem(turnId, {
+        id: itemId,
+        type: 'taskExecution',
+        taskId: data.sliceId,
+        status: 'completed',
+        result: { summary: data.summary, degraded: !!data.degraded }
+      });
       emitItemCompleted(turnId, item);
       const elapsed = data.elapsedMs == null ? '' : ` in ${data.elapsedMs}ms`;
-      appendLog(turnId, `[slice ${data.sliceId}] completato${elapsed} — ${(data.summary || '').slice(0, 100)}`);
+      const degradedTag = data.degraded ? ' [DEGRADED]' : '';
+      appendLog(
+        turnId,
+        `[slice ${data.sliceId}] completato${degradedTag}${elapsed} — ${(data.summary || '').slice(0, 100)}`,
+        data.degraded ? 'warn' : 'info'
+      );
       return;
     }
     if (eventType === 'sliceFailed') {
@@ -2943,11 +2954,22 @@ function makeArchitectStepProgress(turnId) {
     if (eventType === 'sliceCompleted') {
       const itemId = sliceItemIds[data.sliceId];
       if (itemId) {
-        const item = upsertItem(turnId, { id: itemId, type: 'taskExecution', taskId: data.sliceId, status: 'completed', result: { summary: data.summary } });
+        const item = upsertItem(turnId, {
+          id: itemId,
+          type: 'taskExecution',
+          taskId: data.sliceId,
+          status: 'completed',
+          result: { summary: data.summary, degraded: !!data.degraded }
+        });
         emitItemCompleted(turnId, item);
       }
       const elapsed = data.elapsedMs == null ? '' : ` in ${data.elapsedMs}ms`;
-      appendLog(turnId, `[slice ${data.sliceId}] completato${elapsed} — ${(data.summary || '').slice(0, 100)}`);
+      const degradedTag = data.degraded ? ' [DEGRADED]' : '';
+      appendLog(
+        turnId,
+        `[slice ${data.sliceId}] completato${degradedTag}${elapsed} — ${(data.summary || '').slice(0, 100)}`,
+        data.degraded ? 'warn' : 'info'
+      );
       return;
     }
     if (eventType === 'sliceFailed') {
