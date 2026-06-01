@@ -663,7 +663,15 @@ function recordHealthReport(turnId, errorsIn) {
     return { newCount: 0, totalSeen: turn.healthSeen ? turn.healthSeen.length : 0 };
   }
   if (!Array.isArray(turn.healthSeen)) turn.healthSeen = [];
+  // Keep the full error objects (deduped by key) so the verify-before-done
+  // gate can surface them to the agent on done. turn.healthSeen is the key
+  // list (cheap dedup); turn.healthErrorsFull is the object list (capped).
+  if (!Array.isArray(turn.healthErrorsFull)) turn.healthErrorsFull = [];
   const seenKeys = new Set(turn.healthSeen);
+  const fullByKey = new Map();
+  for (const obj of turn.healthErrorsFull) {
+    if (obj && obj.sheet && obj.addr) fullByKey.set(healthErrorKey(obj), obj);
+  }
 
   const newErrors = [];
   for (const e of errorsIn) {
@@ -672,11 +680,16 @@ function recordHealthReport(turnId, errorsIn) {
     const key = healthErrorKey(e);
     if (seenKeys.has(key)) continue;
     seenKeys.add(key);
+    fullByKey.set(key, e);
     newErrors.push(e);
   }
 
   // Cap remembered keys so a very long turn doesn't grow unbounded.
   turn.healthSeen = Array.from(seenKeys).slice(-HEALTH_MAX_REMEMBERED);
+  // Cap full objects at a smaller window so the done gate has the most
+  // recent context to surface without bloating the turn state.
+  const recent = turn.healthSeen.slice(-HEALTH_MAX_INJECT);
+  turn.healthErrorsFull = recent.map(k => fullByKey.get(k)).filter(Boolean);
 
   if (newErrors.length === 0) {
     return { newCount: 0, totalSeen: turn.healthSeen.length };
@@ -1550,7 +1563,12 @@ function buildTurnExecutionContext(turn) {
     lastModelState: conversationMemory.getLastModelState(),
     parentResults,
     parentPlan,
-    forceWorkerTier: turn.forceWorkerTier || null
+    forceWorkerTier: turn.forceWorkerTier || null,
+    // Latest workbook-level #VALUE!/#REF!/#NAME?/#DIV/0!/#NUM!/#N/A errors
+    // caught by the periodic health scanner. Plumbed into every slice
+    // worker's context so the verify-before-done gate can block done
+    // when the workbook still has formula evaluation errors.
+    _healthSeen: Array.isArray(turn.healthErrorsFull) ? turn.healthErrorsFull : []
   };
 }
 
@@ -3150,10 +3168,24 @@ async function stepTurn(turnId, clientResult, clientSeq) {
   // in modalità stepwise" and the client retry loop wedges.
   const inMemoryStale = turn && !turn.agentState && !turn.architectState;
   if (!turn || inMemoryStale) {
-    try {
-      const fresh = await hydrateTurnFromSupabase(turnId);
-      if (fresh) turn = fresh;
-    } catch (_) { /* fall through to the not-found error below */ }
+    // Retry the hydration a few times to absorb the race between
+    // approveTurn's async durable save and the first /step call landing
+    // on a freshly-spawned instance. Each attempt is ~150-400ms; 4
+    // attempts covers the worst case we've seen on Vercel (the 2026-05-31
+    // turn that prompted this fix spent 6 retries × backoff ≈ 30s before
+    // giving up).
+    const hydrationDeadline = Date.now() + 4000;
+    while (Date.now() < hydrationDeadline) {
+      try {
+        const fresh = await hydrateTurnFromSupabase(turnId);
+        if (fresh && (fresh.agentState || fresh.architectState)) {
+          turn = fresh;
+          break;
+        }
+        if (fresh && !inMemoryStale) { turn = fresh; break; }
+      } catch (_) { /* fall through, retry */ }
+      await new Promise(r => setTimeout(r, 400));
+    }
   }
   // Multi-instance staleness guard: client knows about a step beyond ours.
   if (turn && clientSeq != null && Number(clientSeq) > (turn.agentStepSeq || 0)) {
@@ -3167,7 +3199,18 @@ async function stepTurn(turnId, clientResult, clientSeq) {
   if (turn.architectState) {
     return stepArchitectWave(turnId, clientResult, clientSeq);
   }
-  if (!turn.agentState) throw new Error(`Turn ${turnId} non è in modalità stepwise`);
+  if (!turn.agentState) {
+    // Last-ditch: if the turn is approved and architect parallel but the
+    // stepwise state is somehow missing (Supabase replication lag, serverless
+    // cold start, manual state corruption), re-init it from the blueprint.
+    if (turn.strategy && turn.strategy.mode === 'architect_parallel' && turn.blueprint) {
+      logger.warn(`[Turn ${turnId}] stepwise architect state missing; re-initializing from blueprint.`);
+      initStepwiseArchitectParallel(turnId, turn.strategy);
+      turn = _getTurnRef(turnId);
+      if (turn && turn.architectState) return stepArchitectWave(turnId, clientResult, clientSeq);
+    }
+    throw new Error(`Turn ${turnId} non è in modalità stepwise`);
+  }
 
   if (turn.status === 'completed') {
     return { control: 'done', payload: { summary: turn.narration?.message }, stepSeq: turn.agentStepSeq || 0 };
@@ -3185,6 +3228,15 @@ async function stepTurn(turnId, clientResult, clientSeq) {
   const task = { id: AGENT_LOOP_TASK_ID, agent: 'ai', tool: 'agent.loop', description: turn.strategy?.label || 'Agent loop' };
   const itemId = taskItemId(task.id);
   const steer = drainSteerQueue(turnId);
+
+  // Plumb the latest health-scan errors into the agent's context so the
+  // verify-before-done gate in runAgentStep can block done when the
+  // workbook still has #VALUE!/#REF! cells. Without this, the agent
+  // thinks the writes succeeded (they did) and reports done even though
+  // Excel evaluated the formulas to error markers.
+  if (turn.agentState && turn.agentState.context) {
+    turn.agentState.context._healthSeen = Array.isArray(turn.healthErrorsFull) ? turn.healthErrorsFull : [];
+  }
 
   const { state, control, payload } = await runAgentStep(turn.agentState, clientResult, {
     steerMessages: steer,

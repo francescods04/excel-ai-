@@ -2540,6 +2540,52 @@ function buildDoneBlockedMessage(blockingErrors) {
   return `DONE BLOCKED — ${blockingErrors.length} unresolved tool error(s) detected in recent results. You CANNOT call done while these remain. Read the offending cells with get_cell_ranges to understand the failure, then emit corrected writes (fix formulas, references, or values). If the error mentions a missing option/format key, switch to bulk_set_format with the correct options shape. The model is considered complete only when the next iteration produces zero new errors.\n${list}${more}`;
 }
 
+// Merge tool-result errors AND health-scan errors (cell-level #VALUE!/#REF!/
+// etc. caught by the periodic workbook scanner) into a single blocking list.
+// The health scanner reports formula errors the agent couldn't see through
+// tool returns (writes returned ok but the formula evaluated to an error).
+// Without this, the agent happily calls done while the workbook is full of
+// #VALUE!. Returns the same {ok, blockingErrors} shape as collectBlockingErrors.
+function collectBlockingErrorsWithHealth(results, healthSeen, options = {}) {
+  const base = collectBlockingErrors(results, options);
+  const maxScan = options.maxHealth || 50;
+  const seen = Array.isArray(healthSeen) ? healthSeen.slice(-maxScan) : [];
+  if (seen.length === 0) return base;
+  const seenKeys = new Set();
+  const dedup = [];
+  for (const e of seen) {
+    if (!e || typeof e !== 'object') continue;
+    if (!e.sheet || !e.addr) continue;
+    const key = `${e.sheet}|${e.addr}|${e.value || ''}`;
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    dedup.push(e);
+  }
+  if (dedup.length === 0) return base;
+  const merged = { ok: false, blockingErrors: [...base.blockingErrors] };
+  for (const e of dedup.slice(0, 8)) {
+    const refsPart = Array.isArray(e.refs) && e.refs.length > 0
+      ? ` (upstream: ${e.refs.slice(0, 2).map(r => `${r.sheet || ''}!${r.addr || ''}=${r.value == null ? 'EMPTY' : '"' + String(r.value).slice(0, 40) + '"'}`).join('; ')})`
+      : '';
+    merged.blockingErrors.push({
+      tool: 'healthScan',
+      message: `${e.sheet || '?'}!${e.addr || '?'} → ${e.value || 'errore'}${e.formula ? ' (formula: ' + String(e.formula).slice(0, 80) + ')' : ''}${refsPart}`
+    });
+  }
+  return merged;
+}
+
+function buildDoneBlockedMessageWithHealth(blockingErrors, healthCount) {
+  const list = blockingErrors.slice(0, 10).map((b, i) =>
+    `${i + 1}. [${b.tool}] ${b.message}`
+  ).join('\n');
+  const more = blockingErrors.length > 10 ? `\n(+ ${blockingErrors.length - 10} altri errori)` : '';
+  const healthNote = healthCount > 0
+    ? `\n\nOf these, ${healthCount} are workbook #VALUE!/#REF!/#NAME?/#DIV/0!/#NUM!/#N/A errors caught by the periodic health scanner. The writes returned ok but the formulas evaluated to error values in Excel. Read the offending cell + its referenced upstream cells with get_cell_ranges, then fix the formula (wrong sheet name, wrong row, missing input, etc.). If the formula needs a value that another slice is supposed to write, you can write a placeholder now and the slice will overwrite it when it lands.`
+    : '';
+  return `DONE BLOCKED — ${blockingErrors.length} unresolved error(s) detected before completion. You CANNOT call done while these remain. Read the offending cells with get_cell_ranges to understand the failure, then emit corrected writes (fix formulas, references, or values). If the error mentions a missing option/format key, switch to bulk_set_format with the correct options shape. The model is considered complete only when the next iteration produces zero new errors.\n${list}${more}${healthNote}`;
+}
+
 async function runPostWriteCritic(toolName, actions) {
   if (!Array.isArray(actions) || actions.length < AGENT_POSTWRITE_CRITIC_MIN_ACTIONS) return null;
   const summary = summarizeActionsForCritic(actions);
@@ -2874,11 +2920,14 @@ async function runAgentLoop(objective, context, options = {}) {
 
       // Handle done
       if (toolName === 'done') {
-        // Verify-before-done: block done if recent tool results have errors.
-        const verify = collectBlockingErrors(results);
+        // Verify-before-done: block done if recent tool results have errors
+        // OR the health scanner has unresolved formula errors in the workbook.
+        const healthSeen = options.healthSeen || (context && context._healthSeen) || [];
+        const verify = collectBlockingErrorsWithHealth(results, healthSeen);
         if (!verify.ok && !options.allowDoneWithErrors) {
-          const blockMsg = buildDoneBlockedMessage(verify.blockingErrors);
-          logger.warn(`[AgentLoop] done blocked: ${verify.blockingErrors.length} unresolved error(s) in recent tool results`);
+          const healthCount = verify.blockingErrors.filter(b => b.tool === 'healthScan').length;
+          const blockMsg = buildDoneBlockedMessageWithHealth(verify.blockingErrors, healthCount);
+          logger.warn(`[AgentLoop] done blocked: ${verify.blockingErrors.length} unresolved error(s) (${healthCount} from health scan)`);
           messages.push(makeUserMessage(blockMsg));
           results.push({ type: 'error', error: 'done_blocked_by_errors', blocked: true, tool: 'done', errors: verify.blockingErrors.slice(0, 6) });
           onEvent('iterationError', { iteration, error: 'done_blocked_by_errors' });
@@ -5161,11 +5210,16 @@ async function runAgentStep(state, clientResult, deps = {}) {
     }
 
     if (toolName === 'done') {
-      // Verify-before-done: block done if recent tool results have errors.
-      const verify = collectBlockingErrors(state.results);
+      // Verify-before-done: block done if recent tool results have errors
+      // OR the health scanner has unresolved formula errors in the workbook.
+      // The health seen list is plumbed through state.context._healthSeen
+      // (set by the stepwise driver after each recordHealthReport call).
+      const healthSeen = (state.context && state.context._healthSeen) || (state.config && state.config._healthSeen) || [];
+      const verify = collectBlockingErrorsWithHealth(state.results, healthSeen);
       if (!verify.ok && !state.config?.allowDoneWithErrors) {
-        const blockMsg = buildDoneBlockedMessage(verify.blockingErrors);
-        logger.warn(`[AgentStep] done blocked: ${verify.blockingErrors.length} unresolved error(s) in recent tool results`);
+        const healthCount = verify.blockingErrors.filter(b => b.tool === 'healthScan').length;
+        const blockMsg = buildDoneBlockedMessageWithHealth(verify.blockingErrors, healthCount);
+        logger.warn(`[AgentStep] done blocked: ${verify.blockingErrors.length} unresolved error(s) (${healthCount} from health scan)`);
         state.messages.push(makeUserMessage(blockMsg));
         state.results.push({ type: 'error', error: 'done_blocked_by_errors', blocked: true, tool: 'done', errors: verify.blockingErrors.slice(0, 6) });
         onProgress('iterationError', { iteration: state.iteration, error: 'done_blocked_by_errors' });
