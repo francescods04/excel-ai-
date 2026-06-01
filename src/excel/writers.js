@@ -1057,7 +1057,11 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
 
   if (_attempt === 0) {
       const chunks = splitActionsIntoSafeChunks(actions);
-      if (chunks.length > 1) {
+      // Even when there's only one chunk, route through the loop so that the
+      // per-chunk failure isolation (bisect into per-action Excel.run) kicks in.
+      // Without this, a single-chunk batch that fails at context.sync() lost all
+      // info on WHICH action was bad and the agent loop re-emitted the payload.
+      if (chunks.length >= 1 && (chunks.length > 1 || actions.length > 1)) {
         const aggregate = {
           actionCount: actions.length,
           errorCount: 0,
@@ -1070,7 +1074,45 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
           const chunk = chunks[i];
           const chunkCells = estimateBatchCells(chunk);
           const started = nowMs();
-          const result = await executeActions(chunk, updateStepsPanel, 1);
+          let result;
+          try {
+            result = await executeActions(chunk, updateStepsPanel, 1);
+          } catch (chunkErr) {
+            // context.sync() rejected the whole chunk — typically because
+            // ONE action's range/formula was malformed and Office.js can
+            // only report a generic "argument invalid" for the whole batch.
+            // Re-run each action in its own Excel.run so we can identify
+            // and report the offender. Without this, the agent loop sees
+            // "N of N failed" and re-emits the same bad payload forever.
+            if (chunk.length > 1) {
+              addLog(`Chunk Excel fallito (${chunkErr.message}). Isolazione per azione…`, 'warn');
+              result = { actionCount: chunk.length, errorCount: 0, errors: [] };
+              for (const single of chunk) {
+                try {
+                  const r = await executeActions([single], updateStepsPanel, 1);
+                  result.errorCount += Number(r?.errorCount) || 0;
+                  if (Array.isArray(r?.errors)) result.errors.push(...r.errors);
+                } catch (singleErr) {
+                  result.errorCount += 1;
+                  const targetHint = single.target
+                    || (single.cells && typeof single.cells === 'object'
+                      ? Object.keys(single.cells).slice(0, 4).join(',')
+                      : null);
+                  const sheetHint = single.sheet || single.sheetName || null;
+                  result.errors.push({
+                    type: single.type,
+                    sheet: sheetHint,
+                    target: targetHint,
+                    message: singleErr.message,
+                    queueBatchKey: single[QUEUE_BATCH_KEY] || null
+                  });
+                  addLog(`Azione ${single.type} fallita isolata (sheet=${sheetHint || '?'}, target=${targetHint || '?'}): ${singleErr.message}`, 'error');
+                }
+              }
+            } else {
+              throw chunkErr;
+            }
+          }
           const durationMs = nowMs() - started;
           const prevCost = adaptiveChunkCostLimit;
           recordChunkTiming(durationMs, chunk);
