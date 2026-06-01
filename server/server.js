@@ -235,12 +235,111 @@ app.post('/api/me/feedback', authenticate, async (req, res) => {
   }
 });
 
+/* ---------- Public event tracking (client-side) ---------- */
+const ALLOWED_TRACK_EVENTS = new Set([
+  'page_view', 'page_leave', 'scroll_depth', 'time_on_page',
+  'cta_click', 'outbound_click', 'form_start', 'form_submit', 'form_error',
+  'demo_preset_selected', 'demo_run_started', 'demo_run_completed',
+  'signup_initiated', 'signup_completed', 'signup_error',
+  'login_initiated', 'login_completed', 'login_error',
+  'magic_link_requested', 'password_reset_requested',
+  'install_tab_clicked', 'install_cmd_copied',
+  'faq_opened', 'video_played', 'pricing_viewed',
+  'js_error', 'api_error', 'web_vitals'
+]);
+
+const POSTHOG_API_KEY = process.env.POSTHOG_API_KEY || '';
+const POSTHOG_HOST = process.env.POSTHOG_HOST || 'https://us.i.posthog.com';
+
+app.post('/api/events', async (req, res) => {
+  const startedAt = Date.now();
+  try {
+    const body = req.body || {};
+    const events = Array.isArray(body.events) ? body.events : (body.event ? [body] : []);
+
+    if (!events.length) return res.status(400).json({ error: 'events array richiesto' });
+    if (events.length > 50) return res.status(400).json({ error: 'max 50 eventi per batch' });
+
+    const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+            || req.socket?.remoteAddress
+            || null;
+    const ua = (req.headers['user-agent'] || '').slice(0, 500);
+
+    const rows = [];
+    const sanitized = [];
+    for (const e of events) {
+      if (typeof e !== 'object' || e === null) continue;
+      const eventType = String(e.event || e.event_type || '').slice(0, 100);
+      if (!ALLOWED_TRACK_EVENTS.has(eventType)) {
+        sanitized.push({ skipped: eventType, reason: 'not_allowlisted' });
+        continue;
+      }
+      const props = (typeof e.properties === 'object' && e.properties !== null && !Array.isArray(e.properties))
+        ? e.properties : {};
+      // Cap properties size
+      const propsJson = JSON.stringify(props).slice(0, 8000);
+
+      rows.push({
+        user_id: e.user_id || null,
+        session_id: e.session_id ? String(e.session_id).slice(0, 100) : null,
+        event_type: eventType,
+        properties: props,
+        success: e.success != null ? !!e.success : null,
+      });
+    }
+
+    if (rows.length === 0) {
+      return res.json({ ok: true, accepted: 0, skipped: sanitized });
+    }
+
+    // Persist to Supabase (best-effort)
+    try {
+      const { getSupabase } = require('./supabase/client');
+      const supabase = getSupabase();
+      await supabase.from('events').insert(rows);
+    } catch (e) {
+      // Soft-fail: don't break client
+      logger.warn('events insert failed', { message: e.message });
+    }
+
+    // Optional: forward to PostHog
+    if (POSTHOG_API_KEY) {
+      const phPayload = rows.map(r => ({
+        api_key: POSTHOG_API_KEY,
+        event: r.event_type,
+        distinct_id: r.user_id || r.session_id || 'anon',
+        properties: {
+          ...r.properties,
+          $ip: ip,
+          $useragent: ua,
+          session_id: r.session_id,
+        },
+        timestamp: new Date().toISOString(),
+      }));
+      // Fire and forget
+      fetch(POSTHOG_HOST + '/capture/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ batch: phPayload, sent_at: new Date().toISOString() }),
+      }).catch(() => {});
+    }
+
+    res.json({ ok: true, accepted: rows.length, skipped: sanitized, latency_ms: Date.now() - startedAt });
+  } catch (err) {
+    logger.error('events endpoint error', { message: err.message });
+    res.status(500).json({ error: 'internal' });
+  }
+});
+
 /* ---------- Supabase Config (per il frontend) ---------- */
 const { getSupabaseUrl } = require('./supabase/client');
 app.get('/api/config', (req, res) => {
   res.json({
     supabaseUrl: getSupabaseUrl(),
     supabaseAnonKey: process.env.SUPABASE_ANON_KEY || '',
+    posthogEnabled: !!POSTHOG_API_KEY,
+    posthogKey: POSTHOG_API_KEY || null,
+    posthogHost: POSTHOG_HOST,
   });
 });
 

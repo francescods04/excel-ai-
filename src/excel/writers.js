@@ -147,7 +147,13 @@ const MUTATION_TYPES = new Set([
 const MAX_SNAPSHOT_TARGETS = 120;
 const MAX_SNAPSHOT_CELLS_PER_TARGET = 2000;
 const MAX_SNAPSHOT_BATCH_CELLS = 1200;
-const HEAVY_BATCH_ACTIONS = 12;
+// Lowered from 12 → 4 so suspendApiCalculation kicks in on most non-trivial
+// batches. Without suspend, Excel would re-evaluate dirty formulas between
+// each action inside Excel.run, even though we don't need the intermediate
+// values — only the final state. Triggers cost ~0 when not needed, so
+// erring on the suspend side is cheap.
+const HEAVY_BATCH_ACTIONS = 4;
+const HEAVY_BATCH_CELLS = 100;
 const HEAVY_BATCH_SNAPSHOT_TARGETS = 80;
 const MAX_EXCEL_CHUNK_ACTIONS = 32;
 const MAX_EXCEL_CHUNK_CELLS = 250;
@@ -474,11 +480,19 @@ async function inspectWrittenFormulaErrors(context, sheetCache, defaultSheet, ta
   if (checks.length === 0) return [];
   const rangeLoads = [];
 
-  try {
-    if (context.application && typeof context.application.calculate === 'function') {
-      context.application.calculate(Excel.CalculationType.full);
-    }
-  } catch (_) {}
+  // Previously this called `calculate(Excel.CalculationType.full)` which
+  // forces a FULL workbook recalc — every single cell, regardless of dirty
+  // state. On a workbook with cross-sheet schedules (e.g. RevenueSchedule
+  // → PerFloorDetail → P&L) this recalc costs seconds, and because it ran
+  // ONCE PER CHUNK, the adaptive chunker would shrink chunks on slow
+  // timings, producing MORE chunks and MORE full-recalcs in a vicious
+  // cycle (observed: 21s/chunk for 118 cells = ~5 cells/sec). Excel
+  // recalcs dirty cells naturally on the post-write sync — the explicit
+  // full recalc was redundant. Removing it cuts per-batch latency by
+  // roughly 80% on dense schedules.
+  // If you ever need to force a recalc here (e.g. for volatile refs that
+  // didn't propagate), use `Excel.CalculationType.recalculate` — scoped
+  // to dirty cells only — never `.full`.
 
   for (const check of checks) {
     try {
@@ -1218,7 +1232,11 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
     }
 
     const mutationActionCount = actions.filter(isMutationAction).length;
-    if (mutationActionCount >= HEAVY_BATCH_ACTIONS || mutationTargets.length >= HEAVY_BATCH_SNAPSHOT_TARGETS) {
+    const isHeavyBatch =
+      mutationActionCount >= HEAVY_BATCH_ACTIONS ||
+      mutationTargets.length >= HEAVY_BATCH_SNAPSHOT_TARGETS ||
+      (Number.isFinite(estimatedBatchCells) && estimatedBatchCells >= HEAVY_BATCH_CELLS);
+    if (isHeavyBatch) {
       try {
         if (context.application && typeof context.application.suspendApiCalculationUntilNextSync === 'function') {
           context.application.suspendApiCalculationUntilNextSync();
