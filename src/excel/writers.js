@@ -173,6 +173,91 @@ function colToNumber(col) {
   return n || null;
 }
 
+function numberToCol(n) {
+  let s = '';
+  while (n > 0) {
+    const r = (n - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
+function addrToCell(addr) {
+  const m = String(addr || '').replace(/\$/g, '').match(/^([A-Z]+)(\d+)$/i);
+  if (!m) return null;
+  const col = colToNumber(m[1]);
+  const row = Number(m[2]);
+  if (!col || !Number.isFinite(row)) return null;
+  return { col, row };
+}
+
+// Pure logic so test_bulk_write_format can exercise it without Office.js.
+// Returns { srcAddr, skipReason } — srcAddr is the A1 (or A1:A1) range to use
+// as autoFill source; skipReason set when source isn't anchored at the
+// destination top-left (caller should skip autoFill and only write cells).
+function pickAutoFillSource(resolvedAddrs, copyToRange) {
+  if (!copyToRange || !Array.isArray(resolvedAddrs) || resolvedAddrs.length === 0) {
+    return { srcAddr: null, skipReason: 'no-input' };
+  }
+  const destAddr = String(copyToRange).includes('!')
+    ? String(copyToRange).split('!').slice(1).join('!')
+    : String(copyToRange);
+  const destBounds = boundsFromA1(destAddr);
+  let sourceAddrs;
+  if (destBounds) {
+    const inside = resolvedAddrs
+      .map(a => ({ addr: a, cell: addrToCell(a) }))
+      .filter(x => x.cell &&
+        x.cell.col >= destBounds.c1 && x.cell.col <= destBounds.c2 &&
+        x.cell.row >= destBounds.r1 && x.cell.row <= destBounds.r2);
+    sourceAddrs = inside.map(x => x.addr);
+    if (sourceAddrs.length === 0) {
+      return { srcAddr: `${numberToCol(destBounds.c1)}${destBounds.r1}`, skipReason: null };
+    }
+  } else {
+    sourceAddrs = resolvedAddrs.slice();
+  }
+  if (sourceAddrs.length === 1) {
+    return { srcAddr: sourceAddrs[0], skipReason: null };
+  }
+  let minCol = Infinity, maxCol = -Infinity, minRow = Infinity, maxRow = -Infinity;
+  for (const a of sourceAddrs) {
+    const c = addrToCell(a);
+    if (!c) continue;
+    if (c.col < minCol) minCol = c.col;
+    if (c.col > maxCol) maxCol = c.col;
+    if (c.row < minRow) minRow = c.row;
+    if (c.row > maxRow) maxRow = c.row;
+  }
+  if (destBounds && (minCol !== destBounds.c1 || minRow !== destBounds.r1)) {
+    return { srcAddr: null, skipReason: `seed not anchored at ${numberToCol(destBounds.c1)}${destBounds.r1}` };
+  }
+  return {
+    srcAddr: `${numberToCol(minCol)}${minRow}:${numberToCol(maxCol)}${maxRow}`,
+    skipReason: null
+  };
+}
+
+function boundsFromA1(target) {
+  const raw = String(target || '').replace(/\$/g, '');
+  const withoutSheet = raw.includes('!') ? raw.split('!').pop() : raw;
+  if (!withoutSheet) return null;
+  const match = withoutSheet.match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/i);
+  if (!match) return null;
+  const c1 = colToNumber(match[1]);
+  const r1 = Number(match[2]);
+  const c2 = match[3] ? colToNumber(match[3]) : c1;
+  const r2 = match[4] ? Number(match[4]) : r1;
+  if (!c1 || !c2 || !Number.isFinite(r1) || !Number.isFinite(r2)) return null;
+  return {
+    c1: Math.min(c1, c2),
+    c2: Math.max(c1, c2),
+    r1: Math.min(r1, r2),
+    r2: Math.max(r1, r2)
+  };
+}
+
 // Office.js requires numberFormat (and values/formulas) to be a 2D array whose
 // dimensions match the target range exactly — a 1x1 [[fmt]] on a multi-cell range
 // throws InvalidArgument. These helpers size the matrix to the range.
@@ -1622,22 +1707,33 @@ async function execSetCellRange(context, sheetCache, defaultSheet, action) {
 
   if (copyToRange && resolved.length > 0) {
     const parsedDest = parseTargetReference(copyToRange);
+    const destAddr = parsedDest.rangeAddress || copyToRange;
     const destSheet = parsedDest.sheetName
       ? await ensureWorksheet(context, sheetCache, parsedDest.sheetName, { createIfMissing: true })
       : resolved[0].cellSheet;
-
-    const sourceAddrs = resolved.map(r => r.cellAddr);
     const srcSheet = resolved[0].cellSheet;
-    let srcRange;
-    if (resolved.length === 1) {
-      srcRange = srcSheet.getRange(sourceAddrs[0]);
-    } else {
-      const firstAddr = sourceAddrs[0];
-      const lastAddr = sourceAddrs[sourceAddrs.length - 1];
-      srcRange = srcSheet.getRange(`${firstAddr}:${lastAddr}`);
+
+    // Pick autoFill source from cells INSIDE copyToRange. Past bug: raw
+    // firstAddr:lastAddr produced a 2-col source vs 36-col dest (e.g. seed
+    // value in B4 + formula in C4 with copyToRange C4:AL4) and Office.js
+    // threw "argument invalid". See pickAutoFillSource for details.
+    const pick = pickAutoFillSource(resolved.map(r => r.cellAddr), destAddr);
+    if (pick.skipReason) {
+      addLog(`copyToRange ${destAddr}: ${pick.skipReason}; salto autoFill.`, 'warn');
+    } else if (pick.srcAddr) {
+      const srcRange = srcSheet.getRange(pick.srcAddr);
+      const destRange = destSheet.getRange(destAddr);
+      try {
+        srcRange.autoFill(destRange, Excel.AutoFillType.fillDefault);
+      } catch (autoFillErr) {
+        addLog(`copyToRange autoFill fallita src=${pick.srcAddr} dest=${destAddr}: ${autoFillErr.message}. Provo fillFormulas.`, 'warn');
+        try {
+          srcRange.autoFill(destRange, Excel.AutoFillType.fillFormulas);
+        } catch (e2) {
+          throw new Error(`copyToRange src=${pick.srcAddr} dest=${destAddr}: ${e2.message}`);
+        }
+      }
     }
-    const destRange = destSheet.getRange(parsedDest.rangeAddress || copyToRange);
-    srcRange.autoFill(destRange, Excel.AutoFillType.fillDefault);
   }
 
   // The outer executeActions() performs the batch sync. Syncing here for every
@@ -1754,5 +1850,6 @@ export {
   waitForActionQueueIdle,
   execRunJavaScript,
   sanitizeOfficeJsCode,
-  isRunJavaScriptEnabled
+  isRunJavaScriptEnabled,
+  pickAutoFillSource
 };
