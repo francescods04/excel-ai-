@@ -1005,6 +1005,13 @@ DENSITY RULES:
 - For real estate/project finance, include assumptions, per-floor/unit detail, cost breakdown, revenue/absorption, construction schedule, financing/debt, cash flow, P&L or returns, valuation/sensitivity, and formatting/audit.
 - If four or more major sheets need ~1000 rows, make at least four slices own finite ranges reaching ~800+ rows.
 
+ZERO-DETERMINISTIC-FILL POLICY (CRITICAL — applied server-side, violations rejected):
+- "1000 righe" means 1000 rows of REAL data, NOT 10 real rows + 990 padding/filler. If the domain only supports N meaningful rows (e.g. 10 piani × 36 mesi = 360 rows), write exactly N rows and stop. Never duplicate a row to "reach the target".
+- A guard rejects any write where the same scalar value appears in ≥20 distinct rows of one column. Past failure (Vairano 2026-06-01): Per-Floor Detail wrote "Scavi e movimentazione terra" + "10000" in 600 contiguous rows to pad to ~1000 — the result was junk that polluted SUMIFs downstream.
+- Cash Flow MUST be 1 row per period across the full horizon (e.g. 1 row per month for 36 months × 10 piani = 360 rows, OR a wide pivot of months as columns × line items as rows). Do NOT write sentinel rows at month 1, 37, 73, 109 only and leave the rest blank — past failure produced a Cash Flow with 10 valid rows and 352 empty rows.
+- P&L MUST have a complete row per year over the model horizon (typically 4-6 years for a construction project, with Anno 0 = pre-construction). All cost categories from Cost Breakdown roll up annually.
+- Valuation/Returns slices MUST find Equity / Debito / WACC / Costo Capitale on Assumptions. If the architect plan does NOT include explicit rows for these on Assumptions, ADD THEM to the assumptions slice instructions BEFORE planning a valuation slice. The valuation slice may not invent these numbers.
+
 FORMULA/LAYOUT RULES:
 - Assumptions should be a stable two-column driver sheet: column A label, column B value, with section headers.
 - Dependent slices must read upstream ranges first when may_read_from is non-empty, then write formulas against actual addresses.
@@ -1515,9 +1522,29 @@ function validateBlueprint(raw, context = {}) {
  * Build the system prompt addendum that constrains a worker to its slice scope.
  * The worker is otherwise the regular runAgentLoop with full tools.
  */
+function isValuationLikeSlice(slice) {
+  const text = `${slice?.id || ''} ${slice?.title || ''} ${slice?.instructions || ''}`.toLowerCase();
+  return /(valuation|valutaz|\birr\b|\bnpv\b|\bwacc\b|\bdscr\b|\bmoic\b|payback|cost of equity|costo equity|equity invest|debit[oa] total|capital structure|servizio debito)/i.test(text);
+}
+
 function buildSliceWorkerPrompt(slice, blueprint, userObjective = '') {
   const scope = slice.scope;
   const hasUpstream = scope.may_read_from.length > 0;
+  const isValuation = isValuationLikeSlice(slice);
+  const valuationGate = isValuation
+    ? `
+- ZERO-DETERMINISTIC POLICY (this is a valuation/returns slice). You MUST locate the following inputs on Assumptions BEFORE writing any IRR/NPV/WACC/DSCR formula:
+  • Equity Investito (or "equity", "capitale proprio")
+  • Debito Totale (or "debito", "mutuo", "loan")
+  • Tasso WACC / Costo capitale (or compute via LTC/LTV + costo equity + costo debito + tax shield — but ALL the inputs must be on Assumptions, no hardcoded numbers)
+  • Tasso sconto / discount rate (or WACC reused)
+  • Orizzonte / Horizon (anni o mesi)
+  If ANY of these inputs is missing from Assumptions, DO NOT fabricate a number (no "5000", no "0.08" hardcoded, no shadow value). Instead:
+    1. Write a clearly-labelled placeholder row on YOUR own sheet (e.g. "MANCA: Equity Investito" + value 0) so the model is visibly incomplete.
+    2. Write IRR/NPV/etc cells as "=IFERROR(<formula referencing Assumptions!$B$X>, \\"INPUT MANCANTE\\")" so they display the gap, not a fake number.
+    3. In your done summary, list the missing keys EXACTLY: "Missing on Assumptions: <key1>, <key2>". The orchestrator will surface these to the user.
+  Past failure (2026-06-01 Vairano #2): valuation slice couldn't find Equity/Debito on Assumptions, fabricated 5000/140000 as fallback. Result: WACC = -24M, IRR Equity = -63.7%, DSCR = -190. The numbers looked computed but were nonsense, and the user had no signal that the inputs were missing. NEVER repeat this pattern.`
+    : '';
   const userBlock = userObjective && String(userObjective).trim()
     ? `\n\nORIGINAL USER REQUEST (verbatim — this is the SOURCE OF TRUTH for all domain data: exact menu items, names, prices, list entries, numbers explicitly given. Architect's instructions may have summarized; if you would otherwise invent any item/price/name/category that COULD be derived from this text, you MUST use the literal value from here instead):
 """
@@ -1570,7 +1597,8 @@ HARD RULES:
 - copyToRange is FORMULAS ONLY (relative refs adjust per cell). Never use copyToRange with a text label as the source cell — it paints the label into every destination. For headers/titles, write to one cell and merge if you need it visually wide.
 - Range targets must be finite single A1 ranges. Split disjoint formatting into multiple entries; do not use comma-separated targets like "A3,A8" or whole-column targets like "A:J" for normal formatting.
 - DO NOT call done until you have actually written cells in your owned scope. A done with zero writes will be rejected as a failed slice and cascade-kill downstream slices. If you're stuck, write what you can with absolute references and explain in the done summary what is incomplete.
-- When this slice is done, call the "done" tool with a one-line summary describing what you wrote.
+- NO PADDING ROWS. If the workbook target is "~1000 righe per foglio" but you only have meaningful data for N rows (e.g. 10 piani, 36 mesi), write exactly N rows. Do NOT repeat the same literal value (e.g. "Scavi e movimentazione terra" × 600) to "reach the target". A guard server-side will reject any single column that contains the same scalar in ≥20 rows, costing you an iteration. Real data only — use formulas/copyToRange/index arithmetic to produce variation across rows, or stop at the real row count.${valuationGate}
+- When this slice is done, call the "done" tool with a one-line summary describing what you wrote. If a valuation slice has missing inputs (above), the summary MUST start with "Missing on Assumptions: ..." so the gap is visible.
 </slice-context>`;
 }
 

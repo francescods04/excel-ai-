@@ -82,11 +82,46 @@ function ensureArchitectRun(state) {
   return state;
 }
 
+function isMeaningfulCellSpec(spec) {
+  if (!spec || typeof spec !== 'object') return false;
+  if (spec.formula != null && String(spec.formula).trim() !== '') return true;
+  const v = spec.value;
+  if (v == null) return false;
+  if (typeof v === 'string') return v.trim() !== '';
+  if (typeof v === 'number') return true;
+  if (typeof v === 'boolean') return true;
+  return Array.isArray(v) ? v.length > 0 : false;
+}
+
 function estimateMaterialWriteCells(actions = []) {
   let total = 0;
   for (const action of actions) {
     if (!action || typeof action !== 'object') continue;
     if (action.type === 'setCellFormat' || action.type === 'addConditionalFormat' || action.type === 'setConditionalFormat') {
+      continue;
+    }
+    // Zero-deterministic-fill accounting: a setCellRange that writes 4000
+    // empty cells should not count as 4000 material cells just because the
+    // range is large. Count only entries with formula or non-empty value;
+    // count copyToRange destination cells only when the seed itself has
+    // meaningful content (otherwise it's painting blanks across a range).
+    if (action.type === 'setCellRange' && action.cells && typeof action.cells === 'object') {
+      const entries = Object.entries(action.cells);
+      let meaningfulCells = 0;
+      let seedHasContent = false;
+      let firstEntryIsSeed = true;
+      for (const [addr, spec] of entries) {
+        if (!isMeaningfulCellSpec(spec)) continue;
+        const n = estimateActionCells({ type: 'setCellRange', cells: { [addr]: spec } });
+        if (Number.isFinite(n)) meaningfulCells += n;
+        if (firstEntryIsSeed) seedHasContent = true;
+        firstEntryIsSeed = false;
+      }
+      if (action.copyToRange && seedHasContent) {
+        const copied = estimateActionCells({ type: 'setCellRange', cells: {}, copyToRange: action.copyToRange });
+        if (Number.isFinite(copied)) meaningfulCells += copied;
+      }
+      total += meaningfulCells;
       continue;
     }
     const n = estimateActionCells(action);

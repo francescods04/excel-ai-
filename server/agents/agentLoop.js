@@ -411,6 +411,81 @@ function detectScalarTextFloodFill(cells, copyToRange) {
   return { ok: true };
 }
 
+/* ---------- Padding-row guard (zero-deterministic-fill policy) ----------
+ *
+ * Rejects writes that try to "reach N rows" by literally repeating the same
+ * scalar value many times in the same column. Observed in the 2026-06-01
+ * Vairano Per-Floor Detail run #2: "Scavi e movimentazione terra" + "10000"
+ * literal pair repeated 30× per piano × 10 piani = 300 padding rows in a
+ * single bulk_set_cell_ranges entry.
+ *
+ * The slice was reaching for "~1000 righe" but couldn't generate real per-row
+ * data with the flash tier, so it duplicated a junk row. This kind of filler
+ * is worse than empty rows: it pollutes the audit trail and breaks any
+ * downstream SUMIF / lookup that relies on uniqueness.
+ *
+ * Detection: aggregate every non-formula scalar across all writes in one tool
+ * call, grouped by (sheet, column). If any (sheet, col, scalar) tuple repeats
+ * in >= PADDING_ROW_THRESHOLD distinct rows, reject the whole call and tell
+ * the LLM to produce real data or stop at fewer rows.
+ *
+ * Tolerated: header values that repeat across columns (the values are in
+ * different rows but cover only 1-2 cells each). Empty/null. Formulas with
+ * relative refs that produce varied results.
+ */
+const PADDING_ROW_THRESHOLD = Math.max(20, Number(process.env.AGENT_PADDING_ROW_THRESHOLD) || 20);
+
+function colLetterOfAddr(addr) {
+  const raw = String(addr || '').replace(/\$/g, '');
+  const noSheet = raw.includes('!') ? raw.split('!').pop() : raw;
+  const m = noSheet.match(/^([A-Z]+)\d+/i);
+  return m ? m[1].toUpperCase() : null;
+}
+
+function detectPaddingRows(writes) {
+  if (!Array.isArray(writes) || writes.length === 0) return { ok: true };
+  // sheet → col → Map(value → Set(row))
+  const idx = new Map();
+  for (const w of writes) {
+    if (!w || typeof w !== 'object' || !w.cells || typeof w.cells !== 'object') continue;
+    const sheet = w.sheet || '__active';
+    for (const [addr, spec] of Object.entries(w.cells)) {
+      if (!spec || typeof spec !== 'object') continue;
+      if (spec.formula != null) continue;
+      const v = spec.value;
+      if (v == null || v === '') continue;
+      if (typeof v === 'string' && v.startsWith('=')) continue;
+      const col = colLetterOfAddr(addr);
+      if (!col) continue;
+      const rowMatch = String(addr).replace(/\$/g, '').match(/^[A-Z]+(\d+)/i);
+      if (!rowMatch) continue;
+      const row = Number(rowMatch[1]);
+      const key = String(v);
+      if (!idx.has(sheet)) idx.set(sheet, new Map());
+      const colMap = idx.get(sheet);
+      if (!colMap.has(col)) colMap.set(col, new Map());
+      const valMap = colMap.get(col);
+      if (!valMap.has(key)) valMap.set(key, new Set());
+      valMap.get(key).add(row);
+    }
+  }
+  for (const [sheet, colMap] of idx) {
+    for (const [col, valMap] of colMap) {
+      for (const [val, rowSet] of valMap) {
+        if (rowSet.size >= PADDING_ROW_THRESHOLD) {
+          const preview = String(val).slice(0, 60);
+          return {
+            ok: false,
+            sheet, col, value: preview, count: rowSet.size,
+            reason: `Write rejected: column ${sheet === '__active' ? '' : sheet + '!'}${col} would receive the literal value "${preview}" repeated in ${rowSet.size} distinct rows. This is padding (filler junk to "reach 1000 rows"), not real data. Zero-deterministic-fill policy: write only rows containing MEANINGFUL data; use formulas/copyToRange/index arithmetic for varying values across rows. If 1000 rows are required, each row must carry a distinct piano/mese/voce/scenario — not the same scalar repeated. Observed in 2026-06-01 Vairano Per-Floor Detail where "Scavi e movimentazione terra" appeared in 60 contiguous rows per piano. Drop the padding; if the sheet has only N real rows of data, stop at N rows and call done.`
+          };
+        }
+      }
+    }
+  }
+  return { ok: true };
+}
+
 /* ---------- Degenerate copy-seed guard ----------
  *
  * Rejects copyToRange writes whose seed formula references a cell in the same
@@ -3999,6 +4074,13 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
         logger.warn(`[AgentLoop] set_cell_range called without 'sheet' param; defaulting to activeSheet="${targetSheet}". LLM should specify sheet explicitly.`);
       }
 
+      // Padding guard (same threshold as bulk path)
+      const setRangePaddingCheck = detectPaddingRows([{ sheet: targetSheet, cells: params.cells }]);
+      if (!setRangePaddingCheck.ok) {
+        logger.warn(`[AgentLoop] set_cell_range padding rejected: ${setRangePaddingCheck.reason}`);
+        return { error: setRangePaddingCheck.reason };
+      }
+
       // Anti-flood-fill guard — reject scalar text replicated across many cells
       let cellsTotal = 0;
       for (let i = 0; i < splitWrite.writes.length; i++) {
@@ -4109,6 +4191,13 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       }
       if (writes.length > 32) {
         return { error: `bulk_set_cell_ranges: max 32 writes per call, got ${writes.length}` };
+      }
+      // Zero-deterministic-fill gate: aggregate scalar values across all writes
+      // and reject if any column would receive the same literal in >= 20 rows.
+      const paddingCheck = detectPaddingRows(writes);
+      if (!paddingCheck.ok) {
+        logger.warn(`[AgentLoop] bulk_set_cell_ranges padding rejected: ${paddingCheck.reason}`);
+        return { error: paddingCheck.reason };
       }
       const actions = [];
       const accepted = [];
@@ -5457,5 +5546,6 @@ module.exports = {
   shouldAutoCompactMessages,
   messageCharCount,
   detectScalarTextFloodFill,
-  detectDegenerateCopySeed
+  detectDegenerateCopySeed,
+  detectPaddingRows
 };
