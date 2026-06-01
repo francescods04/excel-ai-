@@ -5,53 +5,438 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Dashboard — Excel AI</title>
   <link rel="icon" type="image/svg+xml" href="/public/favicon.svg">
+  <meta name="description" content="La tua area riservata Excel AI: turn history, statistiche, impostazioni.">
+  <meta name="theme-color" content="#060709">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-    :root{--bg:#060709;--bg-1:#0a0c11;--bg-2:#0f1219;--bg-3:#141823;--line:#1a1f2c;--line-2:#252b3a;--text:#e8ecf2;--text-2:#9aa4b6;--text-3:#5a6478;--text-4:#3a4252;--green:#107c41;--green-2:#1a9c54;--accent:#00ffaa;--accent-2:#00d4aa;--accent-soft:rgba(0,255,170,0.08);--accent-glow:rgba(0,255,170,0.25);--amber:#ffb454;--red:#ff6b6b;--r:8px;--r-lg:14px}
-    html,body{min-height:100vh}
-    body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased;display:flex;align-items:center;justify-content:center;padding:24px}
-    body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(ellipse 60% 50% at 50% 30%, rgba(0,255,170,0.06), transparent 70%)}
-    .card{position:relative;z-index:1;width:100%;max-width:520px;background:var(--bg-1);border:1px solid var(--line);border-radius:var(--r-lg);padding:40px;box-shadow:0 24px 60px rgba(0,0,0,0.5)}
-    .brand{display:flex;align-items:center;gap:10px;margin-bottom:24px;text-decoration:none;color:var(--text)}
-    .brand-mark{width:30px;height:30px;background:linear-gradient(135deg,var(--green-2),var(--green));border-radius:5px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-weight:700;font-size:14px;color:#fff}
-    .brand-name{font-family:'Space Grotesk',sans-serif;font-size:15px;font-weight:600;letter-spacing:-0.02em}
-    h1{font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:600;letter-spacing:-0.02em;margin-bottom:6px}
-    .sub{color:var(--text-2);font-size:14px;margin-bottom:20px}
-    .state{display:flex;align-items:center;gap:10px;padding:14px;background:var(--bg-2);border:1px solid var(--line);border-radius:8px;margin-bottom:16px;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:var(--text-2)}
-    .dot{width:8px;height:8px;border-radius:50%;background:var(--amber);animation:dotpulse 1.5s infinite}
-    .dot.ok{background:var(--accent)}
-    @keyframes dotpulse{0%,100%{opacity:1}50%{opacity:.4}}
-    .actions{display:flex;gap:8px;flex-wrap:wrap}
-    .btn{display:inline-flex;align-items:center;gap:8px;padding:10px 16px;background:var(--accent);color:var(--bg);border:none;border-radius:6px;font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;text-decoration:none;transition:all .2s}
-    .btn:hover{background:#1affb8}
-    .btn.ghost{background:transparent;color:var(--text);border:1px solid var(--line-2)}
-    .btn.ghost:hover{background:var(--bg-2);color:var(--text);border-color:var(--line-2)}
-    .user-email{color:var(--accent);font-weight:500;font-family:'JetBrains Mono',monospace}
-    .back-link{position:fixed;top:20px;left:20px;z-index:10;color:var(--text-3);text-decoration:none;font-size:12px;font-family:'JetBrains Mono',monospace;display:flex;align-items:center;gap:6px}
+    :root{
+      --bg:#060709;--bg-1:#0a0c11;--bg-2:#0f1219;--bg-3:#141823;
+      --line:#1a1f2c;--line-2:#252b3a;
+      --text:#e8ecf2;--text-2:#9aa4b6;--text-3:#5a6478;--text-4:#3a4252;
+      --green:#107c41;--green-2:#1a9c54;
+      --accent:#00ffaa;--accent-2:#00d4aa;
+      --accent-soft:rgba(0,255,170,0.08);--accent-glow:rgba(0,255,170,0.25);
+      --amber:#ffb454;--amber-soft:rgba(255,180,84,0.10);
+      --red:#ff6b6b;--red-soft:rgba(255,107,107,0.10);
+      --blue:#5a9fd4;--blue-soft:rgba(90,159,212,0.10);
+      --r-sm:4px;--r:8px;--r-lg:14px;
+    }
+    html{text-size-adjust:100%;-webkit-text-size-adjust:100%;background:var(--bg)}
+    body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased;line-height:1.6;overflow-x:hidden;min-height:100vh}
+    ::selection{background:var(--accent);color:var(--bg)}
+    a,button{-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+    button{cursor:pointer;font-family:inherit}
+
+    /* ═══ LAYOUT ═══ */
+    .db{display:grid;grid-template-columns:240px 1fr;min-height:100vh}
+    .db-side{
+      background:var(--bg-1);
+      border-right:1px solid var(--line);
+      padding:20px 16px;
+      display:flex;flex-direction:column;gap:24px;
+      position:sticky;top:0;height:100vh;overflow-y:auto;
+    }
+    .db-side .brand{display:flex;align-items:center;gap:10px;text-decoration:none;color:var(--text);padding:0 8px}
+    .brand-mark{width:28px;height:28px;background:linear-gradient(135deg,var(--green-2),var(--green));border-radius:5px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-weight:700;font-size:13px;color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,0.15)}
+    .brand-name{font-family:'Space Grotesk',sans-serif;font-size:14px;font-weight:600;letter-spacing:-0.02em}
+
+    .db-nav{display:flex;flex-direction:column;gap:2px;flex:1}
+    .db-nav-label{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-4);padding:0 10px;margin-bottom:4px}
+    .db-nav-item{
+      display:flex;align-items:center;gap:10px;
+      padding:9px 12px;border-radius:6px;
+      color:var(--text-2);text-decoration:none;
+      font-size:13.5px;font-weight:500;
+      transition:all .15s;
+      border:1px solid transparent;
+    }
+    .db-nav-item:hover{background:rgba(255,255,255,0.03);color:var(--text)}
+    .db-nav-item.active{background:var(--accent-soft);color:var(--accent);border-color:rgba(0,255,170,0.2)}
+    .db-nav-item .icon{width:16px;height:16px;flex-shrink:0;opacity:0.8}
+    .db-nav-item.active .icon{opacity:1}
+    .db-nav-item .badge{margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:10px;padding:2px 6px;background:rgba(0,255,170,0.1);color:var(--accent);border-radius:3px}
+
+    .db-side-foot{padding:12px;border-top:1px solid var(--line);margin-top:auto}
+    .db-user{display:flex;align-items:center;gap:10px;padding:8px;border-radius:6px;background:var(--bg-2);margin-bottom:8px}
+    .db-user-avatar{width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,var(--green-2),var(--accent));display:flex;align-items:center;justify-content:center;font-family:'Space Grotesk',sans-serif;font-size:12px;font-weight:600;color:var(--bg)}
+    .db-user-info{flex:1;min-width:0}
+    .db-user-name{font-size:12.5px;font-weight:500;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .db-user-email{font-size:10.5px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:'JetBrains Mono',monospace}
+    .db-logout{display:block;width:100%;padding:7px;background:transparent;border:1px solid var(--line-2);color:var(--text-2);border-radius:5px;font-size:11px;font-family:'JetBrains Mono',monospace;letter-spacing:0.5px;cursor:pointer;transition:all .2s}
+    .db-logout:hover{color:var(--red);border-color:rgba(255,107,107,0.3)}
+
+    /* ═══ MAIN ═══ */
+    .db-main{padding:32px 40px;max-width:1100px;width:100%;overflow-x:hidden}
+    .db-topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:32px;flex-wrap:wrap;gap:16px}
+    .db-topbar h1{font-family:'Space Grotesk',sans-serif;font-size:28px;font-weight:600;letter-spacing:-0.02em;line-height:1.1}
+    .db-topbar h1 em{font-style:normal;color:var(--accent);font-weight:500}
+    .db-topbar .sub{color:var(--text-2);font-size:14px;margin-top:4px}
+    .db-topbar .actions{display:flex;gap:8px;align-items:center}
+    .btn{display:inline-flex;align-items:center;gap:8px;padding:9px 16px;font-family:inherit;font-size:13px;font-weight:500;border-radius:6px;text-decoration:none;cursor:pointer;border:1px solid transparent;transition:all .2s}
+    .btn-primary{background:var(--accent);color:var(--bg)}
+    .btn-primary:hover{background:#1affb8;box-shadow:0 0 20px var(--accent-glow)}
+    .btn-ghost{background:transparent;color:var(--text);border-color:var(--line-2)}
+    .btn-ghost:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+
+    .panel{display:none}
+    .panel.active{display:block;animation:fadein .3s ease}
+    @keyframes fadein{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+
+    /* Stats grid */
+    .stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:32px}
+    .stat{background:var(--bg-1);border:1px solid var(--line);border-radius:var(--r-lg);padding:20px;position:relative;overflow:hidden}
+    .stat::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--accent),transparent);opacity:0;transition:opacity .3s}
+    .stat:hover::before{opacity:0.5}
+    .stat-label{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-3);margin-bottom:10px}
+    .stat-value{font-family:'Space Grotesk',sans-serif;font-size:32px;font-weight:600;letter-spacing:-0.02em;color:var(--text);line-height:1;display:flex;align-items:baseline;gap:4px}
+    .stat-value .u{font-size:14px;color:var(--accent);font-weight:500}
+    .stat-sub{margin-top:8px;font-size:11.5px;color:var(--text-3);font-family:'JetBrains Mono',monospace}
+    .stat-sub .ok{color:var(--accent)}.stat-sub .warn{color:var(--amber)}.stat-sub .err{color:var(--red)}
+    .stat-value.ok{color:var(--accent)}.stat-value.warn{color:var(--amber)}.stat-value.err{color:var(--red)}
+
+    /* Cards */
+    .card{background:var(--bg-1);border:1px solid var(--line);border-radius:var(--r-lg);padding:24px;margin-bottom:16px}
+    .card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;gap:12px;flex-wrap:wrap}
+    .card-title{font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:600;letter-spacing:-0.02em}
+    .card-sub{color:var(--text-3);font-size:12px;font-family:'JetBrains Mono',monospace;margin-top:-12px;margin-bottom:18px}
+
+    /* Turns table */
+    .turns-table{width:100%;border-collapse:collapse;font-size:12.5px}
+    .turns-table th{text-align:left;padding:10px 12px;font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--text-3);border-bottom:1px solid var(--line);font-weight:500;white-space:nowrap}
+    .turns-table td{padding:14px 12px;border-bottom:1px solid var(--line);color:var(--text-2);vertical-align:middle}
+    .turns-table tr:last-child td{border-bottom:none}
+    .turns-table tr{cursor:pointer;transition:background .15s}
+    .turns-table tr:hover td{background:rgba(0,255,170,0.03);color:var(--text)}
+    .turns-table .mono{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--text-3)}
+    .badge{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:100px;font-size:10.5px;font-family:'JetBrains Mono',monospace;letter-spacing:0.5px;font-weight:500}
+    .badge-completed{background:rgba(0,255,170,0.10);color:var(--accent);border:1px solid rgba(0,255,170,0.2)}
+    .badge-failed{background:var(--red-soft);color:var(--red);border:1px solid rgba(255,107,107,0.2)}
+    .badge-planning{background:var(--blue-soft);color:var(--blue);border:1px solid rgba(90,159,212,0.2)}
+    .badge-streaming{background:var(--amber-soft);color:var(--amber);border:1px solid rgba(255,180,84,0.2)}
+    .badge-paused{background:rgba(255,255,255,0.04);color:var(--text-3);border:1px solid var(--line-2)}
+    .empty-state{text-align:center;padding:48px 20px;color:var(--text-3)}
+    .empty-state .icon{font-size:32px;margin-bottom:12px;opacity:0.5}
+    .empty-state h4{font-family:'Space Grotesk',sans-serif;font-size:16px;font-weight:600;color:var(--text-2);margin-bottom:6px}
+    .empty-state p{font-size:13px}
+
+    /* Turn detail */
+    .turn-detail{background:var(--bg-2);border:1px solid var(--line);border-radius:var(--r);padding:16px;margin-top:8px;display:none}
+    .turn-detail.open{display:block;animation:fadein .2s ease}
+    .turn-detail .row{display:grid;grid-template-columns:120px 1fr;gap:12px;padding:6px 0;font-size:12px;border-bottom:1px solid var(--line)}
+    .turn-detail .row:last-child{border-bottom:none}
+    .turn-detail .lbl{color:var(--text-3);font-family:'JetBrains Mono',monospace;font-size:11px}
+    .turn-detail .val{color:var(--text);font-family:'JetBrains Mono',monospace;font-size:11.5px;word-break:break-word}
+
+    /* Forms */
+    .form-grid{display:grid;gap:14px;max-width:480px}
+    .form-row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+    .field label{display:block;font-size:12px;color:var(--text-2);margin-bottom:6px;font-weight:500;font-family:'JetBrains Mono',monospace}
+    .field label b{color:var(--accent)}
+    .field input,.field select{width:100%;padding:11px 14px;background:var(--bg-2);border:1px solid var(--line-2);border-radius:6px;color:var(--text);font-size:14px;font-family:inherit;transition:all .2s}
+    .field input::placeholder{color:var(--text-4)}
+    .field input:focus,.field select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(0,255,170,0.1)}
+    .field select{cursor:pointer;appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--text-2) 50%),linear-gradient(135deg,var(--text-2) 50%,transparent 50%);background-position:calc(100% - 16px) center,calc(100% - 11px) center;background-size:5px 5px;background-repeat:no-repeat;padding-right:36px}
+    .form-saved{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--accent);font-family:'JetBrains Mono',monospace;opacity:0;transition:opacity .2s;margin-left:12px}
+    .form-saved.show{opacity:1}
+
+    /* Usage bar */
+    .usage-bar{height:8px;background:var(--bg-2);border-radius:4px;overflow:hidden;position:relative;margin-top:8px}
+    .usage-bar div{height:100%;background:linear-gradient(90deg,var(--accent),var(--green-2));transition:width .4s ease;border-radius:4px}
+    .usage-bar.warn div{background:linear-gradient(90deg,var(--amber),var(--red))}
+
+    /* Loading state */
+    .loading{text-align:center;padding:48px 20px;color:var(--text-3);font-family:'JetBrains Mono',monospace;font-size:12px}
+    .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--line-2);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite;margin-right:8px;vertical-align:-2px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+
+    /* Mobile menu toggle */
+    .db-mobile-toggle{display:none;background:none;border:1px solid var(--line-2);color:var(--text);width:36px;height:36px;border-radius:6px;align-items:center;justify-content:center;cursor:pointer;font-size:16px}
+
+    /* Responsive */
+    @media(max-width:900px){
+      .db{grid-template-columns:1fr}
+      .db-side{position:fixed;left:-280px;width:240px;z-index:50;transition:left .3s;height:100vh}
+      .db-side.open{left:0;box-shadow:20px 0 40px rgba(0,0,0,0.5)}
+      .db-mobile-toggle{display:flex}
+      .db-main{padding:24px 20px 80px}
+      .stats-grid{grid-template-columns:1fr 1fr;gap:10px}
+      .stat{padding:16px}
+      .stat-value{font-size:24px}
+      .db-topbar h1{font-size:22px}
+      .form-row{grid-template-columns:1fr}
+      .turns-table{font-size:11px;display:block;overflow-x:auto;white-space:nowrap}
+    }
+    @media(max-width:480px){
+      .stats-grid{grid-template-columns:1fr}
+      .db-topbar{flex-direction:column;align-items:flex-start}
+    }
   </style>
 </head>
 <body>
-  <a class="back-link" href="/">← torna al sito</a>
-  <div class="card">
-    <a class="brand" href="/">
-      <div class="brand-mark">E</div>
-      <span class="brand-name">Excel AI · Dashboard</span>
-    </a>
-    <h1 id="dashTitle">Caricamento…</h1>
-    <p class="sub" id="dashSub">Verifica sessione in corso.</p>
-    <div class="state" id="dashState">
-      <span class="dot"></span>
-      <span id="stateText">Connessione a Supabase…</span>
-    </div>
-    <div class="actions" id="dashActions" style="display:none">
-      <a class="btn" href="/">Vai alla home</a>
-      <button class="btn ghost" id="logoutBtn" style="display:none">Esci</button>
-      <a class="btn ghost" href="/login.html" id="loginLink">Accedi</a>
-      <a class="btn" href="/signup.html" id="signupLink">Registrati</a>
-    </div>
+  <div class="db" id="dbRoot">
+    <!-- Sidebar -->
+    <aside class="db-side" id="dbSide">
+      <a class="brand" href="/">
+        <div class="brand-mark">E</div>
+        <span class="brand-name">Excel AI</span>
+      </a>
+      <nav class="db-nav">
+        <div class="db-nav-label">// Area utente</div>
+        <a class="db-nav-item active" data-tab="overview" href="#overview">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+          Overview
+        </a>
+        <a class="db-nav-item" data-tab="turns" href="#turns">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>
+          I miei turn
+          <span class="badge" id="turnCount">0</span>
+        </a>
+        <a class="db-nav-item" data-tab="settings" href="#settings">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+          Impostazioni
+        </a>
+        <a class="db-nav-item" data-tab="billing" href="#billing">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
+          Billing
+        </a>
+        <div class="db-nav-label" style="margin-top:auto">// Altro</div>
+        <a class="db-nav-item" href="/" target="_blank">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          Sito pubblico
+        </a>
+      </nav>
+      <div class="db-side-foot">
+        <div class="db-user">
+          <div class="db-user-avatar" id="userAvatar">?</div>
+          <div class="db-user-info">
+            <div class="db-user-name" id="userName">—</div>
+            <div class="db-user-email" id="userEmail">—</div>
+          </div>
+        </div>
+        <button class="db-logout" id="logoutBtn">ESCI</button>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="db-main">
+      <div class="db-topbar">
+        <div style="display:flex;align-items:center;gap:12px">
+          <button class="db-mobile-toggle" id="dbMobileToggle" aria-label="Menu">≡</button>
+          <div>
+            <h1 id="pageTitle">Overview</h1>
+            <div class="sub" id="pageSub">Caricamento…</div>
+          </div>
+        </div>
+        <div class="actions">
+          <a href="/install.html" class="btn btn-ghost">Scarica add-in</a>
+          <a href="https://github.com/francescods04/excel-ai-" class="btn btn-ghost" target="_blank">GitHub</a>
+        </div>
+      </div>
+
+      <!-- OVERVIEW -->
+      <div class="panel active" id="panel-overview">
+        <div class="stats-grid">
+          <div class="stat">
+            <div class="stat-label">Turn oggi</div>
+            <div class="stat-value" id="statToday">—</div>
+            <div class="stat-sub"><span id="statTodayPct">—</span> della quota</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Turn totali (30g)</div>
+            <div class="stat-value" id="stat30d">—</div>
+            <div class="stat-sub"><span id="statWeekTrend">—</span> questa settimana</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Success rate</div>
+            <div class="stat-value ok" id="statSuccess">—</div>
+            <div class="stat-sub"><span id="statFailed">—</span> falliti (30g)</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Latenza mediana</div>
+            <div class="stat-value" id="statP50">—</div>
+            <div class="stat-sub">p95: <span id="statP95">—</span></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <div class="card-title">Quota giornaliera</div>
+              <div class="card-sub">// free plan · 10 turn / giorno</div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;font-size:13px;margin-bottom:6px">
+            <span style="color:var(--text-2)"><span id="quotaUsed">0</span> di <span id="quotaTotal">10</span> usata</span>
+            <span style="color:var(--text-3);font-family:'JetBrains Mono',monospace;font-size:11px">resets alle 00:00 UTC</span>
+          </div>
+          <div class="usage-bar" id="usageBar"><div style="width:0%"></div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <div class="card-title">Attività recente</div>
+              <div class="card-sub">// ultimi 5 turn</div>
+            </div>
+            <a class="btn btn-ghost" href="#turns" data-tab="turns">Vedi tutti →</a>
+          </div>
+          <div id="recentActivity"><div class="loading"><span class="spinner"></span>Caricamento…</div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <div class="card-title">Account</div>
+              <div class="card-sub">// le tue informazioni</div>
+            </div>
+          </div>
+          <div id="accountInfo"><div class="loading"><span class="spinner"></span>Caricamento…</div></div>
+        </div>
+      </div>
+
+      <!-- TURNS -->
+      <div class="panel" id="panel-turns">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <div class="card-title">I miei turn</div>
+              <div class="card-sub">// storico completo delle operazioni</div>
+            </div>
+            <div style="display:flex;gap:8px">
+              <select id="turnFilter" class="btn btn-ghost" style="padding:7px 10px;font-size:12px">
+                <option value="">Tutti</option>
+                <option value="completed">Completati</option>
+                <option value="failed">Falliti</option>
+                <option value="planning">In corso</option>
+              </select>
+            </div>
+          </div>
+          <div id="turnsList"><div class="loading"><span class="spinner"></span>Caricamento…</div></div>
+        </div>
+      </div>
+
+      <!-- SETTINGS -->
+      <div class="panel" id="panel-settings">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <div class="card-title">Profilo</div>
+              <div class="card-sub">// informazioni pubbliche del tuo account</div>
+            </div>
+          </div>
+          <form class="form-grid" id="profileForm">
+            <div class="form-row">
+              <div class="field"><label><b>nome</b></label><input type="text" name="nome" required></div>
+              <div class="field"><label><b>cognome</b></label><input type="text" name="cognome" required></div>
+            </div>
+            <div class="field"><label><b>azienda</b></label><input type="text" name="azienda"></div>
+            <div class="field">
+              <label><b>ruolo</b></label>
+              <select name="ruolo">
+                <option value="">Seleziona…</option>
+                <option>Analista finanziario</option>
+                <option>Commercialista</option>
+                <option>CFO / Controller</option>
+                <option>Investment Banker</option>
+                <option>Consulente</option>
+                <option>Startup founder</option>
+                <option>Altro</option>
+              </select>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <button class="btn btn-primary" type="submit" id="profileSave">Salva modifiche</button>
+              <span class="form-saved" id="profileSaved">✓ Salvato</span>
+            </div>
+          </form>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <div class="card-title">Email</div>
+              <div class="card-sub">// l'email non è modificabile da qui. Contatta il supporto per cambiarla.</div>
+            </div>
+          </div>
+          <div class="field" style="max-width:480px">
+            <input type="email" id="userEmailDisplay" disabled style="opacity:0.6;cursor:not-allowed">
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <div class="card-title">Cambia password</div>
+              <div class="card-sub">// riceverai un'email di conferma per completare il cambio</div>
+            </div>
+          </div>
+          <form class="form-grid" id="passwordForm">
+            <div class="field"><label><b>nuova password</b></label><input type="password" name="password" placeholder="Almeno 8 caratteri" minlength="8" required></div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <button class="btn btn-primary" type="submit" id="passwordSave">Invia email di reset</button>
+              <span class="form-saved" id="passwordSaved">✓ Email inviata</span>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <!-- BILLING -->
+      <div class="panel" id="panel-billing">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <div class="card-title">Piano attuale</div>
+              <div class="card-sub">// free · demo</div>
+            </div>
+            <span class="badge badge-completed">FREE</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:16px">
+            <div>
+              <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-3);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Quota</div>
+              <div style="font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:600"><span id="billUsed">0</span> / <span id="billTotal">10</span> <span style="font-size:13px;color:var(--text-3);font-weight:400">turn oggi</span></div>
+            </div>
+            <div>
+              <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-3);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Reset</div>
+              <div style="font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:600">00:00 <span style="font-size:13px;color:var(--text-3);font-weight:400">UTC</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <div class="card-title">Prossimamente</div>
+              <div class="card-sub">// piani a pagamento in arrivo</div>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px">
+            <div style="padding:20px;background:var(--bg-2);border:1px solid var(--line);border-radius:8px">
+              <div style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-3);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">FREE</div>
+              <div style="font-family:'Space Grotesk',sans-serif;font-size:28px;font-weight:600;margin-bottom:4px">€0</div>
+              <div style="font-size:12px;color:var(--text-2);margin-bottom:12px">10 turn / giorno</div>
+              <div style="font-size:11px;color:var(--accent);font-family:'JetBrains Mono',monospace">✓ attivo</div>
+            </div>
+            <div style="padding:20px;background:var(--bg-2);border:1px solid rgba(0,255,170,0.2);border-radius:8px;position:relative">
+              <div style="position:absolute;top:10px;right:10px;font-size:9px;padding:2px 6px;background:var(--accent-soft);color:var(--accent);border-radius:3px;font-family:'JetBrains Mono',monospace">PRO</div>
+              <div style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-3);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">PRO</div>
+              <div style="font-family:'Space Grotesk',sans-serif;font-size:28px;font-weight:600;margin-bottom:4px">€19<span style="font-size:14px;color:var(--text-3)">/mese</span></div>
+              <div style="font-size:12px;color:var(--text-2);margin-bottom:12px">Turn illimitati</div>
+              <div style="font-size:11px;color:var(--text-3);font-family:'JetBrains Mono',monospace">— in arrivo</div>
+            </div>
+            <div style="padding:20px;background:var(--bg-2);border:1px solid var(--line);border-radius:8px">
+              <div style="font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--text-3);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">ENTERPRISE</div>
+              <div style="font-family:'Space Grotesk',sans-serif;font-size:28px;font-weight:600;margin-bottom:4px">Custom</div>
+              <div style="font-size:12px;color:var(--text-2);margin-bottom:12px">SSO, audit, SLA</div>
+              <div style="font-size:11px;color:var(--text-3);font-family:'JetBrains Mono',monospace">— contattaci</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
@@ -63,69 +448,277 @@
         auth: { persistSession: true, autoRefreshToken: true, storage: window.localStorage }
       });
 
-      const title = document.getElementById('dashTitle');
-      const sub = document.getElementById('dashSub');
-      const dot = document.querySelector('.dot');
-      const stateText = document.getElementById('stateText');
-      const actions = document.getElementById('dashActions');
-      const logoutBtn = document.getElementById('logoutBtn');
-      const loginLink = document.getElementById('loginLink');
-      const signupLink = document.getElementById('signupLink');
-
       const { data: { session } } = await sb.auth.getSession();
-
       if(!session){
         window.ExcelAI && window.ExcelAI.track('dashboard_viewed', { authed: false });
-        title.textContent = 'Accesso richiesto';
-        sub.innerHTML = 'Per accedere alla tua area devi <span class="user-email">fare login</span> o registrarti.';
-        stateText.textContent = 'Nessuna sessione attiva';
-        dot.classList.remove('ok');
-        actions.style.display = 'flex';
-        logoutBtn.style.display = 'none';
-      } else {
-        const email = session.user.email;
-        const meta = session.user.user_metadata || {};
-        const nome = meta.nome || email.split('@')[0];
-        title.textContent = 'Ciao, ' + nome + ' 👋';
-        sub.innerHTML = 'Sei loggato come <span class="user-email">' + email + '</span>';
-        stateText.textContent = 'Sessione attiva · ' + new Date().toLocaleString('it-IT');
-        dot.classList.add('ok');
-        actions.style.display = 'flex';
-        loginLink.style.display = 'none';
-        signupLink.style.display = 'none';
+        location.href = '/login.html?next=/dashboard.html';
+        return;
+      }
 
-        window.ExcelAI && window.ExcelAI.identify(session.user.id);
-        window.ExcelAI && window.ExcelAI.track('dashboard_viewed', { authed: true });
+      const token = session.access_token;
+      window.ExcelAI && window.ExcelAI.identify(session.user.id);
+      window.ExcelAI && window.ExcelAI.track('dashboard_viewed', { authed: true });
 
-        logoutBtn.addEventListener('click', async () => {
-          window.ExcelAI && window.ExcelAI.track('logout');
-          await sb.auth.signOut();
-          window.ExcelAI && window.ExcelAI.reset();
-          location.reload();
+      // ── Populate user info in sidebar ──
+      const meta = session.user.user_metadata || {};
+      const nome = meta.nome || session.user.email.split('@')[0];
+      const cognome = meta.cognome || '';
+      const fullName = (nome + ' ' + cognome).trim();
+      document.getElementById('userName').textContent = fullName || nome;
+      document.getElementById('userEmail').textContent = session.user.email;
+      document.getElementById('userAvatar').textContent = (nome[0] || '?').toUpperCase();
+      document.getElementById('userEmailDisplay').value = session.user.email;
+
+      // ── Logout ──
+      document.getElementById('logoutBtn').addEventListener('click', async () => {
+        window.ExcelAI && window.ExcelAI.track('logout');
+        await sb.auth.signOut();
+        window.ExcelAI && window.ExcelAI.reset();
+        location.href = '/';
+      });
+
+      // ── Mobile toggle ──
+      document.getElementById('dbMobileToggle').addEventListener('click', () => {
+        document.getElementById('dbSide').classList.toggle('open');
+      });
+      document.querySelectorAll('.db-nav-item').forEach(a => {
+        a.addEventListener('click', () => {
+          document.getElementById('dbSide').classList.remove('open');
         });
+      });
 
-        // Fetch profile / turn stats
+      // ── Tabs ──
+      function activateTab(tab){
+        document.querySelectorAll('.db-nav-item').forEach(a => a.classList.toggle('active', a.dataset.tab === tab));
+        document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + tab));
+        const titles = { overview: ['Overview', 'Le tue statistiche di utilizzo'], turns: ['I miei turn', 'Storico completo delle operazioni'], settings: ['Impostazioni', 'Profilo e sicurezza'], billing: ['Billing', 'Piano e quota'] };
+        const t = titles[tab] || ['—', '—'];
+        document.getElementById('pageTitle').textContent = t[0];
+        document.getElementById('pageSub').textContent = t[1];
+        window.ExcelAI && window.ExcelAI.track('dashboard_tab_viewed', { tab });
+      }
+      document.querySelectorAll('.db-nav-item[data-tab]').forEach(a => {
+        a.addEventListener('click', e => { e.preventDefault(); activateTab(a.dataset.tab); });
+      });
+      // Allow "Vedi tutti" links to switch tabs
+      document.querySelectorAll('[data-tab]').forEach(el => {
+        if(el.tagName !== 'A' || !el.classList.contains('db-nav-item')){
+          el.addEventListener('click', e => { e.preventDefault(); activateTab(el.dataset.tab); });
+        }
+      });
+
+      // ── Helpers ──
+      const fmt = n => Number(n || 0).toLocaleString('it-IT');
+      const ago = (iso) => {
+        if(!iso) return '—';
+        const d = new Date(iso);
+        const diff = (Date.now() - d.getTime()) / 1000;
+        if(diff < 60) return Math.floor(diff) + 's fa';
+        if(diff < 3600) return Math.floor(diff/60) + 'm fa';
+        if(diff < 86400) return Math.floor(diff/3600) + 'h fa';
+        if(diff < 2592000) return Math.floor(diff/86400) + 'g fa';
+        return d.toLocaleDateString('it-IT');
+      };
+
+      // ── Load stats ──
+      async function loadStats(){
         try {
-          const token = session.access_token;
-          const r = await fetch('/api/auth/me', { headers: { Authorization: 'Bearer ' + token } });
-          if(r.ok){
-            const profile = await r.json();
-            const stats = document.createElement('div');
-            stats.style.cssText = 'margin-top:20px;padding:14px;background:var(--bg-2);border:1px solid var(--line);border-radius:8px;display:grid;grid-template-columns:1fr 1fr;gap:10px;font-family:"JetBrains Mono",monospace;font-size:12px';
-            stats.innerHTML =
-              '<div><div style="color:var(--text-3);font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Piano</div><div style="color:var(--text)">' + (profile.plan || 'free') + '</div></div>' +
-              '<div><div style="color:var(--text-3);font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Turn totali</div><div style="color:var(--accent)">' + (profile.total_turns || 0) + '</div></div>' +
-              '<div><div style="color:var(--text-3);font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Oggi</div><div style="color:var(--text)">' + (profile.turns_today || 0) + ' / ' + (profile.daily_quota || 10) + '</div></div>' +
-              '<div><div style="color:var(--text-3);font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Quota</div><div style="color:var(--text)">' + Math.round(((profile.turns_today || 0) / (profile.daily_quota || 10)) * 100) + '%</div></div>';
-            document.querySelector('.card').appendChild(stats);
-            sub.innerHTML = 'Dashboard base. Le funzionalità complete (turn history, settings, billing) sono in arrivo.';
-          } else {
-            sub.innerHTML = 'Sessione valida ma profilo non accessibile. <a href="/login.html" style="color:var(--accent)">Riprova il login</a>.';
-          }
+          const r = await fetch('/api/me/stats', { headers: { Authorization: 'Bearer ' + token } });
+          if(!r.ok) throw new Error('stats ' + r.status);
+          const s = await r.json();
+          document.getElementById('statToday').innerHTML = fmt(s.turns_today);
+          document.getElementById('statTodayPct').textContent = Math.round((s.turns_today / s.daily_quota) * 100) + '%';
+          document.getElementById('stat30d').innerHTML = fmt(s.turns_30d);
+          document.getElementById('statWeekTrend').textContent = fmt(s.turns_7d);
+          document.getElementById('statSuccess').innerHTML = (s.success_rate_30d || 0) + '<span class="u">%</span>';
+          document.getElementById('statFailed').textContent = s.failed_30d || 0;
+          document.getElementById('statP50').innerHTML = fmt(s.latency_p50_ms) + '<span class="u">ms</span>';
+          document.getElementById('statP95').textContent = fmt(s.latency_p95_ms) + 'ms';
+
+          const used = s.turns_today || 0;
+          const total = s.daily_quota || 10;
+          const pct = Math.min(100, (used / total) * 100);
+          document.getElementById('quotaUsed').textContent = used;
+          document.getElementById('quotaTotal').textContent = total;
+          const bar = document.querySelector('#usageBar div');
+          bar.style.width = pct + '%';
+          if(pct >= 80) document.getElementById('usageBar').classList.add('warn');
+
+          document.getElementById('billUsed').textContent = used;
+          document.getElementById('billTotal').textContent = total;
         } catch(e){
-          console.error('Profile fetch error:', e);
+          console.error('stats load', e);
         }
       }
+
+      // ── Load turns ──
+      let allTurns = [];
+      async function loadTurns(){
+        try {
+          const r = await fetch('/api/me/turns?limit=100', { headers: { Authorization: 'Bearer ' + token } });
+          if(!r.ok) throw new Error('turns ' + r.status);
+          const data = await r.json();
+          allTurns = data.turns || [];
+          document.getElementById('turnCount').textContent = allTurns.length;
+          renderTurns();
+          renderRecentActivity();
+        } catch(e){
+          document.getElementById('turnsList').innerHTML = '<div class="empty-state"><h4>Errore caricamento</h4><p>' + e.message + '</p></div>';
+          console.error('turns load', e);
+        }
+      }
+
+      function statusBadge(status){
+        const map = {
+          completed: ['badge-completed', '✓ completato'],
+          failed: ['badge-failed', '✗ fallito'],
+          planning: ['badge-planning', '◌ planning'],
+          streaming: ['badge-streaming', '◐ streaming'],
+          paused: ['badge-paused', '‖ in pausa'],
+        };
+        const [cls, label] = map[status] || ['badge-paused', status || '—'];
+        return '<span class="badge ' + cls + '">' + label + '</span>';
+      }
+
+      function renderRecentActivity(){
+        const container = document.getElementById('recentActivity');
+        if(!allTurns.length){
+          container.innerHTML = '<div class="empty-state"><div class="icon">📊</div><h4>Nessun turn ancora</h4><p>Inizia a usare l\'add-in Excel e i tuoi turn appariranno qui.</p></div>';
+          return;
+        }
+        const recent = allTurns.slice(0, 5);
+        container.innerHTML = '<table class="turns-table"><thead><tr><th>Quando</th><th>Status</th><th>Tasks</th><th>Azioni</th><th>Modello</th></tr></thead><tbody>' + recent.map(t => `
+          <tr>
+            <td class="mono">${ago(t.created_at)}</td>
+            <td>${statusBadge(t.status)}</td>
+            <td class="mono">${t.task_count || 0}</td>
+            <td class="mono">${t.action_count || 0}</td>
+            <td class="mono">${(t.model || '—').replace('deepseek-', '')}</td>
+          </tr>`).join('') + '</tbody></table>';
+      }
+
+      function renderTurns(){
+        const container = document.getElementById('turnsList');
+        const filter = document.getElementById('turnFilter').value;
+        const filtered = filter ? allTurns.filter(t => t.status === filter) : allTurns;
+        if(!filtered.length){
+          container.innerHTML = '<div class="empty-state"><div class="icon">' + (filter ? '🔍' : '📊') + '</div><h4>' + (filter ? 'Nessun turn corrispondente' : 'Nessun turn ancora') + '</h4><p>' + (filter ? 'Prova a cambiare il filtro' : 'Inizia a usare l\'add-in Excel e i tuoi turn appariranno qui.') + '</p></div>';
+          return;
+        }
+        container.innerHTML = '<table class="turns-table"><thead><tr><th>ID</th><th>Quando</th><th>Status</th><th>Tasks</th><th>Azioni</th><th>Tokens</th><th>Modello</th><th>Latenza</th></tr></thead><tbody>' + filtered.map(t => `
+          <tr onclick="toggleTurnDetail(this, '${t.id}')">
+            <td class="mono">${t.id.slice(0, 8)}…</td>
+            <td class="mono">${ago(t.created_at)}</td>
+            <td>${statusBadge(t.status)}</td>
+            <td class="mono">${t.task_count || 0}</td>
+            <td class="mono">${t.action_count || 0}</td>
+            <td class="mono">${fmt((t.tokens_in || 0) + (t.tokens_out || 0))}</td>
+            <td class="mono">${(t.model || '—').replace('deepseek-', '')}</td>
+            <td class="mono">${fmt(t.total_latency_ms)}ms</td>
+          </tr>
+          <tr class="turn-detail-row" id="detail-${t.id}"><td colspan="8"><div class="turn-detail" id="detail-body-${t.id}"></div></td></tr>
+        `).join('') + '</tbody></table>';
+      }
+
+      window.toggleTurnDetail = function(tr, id){
+        const detailRow = document.getElementById('detail-' + id);
+        const detailBody = document.getElementById('detail-body-' + id);
+        const isOpen = detailBody.classList.contains('open');
+        if(isOpen){
+          detailBody.classList.remove('open');
+          return;
+        }
+        const t = allTurns.find(x => x.id === id);
+        if(!t) return;
+        detailBody.innerHTML = `
+          <div class="row"><div class="lbl">ID completo</div><div class="val">${t.id}</div></div>
+          <div class="row"><div class="lbl">Creato</div><div class="val">${new Date(t.created_at).toLocaleString('it-IT')}</div></div>
+          ${t.completed_at ? `<div class="row"><div class="lbl">Completato</div><div class="val">${new Date(t.completed_at).toLocaleString('it-IT')}</div></div>` : ''}
+          <div class="row"><div class="lbl">Tasks pianificati</div><div class="val">${t.task_count || 0}</div></div>
+          <div class="row"><div class="lbl">Azioni eseguite</div><div class="val">${t.action_count || 0}</div></div>
+          <div class="row"><div class="lbl">Tokens in/out</div><div class="val">${fmt(t.tokens_in)} / ${fmt(t.tokens_out)}</div></div>
+          <div class="row"><div class="lbl">Modello</div><div class="val">${t.model || '—'}</div></div>
+          <div class="row"><div class="lbl">Latenza totale</div><div class="val">${fmt(t.total_latency_ms)}ms</div></div>
+          ${t.error_type ? `<div class="row"><div class="lbl">Errore</div><div class="val" style="color:var(--red)">${t.error_type}: ${(t.error_message || '').slice(0, 200)}</div></div>` : ''}
+        `;
+        detailBody.classList.add('open');
+      };
+
+      document.getElementById('turnFilter').addEventListener('change', renderTurns);
+
+      // ── Account info ──
+      function renderAccountInfo(){
+        const acc = document.getElementById('accountInfo');
+        acc.innerHTML = `
+          <div style="display:grid;grid-template-columns:120px 1fr;gap:12px;font-size:13px">
+            <div style="color:var(--text-3);font-family:'JetBrains Mono',monospace">Email</div><div>${session.user.email}</div>
+            <div style="color:var(--text-3);font-family:'JetBrains Mono',monospace">User ID</div><div style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--text-2)">${session.user.id}</div>
+            <div style="color:var(--text-3);font-family:'JetBrains Mono',monospace">Registrato</div><div>${new Date(session.user.created_at).toLocaleDateString('it-IT')}</div>
+            <div style="color:var(--text-3);font-family:'JetBrains Mono',monospace">Provider</div><div>${session.user.app_metadata?.provider || 'email'}</div>
+            <div style="color:var(--text-3);font-family:'JetBrains Mono',monospace">Piano</div><div><span class="badge badge-completed">${(meta.plan || 'free').toUpperCase()}</span></div>
+          </div>
+        `;
+      }
+
+      // ── Settings form ──
+      const profileForm = document.getElementById('profileForm');
+      profileForm.nome.value = meta.nome || '';
+      profileForm.cognome.value = meta.cognome || '';
+      profileForm.azienda.value = meta.azienda || '';
+      profileForm.ruolo.value = meta.ruolo || '';
+
+      profileForm.addEventListener('submit', async e => {
+        e.preventDefault();
+        const data = Object.fromEntries(new FormData(profileForm));
+        const btn = document.getElementById('profileSave');
+        btn.disabled = true;
+        btn.textContent = 'Salvataggio…';
+        try {
+          // Update Supabase user metadata
+          const { error: authErr } = await sb.auth.updateUser({ data: data });
+          if(authErr) throw authErr;
+          // Also save to user_settings via our endpoint
+          await fetch('/api/me/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+            body: JSON.stringify({ settings: data })
+          });
+          const saved = document.getElementById('profileSaved');
+          saved.classList.add('show');
+          setTimeout(() => saved.classList.remove('show'), 2500);
+          window.ExcelAI && window.ExcelAI.track('profile_updated');
+        } catch(e){
+          alert('Errore: ' + e.message);
+        }
+        btn.disabled = false;
+        btn.textContent = 'Salva modifiche';
+      });
+
+      // ── Password reset ──
+      document.getElementById('passwordForm').addEventListener('submit', async e => {
+        e.preventDefault();
+        const btn = document.getElementById('passwordSave');
+        btn.disabled = true;
+        btn.textContent = 'Invio…';
+        try {
+          const { error } = await sb.auth.resetPasswordForEmail(session.user.email, {
+            redirectTo: location.origin + '/login.html?reset=success'
+          });
+          if(error) throw error;
+          const saved = document.getElementById('passwordSaved');
+          saved.classList.add('show');
+          setTimeout(() => saved.classList.remove('show'), 3000);
+          window.ExcelAI && window.ExcelAI.track('password_reset_requested');
+        } catch(e){
+          alert('Errore: ' + e.message);
+        }
+        btn.disabled = false;
+        btn.textContent = 'Invia email di reset';
+      });
+
+      // ── Init ──
+      await Promise.all([loadStats(), loadTurns()]);
+      renderAccountInfo();
     })();
   </script>
 </body>
