@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard — Excel AI</title>
+  <link rel="icon" type="image/svg+xml" href="/public/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    :root{--bg:#060709;--bg-1:#0a0c11;--bg-2:#0f1219;--bg-3:#141823;--line:#1a1f2c;--line-2:#252b3a;--text:#e8ecf2;--text-2:#9aa4b6;--text-3:#5a6478;--text-4:#3a4252;--green:#107c41;--green-2:#1a9c54;--accent:#00ffaa;--accent-2:#00d4aa;--accent-soft:rgba(0,255,170,0.08);--accent-glow:rgba(0,255,170,0.25);--amber:#ffb454;--red:#ff6b6b;--r:8px;--r-lg:14px}
+    html,body{min-height:100vh}
+    body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased;display:flex;align-items:center;justify-content:center;padding:24px}
+    body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(ellipse 60% 50% at 50% 30%, rgba(0,255,170,0.06), transparent 70%)}
+    .card{position:relative;z-index:1;width:100%;max-width:520px;background:var(--bg-1);border:1px solid var(--line);border-radius:var(--r-lg);padding:40px;box-shadow:0 24px 60px rgba(0,0,0,0.5)}
+    .brand{display:flex;align-items:center;gap:10px;margin-bottom:24px;text-decoration:none;color:var(--text)}
+    .brand-mark{width:30px;height:30px;background:linear-gradient(135deg,var(--green-2),var(--green));border-radius:5px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-weight:700;font-size:14px;color:#fff}
+    .brand-name{font-family:'Space Grotesk',sans-serif;font-size:15px;font-weight:600;letter-spacing:-0.02em}
+    h1{font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:600;letter-spacing:-0.02em;margin-bottom:6px}
+    .sub{color:var(--text-2);font-size:14px;margin-bottom:20px}
+    .state{display:flex;align-items:center;gap:10px;padding:14px;background:var(--bg-2);border:1px solid var(--line);border-radius:8px;margin-bottom:16px;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:var(--text-2)}
+    .dot{width:8px;height:8px;border-radius:50%;background:var(--amber);animation:dotpulse 1.5s infinite}
+    .dot.ok{background:var(--accent)}
+    @keyframes dotpulse{0%,100%{opacity:1}50%{opacity:.4}}
+    .actions{display:flex;gap:8px;flex-wrap:wrap}
+    .btn{display:inline-flex;align-items:center;gap:8px;padding:10px 16px;background:var(--accent);color:var(--bg);border:none;border-radius:6px;font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;text-decoration:none;transition:all .2s}
+    .btn:hover{background:#1affb8}
+    .btn.ghost{background:transparent;color:var(--text);border:1px solid var(--line-2)}
+    .btn.ghost:hover{background:var(--bg-2);color:var(--text);border-color:var(--line-2)}
+    .user-email{color:var(--accent);font-weight:500;font-family:'JetBrains Mono',monospace}
+    .back-link{position:fixed;top:20px;left:20px;z-index:10;color:var(--text-3);text-decoration:none;font-size:12px;font-family:'JetBrains Mono',monospace;display:flex;align-items:center;gap:6px}
+  </style>
+</head>
+<body>
+  <a class="back-link" href="/">← torna al sito</a>
+  <div class="card">
+    <a class="brand" href="/">
+      <div class="brand-mark">E</div>
+      <span class="brand-name">Excel AI · Dashboard</span>
+    </a>
+    <h1 id="dashTitle">Caricamento…</h1>
+    <p class="sub" id="dashSub">Verifica sessione in corso.</p>
+    <div class="state" id="dashState">
+      <span class="dot"></span>
+      <span id="stateText">Connessione a Supabase…</span>
+    </div>
+    <div class="actions" id="dashActions" style="display:none">
+      <a class="btn" href="/">Vai alla home</a>
+      <button class="btn ghost" id="logoutBtn" style="display:none">Esci</button>
+      <a class="btn ghost" href="/login.html" id="loginLink">Accedi</a>
+      <a class="btn" href="/signup.html" id="signupLink">Registrati</a>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script>
+    (async () => {
+      const { supabaseUrl, supabaseAnonKey } = await fetch('/api/config').then(r => r.json());
+      const sb = window.supabase.createClient(supabaseUrl, supabaseAnonKey, {
+        auth: { persistSession: true, autoRefreshToken: true, storage: window.localStorage }
+      });
+
+      const title = document.getElementById('dashTitle');
+      const sub = document.getElementById('dashSub');
+      const dot = document.querySelector('.dot');
+      const stateText = document.getElementById('stateText');
+      const actions = document.getElementById('dashActions');
+      const logoutBtn = document.getElementById('logoutBtn');
+      const loginLink = document.getElementById('loginLink');
+      const signupLink = document.getElementById('signupLink');
+
+      const { data: { session } } = await sb.auth.getSession();
+
+      if(!session){
+        title.textContent = 'Accesso richiesto';
+        sub.innerHTML = 'Per accedere alla tua area devi <span class="user-email">fare login</span> o registrarti.';
+        stateText.textContent = 'Nessuna sessione attiva';
+        dot.classList.remove('ok');
+        actions.style.display = 'flex';
+        logoutBtn.style.display = 'none';
+      } else {
+        const email = session.user.email;
+        const meta = session.user.user_metadata || {};
+        const nome = meta.nome || email.split('@')[0];
+        title.textContent = 'Ciao, ' + nome + ' 👋';
+        sub.innerHTML = 'Sei loggato come <span class="user-email">' + email + '</span>';
+        stateText.textContent = 'Sessione attiva · ' + new Date().toLocaleString('it-IT');
+        dot.classList.add('ok');
+        actions.style.display = 'flex';
+        loginLink.style.display = 'none';
+        signupLink.style.display = 'none';
+
+        logoutBtn.addEventListener('click', async () => {
+          await sb.auth.signOut();
+          location.reload();
+        });
+
+        // Fetch profile / turn stats
+        try {
+          const token = session.access_token;
+          const r = await fetch('/api/auth/me', { headers: { Authorization: 'Bearer ' + token } });
+          if(r.ok){
+            const profile = await r.json();
+            const stats = document.createElement('div');
+            stats.style.cssText = 'margin-top:20px;padding:14px;background:var(--bg-2);border:1px solid var(--line);border-radius:8px;display:grid;grid-template-columns:1fr 1fr;gap:10px;font-family:"JetBrains Mono",monospace;font-size:12px';
+            stats.innerHTML =
+              '<div><div style="color:var(--text-3);font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Piano</div><div style="color:var(--text)">' + (profile.plan || 'free') + '</div></div>' +
+              '<div><div style="color:var(--text-3);font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Turn totali</div><div style="color:var(--accent)">' + (profile.total_turns || 0) + '</div></div>' +
+              '<div><div style="color:var(--text-3);font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Oggi</div><div style="color:var(--text)">' + (profile.turns_today || 0) + ' / ' + (profile.daily_quota || 10) + '</div></div>' +
+              '<div><div style="color:var(--text-3);font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Quota</div><div style="color:var(--text)">' + Math.round(((profile.turns_today || 0) / (profile.daily_quota || 10)) * 100) + '%</div></div>';
+            document.querySelector('.card').appendChild(stats);
+            sub.innerHTML = 'Dashboard base. Le funzionalità complete (turn history, settings, billing) sono in arrivo.';
+          } else {
+            sub.innerHTML = 'Sessione valida ma profilo non accessibile. <a href="/login.html" style="color:var(--accent)">Riprova il login</a>.';
+          }
+        } catch(e){
+          console.error('Profile fetch error:', e);
+        }
+      }
+    })();
+  </script>
+</body>
+</html>
