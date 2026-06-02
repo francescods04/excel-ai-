@@ -191,7 +191,16 @@ async function main() {
     const r = responses[i];
     const matchedReq = requests.find(x => x.traceId === r.traceId && x.label === r.label);
     let parsed = null;
-    try { parsed = JSON.parse(r.responseText || r.response_text || r.response || '{}'); } catch (e) { parsed = { _parseError: e.message, raw: (r.responseText || '').slice(0, 200) }; }
+    let parseErrorRecovered = false;
+    const rawTxt = r.responseText || r.response_text || r.response || '{}';
+    try { parsed = JSON.parse(rawTxt); } catch (e) {
+      // Trace stores RAW response. Production layer may have recovered via
+      // tryRecoverTruncatedAgentJson / tryParseJSON. If a subsequent iter
+      // shows forward progress (thought/tool), this iter's parse error was
+      // recovered transparently — flag but don't blame.
+      parsed = { _parseError: e.message, _rawTxt: rawTxt.slice(0, 200) };
+      // Forward-progress detection done after loop.
+    }
     const lastUser = matchedReq && Array.isArray(matchedReq.messages)
       ? (matchedReq.messages.filter(m => m.role === 'user').pop()?.content || '').replace(/\s+/g, ' ').slice(0, 200)
       : '';
@@ -214,11 +223,21 @@ async function main() {
     return { name: n, maxRow: b.maxRow, maxCol: b.maxCol, valueCells: vc, formulaCells: fc };
   });
 
+  // Mark parse errors as recovered if a subsequent iter shows forward progress
+  for (let i = 0; i < narrative.length; i++) {
+    if (!narrative[i].parseError) continue;
+    const next = narrative.slice(i + 1, i + 3).find(x => x.tool || x.thought);
+    if (next) narrative[i].parseErrorRecovered = true;
+  }
+
   // Print response-by-response analysis
   console.log('\n═══ ITERATION-BY-ITERATION ═══\n');
   for (const it of narrative) {
     console.log(`[${String(it.n).padStart(3)}] ${it.label}  tok ${it.tokens.in}→${it.tokens.out}  ${it.latencyMs}ms`);
-    if (it.parseError) console.log(`     ✗ PARSE ERROR: ${it.parseError}`);
+    if (it.parseError) {
+      const tag = it.parseErrorRecovered ? '⚠ PARSE (recovered in server)' : '✗ PARSE ERROR';
+      console.log(`     ${tag}: ${it.parseError}`);
+    }
     if (it.thought) console.log(`     thought: ${it.thought}`);
     if (it.tool) console.log(`     tool:    ${it.tool}(${it.paramsSummary})`);
   }

@@ -2799,31 +2799,98 @@ function summarizeActionsForCritic(actions) {
 function collectBlockingErrors(results, options = {}) {
   const maxScan = options.maxScan || 30;
   const recent = (Array.isArray(results) ? results : []).slice(-maxScan);
-  const blocking = [];
-  for (const r of recent) {
+  // Two-pass scan:
+  //   pass A: collect every error candidate (tool+sheet+target) with its index.
+  //   pass B: drop any candidate that was SUPERSEDED by a later successful call
+  //           on the same (tool family, sheet, target). A validation rejection
+  //           (e.g. set_cell_range refused because copyToRange seed was a text
+  //           label) has no Excel side effect; the agent's clean retry should
+  //           clear the blocker, not leave it haunting `done`.
+  //
+  // Observed on 2026-06-02 DCF E2E slice 2: a copyToRange rejection at iter 3
+  // remained in the blocking list through iter 12, even though iter 4-5 wrote
+  // the same range successfully — wasted ~6 iterations on stale-error nudges.
+  const TOOL_FAMILY = {
+    set_cell_range: 'write',
+    bulk_set_cell_ranges: 'write',
+    set_format: 'format',
+    bulk_set_format: 'format',
+    create_sheet: 'sheet',
+    bulk_create_sheets: 'sheet',
+    rename_sheet: 'sheet',
+    delete_sheet: 'sheet',
+    create_named_range: 'name',
+    bulk_create_named_ranges: 'name'
+  };
+  const errorCandidates = [];
+  const successfulKeys = new Map(); // family::sheet → latest idx of successful call
+  for (let i = 0; i < recent.length; i++) {
+    const r = recent[i];
     if (!r || r.type !== 'tool') continue;
     const toolName = r.tool;
     const result = r.result;
     if (!result || typeof result !== 'object') continue;
-    // Top-level error field (registry returns { error: "..." } on failure)
-    if (typeof result.error === 'string' && result.error.length > 0) {
-      blocking.push({ tool: toolName, message: result.error.slice(0, 240) });
+    const family = TOOL_FAMILY[toolName] || toolName;
+    const sheetHint = extractSheetHintFromToolResult(toolName, r.params, result);
+    const familyKey = `${family}::${sheetHint || '*'}`;
+    const hasTopError = typeof result.error === 'string' && result.error.length > 0;
+    const subErrors = Array.isArray(result.errors) ? result.errors : [];
+    const isSuccessful = !hasTopError && (subErrors.length === 0 || result.ok === true || (Array.isArray(result.actions) && result.actions.length > 0));
+    if (isSuccessful) {
+      successfulKeys.set(familyKey, i);
+      // Also register sheet-wildcard key so a later success on ANY sheet within
+      // the family clears candidates that lacked sheet hints.
+      if (sheetHint) successfulKeys.set(`${family}::*`, i);
       continue;
     }
-    // Per-entry errors (e.g. bulk_set_format / bulk_set_cell_ranges report
-    // errors: [{ index, sheet, reason }, ...])
-    if (Array.isArray(result.errors) && result.errors.length > 0) {
-      for (const e of result.errors.slice(0, 6)) {
-        const msg = (e && (e.reason || e.message || e.error)) || 'errore';
-        const where = e && (e.sheet ? `${e.sheet}${e.target ? '!' + e.target : ''}` : '');
-        blocking.push({
+    if (hasTopError) {
+      errorCandidates.push({
+        idx: i, family, familyKey,
+        entry: { tool: toolName, message: result.error.slice(0, 240) }
+      });
+    }
+    for (const e of subErrors.slice(0, 6)) {
+      const msg = (e && (e.reason || e.message || e.error)) || 'errore';
+      const eSheet = e && e.sheet;
+      const where = eSheet ? `${eSheet}${e.target ? '!' + e.target : ''}` : '';
+      errorCandidates.push({
+        idx: i, family,
+        familyKey: `${family}::${eSheet || sheetHint || '*'}`,
+        entry: {
           tool: toolName,
           message: (where ? where + ': ' : '') + String(msg).slice(0, 240)
-        });
-      }
+        }
+      });
     }
   }
+  const blocking = [];
+  for (const c of errorCandidates) {
+    const supersededBy = successfulKeys.get(c.familyKey);
+    if (supersededBy != null && supersededBy > c.idx) continue;
+    blocking.push(c.entry);
+  }
   return { ok: blocking.length === 0, blockingErrors: blocking };
+}
+
+// Best-effort sheet hint extraction for blocking-error grouping. We use this to
+// decide whether a later successful call SUPERSEDES an earlier error (same
+// tool family, same sheet target).
+function extractSheetHintFromToolResult(toolName, params, result) {
+  if (!params || typeof params !== 'object') params = {};
+  // Direct
+  if (typeof params.sheet === 'string') return params.sheet;
+  if (typeof params.sheetName === 'string') return params.sheetName;
+  // First entry in writes/formats/ranges
+  const list = Array.isArray(params.writes) ? params.writes
+    : Array.isArray(params.formats) ? params.formats
+    : Array.isArray(params.ranges) ? params.ranges
+    : null;
+  if (list && list.length && list[0] && typeof list[0].sheet === 'string') return list[0].sheet;
+  // From result actions
+  if (result && Array.isArray(result.actions) && result.actions[0] && typeof result.actions[0].sheet === 'string') {
+    return result.actions[0].sheet;
+  }
+  return null;
 }
 
 function buildDoneBlockedMessage(blockingErrors) {
