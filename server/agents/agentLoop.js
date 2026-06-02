@@ -2541,6 +2541,10 @@ function tryRecoverTruncatedAgentJson(raw) {
   const stack = [];
   let inString = false;
   let escape = false;
+  // Track excess closers: when we pop with empty stack, the closer is unmatched.
+  // LLM streaming occasionally appends trailing }] beyond the actual JSON object
+  // (observed on DCF E2E iter 7: "...0.0\"}}}}}]}}" with one extra `}`).
+  let excessClosers = 0;
   for (let i = 0; i < trimmed.length; i++) {
     const ch = trimmed[i];
     if (escape) { escape = false; continue; }
@@ -2548,9 +2552,17 @@ function tryRecoverTruncatedAgentJson(raw) {
     if (ch === '"') { inString = !inString; continue; }
     if (inString) continue;
     if (ch === '{' || ch === '[') stack.push(ch);
-    else if (ch === '}' || ch === ']') stack.pop();
+    else if (ch === '}' || ch === ']') {
+      if (stack.length === 0) excessClosers++;
+      else stack.pop();
+    }
   }
   if (stack.length === 0) {
+    if (excessClosers > 0) {
+      // Strip trailing closers greedily until parse succeeds.
+      const recovered = tryRecoverExcessClosers(trimmed, excessClosers);
+      if (recovered) return recovered;
+    }
     // Brackets balanced but JSON.parse still failed → likely a missing-comma
     // syntax error inside the body. Try to repair adjacent }{ / ]{ / ]" etc.
     return tryRecoverMissingCommas(trimmed);
@@ -2578,6 +2590,58 @@ function tryRecoverTruncatedAgentJson(raw) {
   } catch {
     return null;
   }
+}
+
+// Strip excess `}` / `]` characters that have no matching opener. The extras
+// can sit at the tail OR in the middle of the JSON — observed on DCF E2E
+// iter 7: "...0.0\"}}}}}]}}" had one extra `}` BEFORE the `]`, leaving the
+// trailing 6 closers themselves balanced. Strategy:
+//   1) try trailing strip (cheap, handles append-extras)
+//   2) if parse still fails, use the error position to locate the offending
+//      closer and surgically remove it; retry up to `maxStrip` rounds.
+function tryRecoverExcessClosers(raw, maxStrip) {
+  const cap = Math.min(maxStrip || 0, 16);
+  // Strategy 1 — strip trailing closers/whitespace.
+  let candidate = raw;
+  for (let strips = 0; strips < cap; strips++) {
+    const tailMatch = candidate.match(/[\s\}\]]+$/);
+    if (!tailMatch) break;
+    candidate = candidate.slice(0, candidate.length - 1);
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === 'object'
+        && (typeof parsed.tool === 'string' || parsed.params)) {
+        return parsed;
+      }
+    } catch { /* keep stripping */ }
+  }
+  // Strategy 2 — surgical removal at the parse-error position.
+  candidate = raw;
+  for (let strips = 0; strips < cap; strips++) {
+    let pos = null;
+    try {
+      JSON.parse(candidate);
+      // Already parses (shouldn't happen since caller saw a failure, but safe).
+      break;
+    } catch (e) {
+      const m = String(e.message).match(/at position (\d+)/);
+      if (!m) break;
+      pos = Number(m[1]);
+    }
+    if (pos == null || pos >= candidate.length) break;
+    const ch = candidate[pos];
+    if (ch !== '}' && ch !== ']') break;
+    // Drop the offending closer and retry parse.
+    candidate = candidate.slice(0, pos) + candidate.slice(pos + 1);
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === 'object'
+        && (typeof parsed.tool === 'string' || parsed.params)) {
+        return parsed;
+      }
+    } catch { /* keep cycling */ }
+  }
+  return null;
 }
 
 // LLMs occasionally emit "{...} {...}" or "...] [..." inside arrays, dropping

@@ -31,12 +31,13 @@ function extractFn(name) {
 const sandbox = { module: {}, exports: {} };
 vm.createContext(sandbox);
 const code = `
+${extractFn('tryRecoverExcessClosers')}
 ${extractFn('tryRecoverMissingCommas')}
 ${extractFn('tryRecoverTruncatedAgentJson')}
-module.exports = { tryRecoverTruncatedAgentJson, tryRecoverMissingCommas };
+module.exports = { tryRecoverTruncatedAgentJson, tryRecoverMissingCommas, tryRecoverExcessClosers };
 `;
 vm.runInContext(code, sandbox);
-const { tryRecoverTruncatedAgentJson, tryRecoverMissingCommas } = sandbox.module.exports;
+const { tryRecoverTruncatedAgentJson, tryRecoverMissingCommas, tryRecoverExcessClosers } = sandbox.module.exports;
 
 async function main() {
   await test('recovers truncated JSON (open brace)', () => {
@@ -75,6 +76,31 @@ async function main() {
   await test('returns null on unrecoverable garbage', () => {
     const raw = 'not even json';
     assert.strictEqual(tryRecoverTruncatedAgentJson(raw), null);
+  });
+
+  await test('recovers excess trailing closer (extra "}" at end)', () => {
+    const raw = '{"tool":"set_cell_range","params":{"cells":{"A1":{"value":1}}}}}';
+    const out = tryRecoverTruncatedAgentJson(raw);
+    assert.ok(out, 'should recover');
+    assert.strictEqual(out.tool, 'set_cell_range');
+  });
+
+  await test('recovers excess closer in middle (real DCF iter 7 shape)', () => {
+    // Reproduction of the 2026-06-02 DCF E2E parse fail: one extra `}` between
+    // the deepest object close and the array bracket.
+    const raw = '{"thought":"x","tool":"bulk_set_cell_ranges","params":{"writes":[{"sheet":"V","cells":{"B3":{"formula":"=SUM(B3:F3)","cellStyles":{"fontColor":"#000","bold":true,"numberFormat":"#,##0.0"}}}}}]}}';
+    const out = tryRecoverTruncatedAgentJson(raw);
+    assert.ok(out, 'should recover surgically');
+    assert.strictEqual(out.tool, 'bulk_set_cell_ranges');
+    assert.strictEqual(out.params.writes[0].sheet, 'V');
+  });
+
+  await test('does not over-strip valid JSON', () => {
+    const raw = '{"tool":"done","params":{"summary":"ok"}}';
+    // Already valid → recovery shouldn't be invoked, but if it were, must be safe
+    const out = tryRecoverExcessClosers(raw, 5);
+    // Either null (no excess detected) or returns parsed shape — must not crash
+    assert.ok(out === null || out.tool === 'done');
   });
 }
 
