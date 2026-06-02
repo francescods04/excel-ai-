@@ -5,6 +5,7 @@ const logger = require('../utils/logger');
 const { executeTool, registry } = require('../tools/registry');
 const SHARED_SCHEMAS = require('../tools/schemas');
 const { validateTaskOutput, validateFormula } = require('./critic');
+const { auditStatic: auditWorkbook, buildRepairInstruction } = require('./auditor');
 const streaming = require('./streaming');
 const { initializeTools } = require('../utils/toolSearch');
 const { detectSkills } = require('../utils/skillSuggest');
@@ -39,6 +40,40 @@ const MUTATION_TOOLS = new Set([
 const AGENT_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT_AGENT || 'high';
 const AGENT_POSTWRITE_CRITIC = process.env.AGENT_POSTWRITE_CRITIC === 'true';
 const AGENT_POSTWRITE_CRITIC_TIMEOUT_MS = Number(process.env.AGENT_POSTWRITE_CRITIC_TIMEOUT_MS) || 8000;
+
+// Rebuild a virtual sheetCells map { sheet: { addr: { v?, f? } } } from the
+// recorded tool calls in state.results. Used by the Auditor pass to review the
+// slice's own writes without depending on a live client read.
+function collectSheetCellsFromResults(results) {
+  const out = {};
+  if (!Array.isArray(results)) return out;
+  const apply = (sheet, addr, spec) => {
+    if (!sheet || !addr || !spec || typeof spec !== 'object') return;
+    if (!out[sheet]) out[sheet] = {};
+    const formula = spec.formula !== undefined ? spec.formula : (typeof spec.value === 'string' && spec.value.startsWith('=') ? spec.value : undefined);
+    if (formula !== undefined) out[sheet][addr] = { f: formula };
+    else if (spec.value !== undefined) out[sheet][addr] = { v: spec.value };
+  };
+  const fromWrite = (sheet, cells) => {
+    if (!cells || typeof cells !== 'object') return;
+    for (const [addr, spec] of Object.entries(cells)) apply(sheet, addr, spec);
+  };
+  for (const r of results) {
+    if (!r || r.type !== 'tool') continue;
+    const tool = r.tool;
+    const p = r.params || {};
+    if (tool === 'set_cell_range') {
+      const sheet = p.sheet || p.sheetName || 'Sheet1';
+      fromWrite(sheet, p.cells);
+    } else if (tool === 'bulk_set_cell_ranges') {
+      const writes = Array.isArray(p.writes || p.ranges) ? (p.writes || p.ranges) : [];
+      for (const w of writes) {
+        fromWrite(w.sheet || w.sheetName || 'Sheet1', w.cells);
+      }
+    }
+  }
+  return out;
+}
 const AGENT_POSTWRITE_CRITIC_MIN_ACTIONS = Number(process.env.AGENT_POSTWRITE_CRITIC_MIN_ACTIONS) || 10;
 const AGENT_AUTO_FORMAT_ON_DONE = process.env.AGENT_AUTO_FORMAT_ON_DONE === 'true';
 const BULK_SET_FORMAT_MAX = Math.max(32, Number(process.env.AGENT_BULK_FORMAT_MAX) || 96);
@@ -6130,6 +6165,34 @@ async function runAgentStep(state, clientResult, deps = {}) {
       }
       // Done succeeded: reset streak so the next slice (or this one re-entering after legitimate work) starts fresh
       state.doneBlockedStreak = 0;
+      // Auditor pass: rebuild a virtual workbook from writes recorded in
+      // state.results, run static formula audit (templated clones, constant
+      // guards, frozen INDEX/OFFSET literals, self-refs). If a "fail"-class
+      // issue is found and auditRetries < cap, push focused repair feedback and
+      // force one more iteration. Otherwise pass through. Auditor has zero LLM
+      // cost (static rules) and ~5ms per slice.
+      const maxAuditRetries = Number(state.config?.maxAuditRetries) || 1;
+      state.auditRetries = state.auditRetries || 0;
+      if (!state.config?.disableAuditor && state.auditRetries < maxAuditRetries) {
+        try {
+          const sheetCellsFromResults = collectSheetCellsFromResults(state.results);
+          const audit = auditWorkbook(sheetCellsFromResults);
+          if (!audit.ok && audit.fails.length > 0) {
+            const repairMsg = buildRepairInstruction(audit.fails);
+            state.auditRetries += 1;
+            logger.warn(`[Auditor] slice done blocked: ${audit.fails.length} fail-class issue(s); retry ${state.auditRetries}/${maxAuditRetries}`);
+            state.messages.push(makeUserMessage(repairMsg));
+            state.results.push({ type: 'error', error: 'audit_blocked', blocked: true, tool: 'done', auditFails: audit.fails.slice(0, 5), attempt: state.auditRetries });
+            onProgress('iterationError', { iteration: state.iteration, error: 'audit_blocked', attempt: state.auditRetries, maxRetries: maxAuditRetries });
+            return { state, control: 'continue', payload: { thought } };
+          }
+          if (audit.warns.length > 0) {
+            logger.info(`[Auditor] slice done with ${audit.warns.length} warning(s); pass-through`);
+          }
+        } catch (auditErr) {
+          logger.warn(`[Auditor] audit pass errored: ${auditErr.message}`);
+        }
+      }
       state.status = 'completed';
       state.summary = params.summary || 'Task completed';
       // Optional legacy auto-format pass before exit.

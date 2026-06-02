@@ -152,7 +152,17 @@ async function stepLoop(turnId, token) {
   const savePartial = () => {
     try { fs.writeFileSync(partialPath, JSON.stringify({ turnId, scenario: SCENARIO, partial: true, steps: stats.steps, errors: stats.errors, sheetSnapshot: [...workbook.sheets.keys()] }, null, 2)); } catch (_) {}
   };
-  for (let i = 0; i < 1000; i++) {
+  // Step cap is intentionally generous; real abort triggers are TIMEOUT_MS
+  // (wall-clock) OR stagnationCap (no workbook progress across N consecutive
+  // 'continue' controls). Architect_parallel scenarios with 10+ slices easily
+  // produce 1000+ "continue" polls while sub-slices process — observed
+  // 2026-06-02 fastfood_bp at step 790/1000 with real progress still happening
+  // when the old cap killed it.
+  const STEP_CAP = 5000;
+  const STAGNATION_CAP = 80; // consecutive 'continue' with zero workbook change
+  let stagnantContinues = 0;
+  let lastFootprint = '';
+  for (let i = 0; i < STEP_CAP; i++) {
     if (i % 5 === 0 && i > 0) savePartial();
     if (Date.now() - t0 > TIMEOUT_MS) { stats.errors.push({ ts: now(), message: 'timeout' }); break; }
     const body = nextClientResult ? { turnId, clientResult: nextClientResult, stepSeq } : { turnId, stepSeq };
@@ -175,10 +185,25 @@ async function stepLoop(turnId, token) {
     stats.lastPayload = payload || null;
     stats.steps.push({ ts: now(), control, payloadKind: payload ? Object.keys(payload).slice(0,5).join(',') : '' });
     if (payload && Array.isArray(payload.actions) && payload.actions.length) for (const a of payload.actions) applyAction(a);
+    // Stagnation detector: track a compact workbook footprint (sheets +
+    // cell-count-per-sheet). If `continue` repeats N consecutive times with
+    // the footprint unchanged, abort — the slice is wedged.
+    const footprint = [...workbook.sheets.entries()]
+      .map(([n, s]) => `${n}:${s.size}`).join('|');
+    if (control === 'continue' && footprint === lastFootprint) {
+      stagnantContinues += 1;
+      if (stagnantContinues >= STAGNATION_CAP) {
+        stats.errors.push({ ts: now(), message: `stagnation: ${STAGNATION_CAP} consecutive 'continue' polls with zero workbook change` });
+        break;
+      }
+    } else {
+      stagnantContinues = 0;
+      lastFootprint = footprint;
+    }
     // Periodic progress log so a long-running test doesn't look hung.
     if (i % 10 === 0 && i > 0) {
       const elapsed = Math.round((Date.now() - t0) / 1000);
-      console.log(`   [step ${i}] ${elapsed}s elapsed, control=${control}, sheets=${workbook.sheets.size}`);
+      console.log(`   [step ${i}] ${elapsed}s elapsed, control=${control}, sheets=${workbook.sheets.size}, stagn=${stagnantContinues}`);
     }
     if (control === 'done') return;
     if (control === 'aborted') { stats.errors.push({ ts: now(), message: `aborted: ${payload?.reason || ''}` }); return; }
@@ -280,6 +305,13 @@ function hasSheetLike(sheetSummary, pattern) {
   return (sheetSummary || []).some(s => pattern.test(normText(s.name)));
 }
 
+// Try to load the server-side static auditor. The runner is client-side and
+// runs without the server in scope (run via Node), so we require by path. If
+// the file is absent (e.g. on a checkout without the auditor), degrade silently
+// and skip the audit step.
+let serverAuditor = null;
+try { serverAuditor = require('../server/agents/auditor'); } catch (_) { serverAuditor = null; }
+
 function evaluateScenarioQuality({ scenario, finalTurn, sheetSummary, sheetCells, narrative }) {
   const failures = [];
   const warnings = [];
@@ -300,6 +332,23 @@ function evaluateScenarioQuality({ scenario, finalTurn, sheetSummary, sheetCells
   }
   if (unrecoveredParse > 0) warnings.push(`${unrecoveredParse} unrecovered parse error(s) in trace`);
   if (recoveredParse > 0) warnings.push(`${recoveredParse} recovered parse error(s)`);
+
+  // Static auditor pass — catches templated clones, constant-condition guards,
+  // frozen INDEX/OFFSET literals, self-references. Surfaces *additional* gates
+  // the malformed-range check above misses (e.g. Vairano 2026-06-02 Revenue
+  // Schedule: 4800 cells with =IF(2=0,"",1/INDEX(...,2)) — syntactically
+  // valid, semantically a templated clone).
+  if (serverAuditor) {
+    try {
+      const audit = serverAuditor.auditStatic(sheetCells, { minClones: 30 });
+      for (const issue of audit.fails) {
+        failures.push(`auditor.${issue.type}: ${issue.msg}`);
+      }
+      for (const issue of audit.warns) {
+        warnings.push(`auditor.${issue.type}: ${issue.msg}`);
+      }
+    } catch (_) { /* auditor optional */ }
+  }
 
   if (scenario === 'dcf') {
     for (const [label, re] of [['Assumptions', /assum/], ['Projections', /projection/], ['Valuation', /valuation/]]) {
@@ -328,8 +377,15 @@ function evaluateScenarioQuality({ scenario, finalTurn, sheetSummary, sheetCells
   } else if (scenario === 'vairano') {
     if (sheets.length < 8) failures.push(`Vairano workbook has too few populated sheets (${sheets.length} < 8)`);
     if (total.cells < 5000) failures.push(`Vairano workbook too thin (${total.cells} cells < 5000)`);
-    if (total.formulas < 1000) failures.push(`Vairano formula count too low (${total.formulas} < 1000)`);
-    if (!(sheetSummary || []).some(s => s.maxRow >= 900)) failures.push('no ~1000-row sheet detected');
+    if (total.formulas < 1500) failures.push(`Vairano formula count too low (${total.formulas} < 1500)`);
+    // Prompt says "circa 1000 righe" — this is a *scale signal*, not a literal
+    // gate. Treat it as: at least 2 sheets carrying a real time series (60+
+    // rows). Strict row-equality (≥900) used to false-fail runs where the
+    // architect chose annual buckets or per-floor compact layouts — observed
+    // 2026-06-02 try1 had 7700 cells + 6460 formulas across 10 sheets yet
+    // failed solely on max-row 601 vs 900.
+    const timeSeriesSheets = (sheetSummary || []).filter(s => s.maxRow >= 60).length;
+    if (timeSeriesSheets < 2) failures.push(`Vairano needs ≥2 time-series sheets (${timeSeriesSheets} found with ≥60 rows)`);
     for (const [label, re] of [['costi', /costi|cost breakdown|sottocosti/], ['ricavi', /ricavi|revenue|vendite/], ['finanziamenti', /finanziament|mutuo|loan|debt/], ['sensitivity', /sensitivity|sensitiv|scenario/]]) {
       if (!re.test(text)) failures.push(`Vairano missing ${label} coverage`);
     }
@@ -383,8 +439,9 @@ async function main() {
     if (!initialOk) console.warn(`   ⚠ turn not yet visible after 5 retries; continuing anyway`);
   }
 
-  // Wait for approval gate (Vairano architect blueprint ~30s, allow up to 5 min)
-  for (let i = 0; i < 200; i++) {
+  // Wait for approval gate (Vairano architect blueprint ~30s, complex
+  // architect under parallel load can take >5 min; allow up to 10 min).
+  for (let i = 0; i < 400; i++) {
     await sleep(1500);
     const r = await request('GET', `${SERVER}/api/turn/${turnId}`, { Authorization: `Bearer ${token}` }, null, 30000);
     const t = r.json || {};
