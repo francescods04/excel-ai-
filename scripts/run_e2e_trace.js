@@ -57,16 +57,29 @@ function request(method, urlStr, headers, body, timeoutMs) {
 }
 
 async function mintAccessToken(email) {
-  const linkResp = await request('POST', `${SUPABASE_URL}/auth/v1/admin/generate_link`,
-    { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` }, { type: 'magiclink', email });
-  if (linkResp.status >= 400) throw new Error(`generate_link [${linkResp.status}]: ${linkResp.body.slice(0, 300)}`);
-  const root = linkResp.json || {};
-  const email_otp = root.email_otp || root.properties?.email_otp;
-  if (email_otp) {
-    const r = await request('POST', `${SUPABASE_URL}/auth/v1/verify`, { apikey: SERVICE_KEY }, { type: 'magiclink', email, token: email_otp });
-    if (r.json?.access_token) return r.json.access_token;
+  // Pre-minted token from caller (e.g. multi-runner) avoids hitting Supabase
+  // magiclink rate limits when launching N parallel scenarios.
+  if (process.env.E2E_PREMINTED_TOKEN) return process.env.E2E_PREMINTED_TOKEN;
+  // Retry generate_link on rate limit / transient with exponential backoff.
+  let lastErr = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (attempt > 0) await new Promise(r => setTimeout(r, 1500 * attempt));
+    const linkResp = await request('POST', `${SUPABASE_URL}/auth/v1/admin/generate_link`,
+      { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` }, { type: 'magiclink', email });
+    if (linkResp.status === 429 || linkResp.status >= 500) {
+      lastErr = new Error(`generate_link [${linkResp.status}] attempt ${attempt + 1}: ${linkResp.body.slice(0, 200)}`);
+      continue;
+    }
+    if (linkResp.status >= 400) throw new Error(`generate_link [${linkResp.status}]: ${linkResp.body.slice(0, 300)}`);
+    const root = linkResp.json || {};
+    const email_otp = root.email_otp || root.properties?.email_otp;
+    if (email_otp) {
+      const r = await request('POST', `${SUPABASE_URL}/auth/v1/verify`, { apikey: SERVICE_KEY }, { type: 'magiclink', email, token: email_otp });
+      if (r.json?.access_token) return r.json.access_token;
+    }
+    lastErr = new Error('no email_otp in generate_link response');
   }
-  throw new Error('no email_otp in generate_link response');
+  throw lastErr || new Error('mintAccessToken exhausted retries');
 }
 
 // ── Mock workbook (minimal) ──────────────────────────────────────────────

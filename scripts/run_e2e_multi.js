@@ -13,6 +13,9 @@
 const { spawn } = require('child_process');
 const fs        = require('fs');
 const path      = require('path');
+const https     = require('https');
+const http      = require('http');
+try { require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') }); } catch (_) {}
 
 function arg(name, def) {
   const m = process.argv.slice(2).find(a => a.startsWith(`--${name}=`));
@@ -102,11 +105,55 @@ function fmtRow(r) {
   };
 }
 
+function httpReq(method, urlStr, headers, body) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(urlStr);
+    const lib = u.protocol === 'https:' ? https : http;
+    const opts = { hostname: u.hostname, port: u.port || (u.protocol === 'https:' ? 443 : 80), path: u.pathname + (u.search || ''), method, headers: { ...headers } };
+    const data = body ? (typeof body === 'string' ? body : JSON.stringify(body)) : null;
+    if (data) opts.headers['Content-Length'] = Buffer.byteLength(data);
+    if (data && !opts.headers['Content-Type']) opts.headers['Content-Type'] = 'application/json';
+    const req = lib.request(opts, res => {
+      let buf = ''; res.on('data', c => buf += c);
+      res.on('end', () => { const out = { status: res.statusCode, body: buf }; try { out.json = JSON.parse(buf); } catch {} resolve(out); });
+    });
+    req.on('error', reject);
+    req.setTimeout(30000, () => req.destroy(new Error('socket_timeout')));
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+async function mintSharedToken() {
+  const SUPABASE_URL = process.env.SUPABASE_URL;
+  const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const email = process.env.E2E_USER_EMAIL || 'francescojordan04@gmail.com';
+  if (!SUPABASE_URL || !SERVICE_KEY) throw new Error('Missing SUPABASE env vars');
+  const linkResp = await httpReq('POST', `${SUPABASE_URL}/auth/v1/admin/generate_link`,
+    { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` }, { type: 'magiclink', email });
+  if (linkResp.status >= 400) throw new Error(`generate_link [${linkResp.status}]: ${linkResp.body.slice(0, 300)}`);
+  const root = linkResp.json || {};
+  const email_otp = root.email_otp || root.properties?.email_otp;
+  if (!email_otp) throw new Error('no email_otp in generate_link response');
+  const r = await httpReq('POST', `${SUPABASE_URL}/auth/v1/verify`, { apikey: SERVICE_KEY }, { type: 'magiclink', email, token: email_otp });
+  if (!r.json?.access_token) throw new Error('verify did not return access_token');
+  return r.json.access_token;
+}
+
 (async () => {
   console.log(`\n═══ MULTI-SCENARIO E2E (${SCENARIOS.length} parallel) ═══`);
   console.log(`Server:    ${SERVER}`);
   console.log(`Scenarios: ${SCENARIOS.join(', ')}`);
   console.log(`Out dir:   ${OUT_DIR}\n`);
+
+  let sharedToken = null;
+  try {
+    sharedToken = await mintSharedToken();
+    console.log('✓ Minted shared E2E token (passed to children via E2E_PREMINTED_TOKEN)\n');
+  } catch (e) {
+    console.warn(`! Token mint failed (${e.message}); children will attempt their own with retry.\n`);
+  }
+  if (sharedToken) process.env.E2E_PREMINTED_TOKEN = sharedToken;
 
   const results = await Promise.all(SCENARIOS.map(runOne));
 
