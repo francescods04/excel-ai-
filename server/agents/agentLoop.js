@@ -94,11 +94,12 @@ const STAGNATION_MAX_TRAIL = Math.max(8, (STAGNATION_ALT_CYCLES * 2) + 2);
 // just to sample Assumptions sections + the Revenue total row before writing,
 // and was killed before its first write. 8 allows the inspection phase without
 // re-allowing the LBO-style "verify → re-verify" loop we originally guarded.
-// Lowered 8 → 5 (2026-06-02 Vairano real run): cash_flow slice burned 9
-// consecutive get_cell_ranges saying "now I see structure" then re-reading.
-// 5 is enough for 2-3 upstream sheets (Assumptions + 1-2 others), forces
-// write-after-inspection sooner. May_read_from declares ranges already.
-const READS_WITHOUT_WRITE_LIMIT = Math.max(4, Number(process.env.AGENT_READS_WITHOUT_WRITE_LIMIT) || 5);
+// Lowered 8 → 6: cap "verify → re-verify" loops sooner. 6 still allows
+// inspection of 2-3 upstream sheets (Assumptions + 1-2 others) plus one
+// targeted re-read of a structure that came back truncated. 5 was too
+// tight — complex slices like multi-upstream cash_flow hit the cap during
+// legitimate inspection. Tunable via AGENT_READS_WITHOUT_WRITE_LIMIT.
+const READS_WITHOUT_WRITE_LIMIT = Math.max(4, Number(process.env.AGENT_READS_WITHOUT_WRITE_LIMIT) || 6);
 const READ_ONLY_TOOLS_FOR_STAGNATION = new Set([
   'read_workbook',
   'read_sheet',
