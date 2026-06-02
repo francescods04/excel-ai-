@@ -669,8 +669,18 @@ app.get('/api/turn/stream/:turnId', authenticate, async (req, res) => {
 
 // Per-turn endpoint: authenticated user can fetch their own turn.
 // Admins can fetch any turn.
-app.get('/api/turn/:turnId', authenticate, (req, res) => {
-  const turn = turns.loadTurn(req.params.turnId);
+// Cold-instance hydration: Vercel serverless lands requests on arbitrary lambda
+// instances; the turn created by POST /api/turn/start may live in a different
+// instance's in-memory map when GET arrives, returning 404. Mirror the SSE
+// stream endpoint pattern: try in-memory first, then hydrate from DB.
+// (Observed on 2026-06-02 Vairano runs — turn 404 immediately after creation.)
+app.get('/api/turn/:turnId', authenticate, async (req, res) => {
+  const { turnId } = req.params;
+  let turn = turns.loadTurn(turnId);
+  if (!turn) {
+    try { await turns.getTurnRefAsync(turnId); } catch (_) {}
+    turn = turns.loadTurn(turnId);
+  }
   if (!turn) return res.status(404).json({ error: 'Turn non trovato' });
   if (turn.userId && turn.userId !== req.userId && req.userPlan !== 'admin') {
     return res.status(403).json({ error: 'Non autorizzato' });
