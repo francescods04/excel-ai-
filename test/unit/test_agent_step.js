@@ -259,6 +259,28 @@ function assertSerializable(state, label) {
     console.log('OK disabledTools blocks execute_office_js with redirect and refunds iter');
   }
 
+  /* 13b) disabledTools 3rd attempt: escalated message + iter NOT refunded */
+  {
+    const state = initAgentRun('persistent worker', CTX, {
+      promptVariant: 'fast',
+      disabledTools: ['execute_office_js']
+    });
+    const stub = { thought: 'try JS', tool: 'execute_office_js', params: { code: 'noop' } };
+    const deps = scripted([stub, stub, stub]);
+    // First attempt — refunded
+    await runAgentStep(state, null, deps);
+    // Second attempt — refunded
+    await runAgentStep(state, null, deps);
+    const iterBefore3rd = state.iteration;
+    // Third attempt — NOT refunded; iter advances
+    const { state: s3, control: c3 } = await runAgentStep(state, null, deps);
+    assert.strictEqual(c3, 'continue');
+    assert.ok(s3.iteration > iterBefore3rd, 'iter must advance on 3rd disabled-tool attempt');
+    const lastMsg = s3.messages[s3.messages.length - 1];
+    assert.match(String(lastMsg.content), /STOP RETRYING|attempted this.*times/i, 'escalated message expected');
+    console.log('OK disabledTools 3rd attempt escalates message and stops refunding iter');
+  }
+
   /* 14) sequential create_named_range x3 → hard-block + force bulk + iter refund */
   {
     const state = initAgentRun('build assumptions', CTX, { promptVariant: 'fast' });

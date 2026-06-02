@@ -26,12 +26,13 @@ if (!SUPABASE_URL || !SERVICE_KEY) { console.error('Missing SUPABASE env'); proc
 const SCENARIOS = {
   sumcol: 'Crea un foglio con header A1:C1 = Nome, Età, Città. Aggiungi 5 righe di esempio (Mario 30 Roma, Lucia 28 Milano, Paolo 45 Napoli, Anna 22 Torino, Marco 35 Bologna). In D1 metti header "Età+10", in D2:D6 una formula che somma B2 + 10.',
   dcf: 'Crea un mini DCF: foglio Assumptions con Revenue iniziale 1000, growth 10%, margine 20%, sconto 8%, anni 5. Foglio Projections con Revenue Y1-Y5 in B2:F2 (=B2*(1+growth)), EBITDA = Revenue*margine, FCF=EBITDA. Foglio Valuation con NPV dei FCF.',
-  simple: 'Scrivi "Hello World" in A1, "Buongiorno" in A2, e in A3 una formula =CONCATENATE(A1," ",A2).'
+  simple: 'Scrivi "Hello World" in A1, "Buongiorno" in A2, e in A3 una formula =CONCATENATE(A1," ",A2).',
+  vairano: 'fai un excel super completo per fare la valutazione della realizzazione di un progetto immobiliare da 0, l immobile sarà un 10 piani a vairano scalo in provincia di caserta di circa 1000mq2 per piano fai un analisi super cpmplessa di costi e ricavi, finanziamenti, dividi i costi in vari sottocosto. l excel deve essere completo con ogni foglio circa 1000 righe'
 };
 const OBJECTIVE = SCENARIOS[SCENARIO] || SCENARIOS.sumcol;
 
 // ── HTTP ─────────────────────────────────────────────────────────────────
-function request(method, urlStr, headers, body) {
+function request(method, urlStr, headers, body, timeoutMs) {
   return new Promise((resolve, reject) => {
     const u = new URL(urlStr);
     const lib = u.protocol === 'https:' ? https : http;
@@ -43,7 +44,11 @@ function request(method, urlStr, headers, body) {
       let buf = ''; res.on('data', c => buf += c);
       res.on('end', () => { const out = { status: res.statusCode, headers: res.headers, body: buf }; try { out.json = JSON.parse(buf); } catch {} resolve(out); });
     });
-    req.on('error', reject); if (data) req.write(data); req.end();
+    req.on('error', reject);
+    // Explicit socket timeout. Vercel function limit is 300s; cap requests at
+    // 310s so a stalled function manifests as a clean reject + script retry.
+    req.setTimeout(timeoutMs || 310000, () => { req.destroy(new Error('socket_timeout')); });
+    if (data) req.write(data); req.end();
   });
 }
 
@@ -110,10 +115,27 @@ async function stepLoop(turnId, token) {
   let nextClientResult = null;
   let stepSeq = 0;
   const t0 = Date.now();
-  for (let i = 0; i < 200; i++) {
+  let netErrStreak = 0;
+  // Save partial state every 10 steps so a script abort doesn't lose all data.
+  const partialPath = OUT.replace(/\.json$/, '.partial.json');
+  const savePartial = () => {
+    try { fs.writeFileSync(partialPath, JSON.stringify({ turnId, scenario: SCENARIO, partial: true, steps: stats.steps, errors: stats.errors, sheetSnapshot: [...workbook.sheets.keys()] }, null, 2)); } catch (_) {}
+  };
+  for (let i = 0; i < 500; i++) {
+    if (i % 10 === 0 && i > 0) savePartial();
     if (Date.now() - t0 > TIMEOUT_MS) { stats.errors.push({ ts: now(), message: 'timeout' }); break; }
     const body = nextClientResult ? { turnId, clientResult: nextClientResult, stepSeq } : { turnId, stepSeq };
-    const r = await request('POST', `${SERVER}/api/turn/step`, { Authorization: `Bearer ${token}` }, body);
+    let r;
+    try {
+      r = await request('POST', `${SERVER}/api/turn/step`, { Authorization: `Bearer ${token}` }, body);
+      netErrStreak = 0;
+    } catch (netErr) {
+      netErrStreak++;
+      if (netErrStreak >= 5) { stats.errors.push({ ts: now(), message: `network: ${netErr.message} (5 streak)` }); break; }
+      stats.steps.push({ ts: now(), control: 'net_retry', payloadKind: netErr.message });
+      await sleep(2000);
+      continue; // retry without advancing stepSeq
+    }
     if (r.status !== 200) { stats.errors.push({ ts: now(), message: `step [${r.status}]: ${r.body.slice(0, 300)}` }); break; }
     nextClientResult = null;
     const { control, payload, stepSeq: newSeq } = r.json || {};
@@ -158,8 +180,8 @@ async function main() {
   const turnId = startResp.json.turnId;
   console.log(`   turnId: ${turnId}`);
 
-  // Wait for approval gate
-  for (let i = 0; i < 60; i++) {
+  // Wait for approval gate (Vairano architect blueprint ~30s, allow up to 4 min)
+  for (let i = 0; i < 160; i++) {
     await sleep(1500);
     const r = await request('GET', `${SERVER}/api/turn/${turnId}`, { Authorization: `Bearer ${token}` });
     const t = r.json || {};

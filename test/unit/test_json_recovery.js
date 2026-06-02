@@ -31,6 +31,7 @@ function extractFn(name) {
 const sandbox = { module: {}, exports: {} };
 vm.createContext(sandbox);
 const code = `
+${extractFn('escapeControlCharsInStrings')}
 ${extractFn('tryRecoverExcessClosers')}
 ${extractFn('tryRecoverMissingCommas')}
 ${extractFn('tryRecoverTruncatedAgentJson')}
@@ -97,10 +98,24 @@ async function main() {
 
   await test('does not over-strip valid JSON', () => {
     const raw = '{"tool":"done","params":{"summary":"ok"}}';
-    // Already valid → recovery shouldn't be invoked, but if it were, must be safe
     const out = tryRecoverExcessClosers(raw, 5);
-    // Either null (no excess detected) or returns parsed shape — must not crash
     assert.ok(out === null || out.tool === 'done');
+  });
+
+  await test('recovers JSON with bare control chars in string (newline)', () => {
+    // Real Vairano iter 3: LLM streamed a literal \n inside a string value.
+    const raw = '{"thought":"line1\nline2","tool":"set_cell_range","params":{"cells":{"A1":{"value":1}}}}';
+    const out = tryRecoverTruncatedAgentJson(raw);
+    assert.ok(out, 'should recover via control-char escape');
+    assert.strictEqual(out.tool, 'set_cell_range');
+    assert.ok(out.thought.includes('line1'));
+  });
+
+  await test('recovers JSON with embedded tab', () => {
+    const raw = '{"tool":"x","params":{"k":"a\tb"}}';
+    const out = tryRecoverTruncatedAgentJson(raw);
+    assert.ok(out);
+    assert.strictEqual(out.params.k, 'a\tb');
   });
 }
 

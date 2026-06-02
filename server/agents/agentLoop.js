@@ -2534,10 +2534,55 @@ const PRODUCTIVE_TOOLS = new Set([
 // result becomes parseable, then sanity-check the shape. If the recovery
 // yields a recognisable {thought, tool, params} we hand it back; otherwise
 // we return null and the caller treats the call as a normal parse failure.
+// Escape bare control chars (\n, \t, etc.) inside string literals — common
+// streaming-LLM artifact ("Bad control character in string literal"). State
+// machine tracks string scope so structural newlines outside strings remain.
+function escapeControlCharsInStrings(s) {
+  let out = '';
+  let inStr = false, escape = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (escape) { out += c; escape = false; continue; }
+      if (c === '\\') { out += c; escape = true; continue; }
+      if (c === '"') { out += c; inStr = false; continue; }
+      const code = c.charCodeAt(0);
+      if (code < 0x20) {
+        if (c === '\n') out += '\\n';
+        else if (c === '\r') out += '\\r';
+        else if (c === '\t') out += '\\t';
+        else if (c === '\b') out += '\\b';
+        else if (c === '\f') out += '\\f';
+        else out += '\\u' + code.toString(16).padStart(4, '0');
+        continue;
+      }
+      out += c;
+    } else {
+      if (c === '"') { out += c; inStr = true; continue; }
+      out += c;
+    }
+  }
+  return out;
+}
+
 function tryRecoverTruncatedAgentJson(raw) {
   if (typeof raw !== 'string' || raw.length < 10) return null;
-  const trimmed = raw.trim();
+  let trimmed = raw.trim();
   if (!trimmed.startsWith('{')) return null;
+  // First fast path: escape any raw control chars inside string literals. This
+  // is cheap, idempotent, and clears the most common streaming bug ("Bad
+  // control character in string literal" — observed on 2026-06-02 Vairano
+  // iter 3 ×2). If the repaired string parses, return immediately.
+  if (/[\x00-\x08\x0B\x0C\x0E-\x1F]/.test(trimmed) || /\n|\r|\t/.test(trimmed)) {
+    const escaped = escapeControlCharsInStrings(trimmed);
+    if (escaped !== trimmed) {
+      try {
+        const parsed = JSON.parse(escaped);
+        if (parsed && typeof parsed === 'object'
+          && (typeof parsed.tool === 'string' || parsed.params)) return parsed;
+      } catch (_) { trimmed = escaped; /* keep going with escaped form */ }
+    }
+  }
   const stack = [];
   let inString = false;
   let escape = false;
@@ -5430,6 +5475,9 @@ async function finishToolExecution(state, toolName, params, thought, toolResult,
   state.results.push({ type: 'tool', tool: toolName, params, result: toolResult });
   state.consecutiveErrors = 0;
   state.lastErrorMessage = '';
+  // Successful tool call resets disabled-tool streak: the agent is making
+  // forward progress, so a later attempt at a blocked tool gets fresh chances.
+  if (state._disabledToolStreak) state._disabledToolStreak = {};
 
   const trForMsg = (toolResult && typeof toolResult === 'object' && Array.isArray(toolResult.actions))
     ? { ...toolResult, actions: undefined, _actionCount: toolResult.actions.length }
@@ -5649,17 +5697,31 @@ async function runAgentStep(state, clientResult, deps = {}) {
     }
 
     if (Array.isArray(state.config.disabledTools) && state.config.disabledTools.includes(toolName)) {
+      // Track consecutive blocked attempts of disabled tools per tool name.
+      // Observed on 2026-06-02 Vairano E2E: execute_office_js was retried 5
+      // times despite a clear redirect message — each retry burned ~30s of
+      // latency. After 2 attempts, escalate to a stronger message AND stop
+      // refunding the iteration so stagnation/no-progress detectors kick in.
+      state._disabledToolStreak = state._disabledToolStreak || {};
+      const streak = (state._disabledToolStreak[toolName] || 0) + 1;
+      state._disabledToolStreak[toolName] = streak;
       const redirect = TOOL_DISABLED_REDIRECTS[toolName] || 'Use the structured tools instead.';
-      const blockMsg = `Tool "${toolName}" is disabled in this run. ${redirect}`;
+      let blockMsg;
+      if (streak >= 3) {
+        blockMsg = `Tool "${toolName}" is disabled — you have now attempted this ${streak} times. STOP RETRYING. ${redirect} If you cannot accomplish the task with structured tools, call \`done\` with a summary of what you completed and what is blocking you. The next call to this disabled tool will be counted against your iteration budget without refund.`;
+      } else {
+        blockMsg = `Tool "${toolName}" is disabled in this run. ${redirect}`;
+      }
       state.messages.push(makeUserMessage(blockMsg));
-      state.results.push({ type: 'error', error: blockMsg, blocked: true, tool: toolName });
+      state.results.push({ type: 'error', error: blockMsg, blocked: true, tool: toolName, streak });
       onProgress('iterationError', { iteration: state.iteration, error: blockMsg });
-      // Refund the iteration counter — the LLM call returned but the tool was
-      // rejected without touching Excel or the client. Charging it pushes the
-      // slice toward maxIter for a no-op, which cascade-killed downstream
-      // waves in the 2026-05-30 fast-food run. The redirect message is in
-      // the message log so the LLM still learns from the mistake.
-      state.iteration = Math.max(0, state.iteration - 1);
+      // Refund the iteration counter on the first 2 attempts (LLM may not yet
+      // have read the redirect). From the 3rd attempt onward, charge the iter:
+      // the agent has been told 3+ times this tool is gone — further attempts
+      // are not learning and should count toward maxIter so the slice exits.
+      if (streak < 3) {
+        state.iteration = Math.max(0, state.iteration - 1);
+      }
       return { state, control: 'continue', payload: { thought } };
     }
 
