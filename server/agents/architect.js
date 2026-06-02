@@ -879,7 +879,19 @@ function appendDenseParallelInstruction(slice, targetRows) {
   if (isAssumptionLikeSlice(slice)) {
     parts.push('Assumptions speed contract: write the complete two-column driver table in one bulk_set_cell_ranges call, apply at most one bulk_set_format pass, then call done. Do not drip-feed assumptions row by row.');
   }
+  if (isCostBreakdownLikeSlice(slice)) {
+    parts.push('Cost-breakdown numeric integrity contract: if your schema has a "Unit" or "Unità" column AND a per-row Quantity*UnitCost*Importo formula, EVERY row in that table must use the SAME formula shape. NEVER mix absolute amounts (€) and percentages (%) on rows that share one formula. For percentage-style costs (e.g. notarile=1.5%, IVA=22%, Direzione Lavori=2%): either (a) precompute the absolute € amount in Assumptions and reference it as a flat number with Unit="€", Quantity=1, UnitCost=<computed>, OR (b) keep the % rows separate and write =base*pct explicitly per row — do NOT put 0.02 in a "UnitCost" column that another row treats as €/mq. The 2026-06-02 Vairano run produced €75,000,000,000 "Direzione Lavori" and a 4.4-trillion-euro IVA line because a %-row got multiplied by a €-row\'s unit price. After writing the table, sanity-check: no single cost line should exceed ~3× the project terreno cost unless it is the grand total.');
+  }
   return parts.join('\n').slice(0, 8000);
+}
+
+function isCostBreakdownLikeSlice(slice) {
+  const text = [
+    slice?.id,
+    slice?.title,
+    ...(slice?.scope?.sheets_owned || [])
+  ].join(' ').toLowerCase();
+  return /cost[_\s-]*break|sotto[\s_-]*cost|costi[_\s-]*detail|cost[_\s-]*detail|breakdown.*cost/.test(text);
 }
 
 function shouldParallelizeDenseBlueprint(slices, context = {}) {
