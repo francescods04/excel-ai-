@@ -1372,6 +1372,32 @@ function validateBlueprint(raw, context = {}) {
   }
   if (errors.length) return { ok: false, errors };
 
+  // Layer C — plan-level near-duplicate sheet detection. If two slices declare
+  // owned sheets that normalize to the same identifier (case/whitespace/punct
+  // only differ), the worker layer would split content across them and the
+  // downstream wave would reference whichever the architect intended,
+  // leaving the duplicate empty. Reject the blueprint up-front.
+  {
+    const { normalizeSheetName } = require('./agentLoop');
+    const groups = new Map(); // norm -> [{ original, sliceId }]
+    for (const s of normalizedSlices) {
+      for (const sh of s.scope.sheets_owned) {
+        const norm = normalizeSheetName(sh);
+        if (!norm) continue;
+        if (!groups.has(norm)) groups.set(norm, []);
+        groups.get(norm).push({ original: sh, sliceId: s.id });
+      }
+    }
+    const dupErrors = [];
+    for (const [norm, entries] of groups.entries()) {
+      const uniqueOriginals = new Set(entries.map(e => e.original));
+      if (uniqueOriginals.size <= 1) continue;
+      const list = entries.map(e => `"${e.original}" (slice ${e.sliceId})`).join(', ');
+      dupErrors.push(`near-duplicate sheet ownership: ${list} normalize to the same identifier "${norm}". Pick ONE canonical name and rewrite every slice's sheets_owned/may_read_from to use it exactly.`);
+    }
+    if (dupErrors.length) return { ok: false, errors: dupErrors };
+  }
+
   const parallelized = normalizeDenseBlueprintParallelism(normalizedSlices, context);
   normalizedSlices = parallelized.slices;
   const normalizedSliceMap = new Map(normalizedSlices.map(s => [s.id, s]));

@@ -100,6 +100,59 @@ const STAGNATION_MAX_TRAIL = Math.max(8, (STAGNATION_ALT_CYCLES * 2) + 2);
 // tight — complex slices like multi-upstream cash_flow hit the cap during
 // legitimate inspection. Tunable via AGENT_READS_WITHOUT_WRITE_LIMIT.
 const READS_WITHOUT_WRITE_LIMIT = Math.max(4, Number(process.env.AGENT_READS_WITHOUT_WRITE_LIMIT) || 6);
+// Layer B — sheet-name canonicalization guard. Workers occasionally rename a
+// scaffolded sheet on the fly (e.g. "Cost Breakdown" → "CostBreakdown") which
+// splits content across parallel sheets and leaves the canonical one empty.
+// We normalize names (lowercase, strip whitespace/punct/dashes/quotes) and if
+// a write/create-target normalizes to an existing sheet under a different
+// literal, we route the agent to the existing one with a clear error.
+function normalizeSheetName(name) {
+  if (!name || typeof name !== 'string') return '';
+  return name.toLowerCase().replace(/[\s\-_&'".,()/\\]+/g, '');
+}
+
+function buildKnownSheetMap(context) {
+  const map = new Map(); // normalized -> canonical original name
+  const add = (n) => {
+    if (!n || typeof n !== 'string') return;
+    const norm = normalizeSheetName(n);
+    if (!norm) return;
+    if (!map.has(norm)) map.set(norm, n);
+  };
+  for (const s of (context && context.workbookSheets) || []) add(s);
+  const scope = context && context._sliceScope;
+  if (scope) {
+    for (const s of scope.sheets_owned || []) add(s);
+    for (const ref of scope.may_read_from || []) {
+      // ref looks like "Sheet!A1:B10" or just "Sheet"; pull the prefix
+      const idx = ref.indexOf('!');
+      add(idx > 0 ? ref.slice(0, idx) : ref);
+    }
+  }
+  for (const s of (context && context._knownSheetsRuntime) || []) add(s);
+  return map;
+}
+
+function findNearDuplicateSheet(target, knownMap) {
+  if (!target || typeof target !== 'string') return null;
+  const norm = normalizeSheetName(target);
+  if (!norm) return null;
+  if (!knownMap.has(norm)) return null;
+  const canonical = knownMap.get(norm);
+  if (canonical === target) return null;
+  return canonical;
+}
+
+function nearDupSheetError(target, canonical) {
+  return `Sheet name guard: you referenced "${target}" but a near-duplicate sheet "${canonical}" already exists in the workbook (the names differ only in case/whitespace/punctuation, so Excel treats them as separate). Use the EXACT name "${canonical}" in every subsequent write. Do NOT create a parallel sheet with a different naming convention — content would be split across two sheets and downstream formulas would reference whichever the architect declared, leaving half the work invisible.`;
+}
+
+function recordRuntimeSheet(context, name) {
+  if (!context || !name || typeof name !== 'string') return;
+  if (!context._knownSheetsRuntime) context._knownSheetsRuntime = [];
+  if (!context._knownSheetsRuntime.includes(name)) context._knownSheetsRuntime.push(name);
+}
+
 const READ_ONLY_TOOLS_FOR_STAGNATION = new Set([
   'read_workbook',
   'read_sheet',
@@ -108,6 +161,95 @@ const READ_ONLY_TOOLS_FOR_STAGNATION = new Set([
   'build_workbook_graph',
   'read_format_summary'
 ]);
+
+// Layer D — intra-batch numeric outlier detector. Catches the class of bug
+// where one cell in a column is several orders of magnitude larger than its
+// peers (e.g. €75 billion "Direzione Lavori" written next to €1.5M land cost,
+// €20K notarile, …) — almost always the LLM mixed units or rows and produced
+// nonsense. Uses median + MAD because mean+stdev breaks down precisely when
+// an outlier is present.
+//
+// Hard rules:
+//   - Only checks numeric values, ignores formulas (they are post-eval data).
+//   - Requires ≥5 numeric values in the same {sheet, column} to compute MAD.
+//   - Flags a value V if |V - median| > MAD_MULT × MAD AND |V| ≥ ABS_THRESHOLD.
+//   - The ABS_THRESHOLD gates out false positives on small-number columns
+//     (e.g. a column of percentages 0.01 … 0.05 + a single 1.0 — relative
+//     outlier but not a unit-mix bug worth blocking).
+const OUTLIER_MAD_MULT = Math.max(3, Number(process.env.AGENT_OUTLIER_MAD_MULT) || 8);
+const OUTLIER_ABS_THRESHOLD = Math.max(1, Number(process.env.AGENT_OUTLIER_ABS_THRESHOLD) || 1e7);
+
+function colLetterFromA1(addr) {
+  const m = String(addr || '').match(/^([A-Za-z]+)/);
+  return m ? m[1].toUpperCase() : null;
+}
+
+function numericValueOf(spec) {
+  if (!spec || typeof spec !== 'object') return null;
+  if (spec.formula !== undefined && spec.formula !== null) return null;
+  const v = spec.value;
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string') {
+    const cleaned = v.replace(/[\s,€$£%]/g, '');
+    if (cleaned === '' || cleaned === '-') return null;
+    const n = Number(cleaned);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+function median(values) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+// Returns array of { sheet, addr, value, median, mad, peers } for each
+// flagged outlier across the supplied writes. Empty array = nothing to flag.
+function detectNumericOutliers(writes) {
+  const groups = new Map(); // `${sheet}::${col}` → array of { addr, value }
+  for (const w of (writes || [])) {
+    if (!w || !w.cells || typeof w.cells !== 'object') continue;
+    const sheet = w.sheet || '__active';
+    for (const [addr, spec] of Object.entries(w.cells)) {
+      const n = numericValueOf(spec);
+      if (n === null) continue;
+      const col = colLetterFromA1(addr);
+      if (!col) continue;
+      const key = `${sheet}::${col}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push({ addr, value: n });
+    }
+  }
+  const out = [];
+  for (const [key, entries] of groups.entries()) {
+    if (entries.length < 5) continue;
+    const [sheet, col] = key.split('::');
+    const values = entries.map(e => e.value);
+    const med = median(values);
+    if (med === null) continue;
+    const deviations = values.map(v => Math.abs(v - med));
+    const mad = median(deviations);
+    if (!Number.isFinite(mad) || mad === 0) continue;
+    for (const { addr, value } of entries) {
+      const dev = Math.abs(value - med);
+      if (dev <= OUTLIER_MAD_MULT * mad) continue;
+      if (Math.abs(value) < OUTLIER_ABS_THRESHOLD) continue;
+      out.push({ sheet, addr, col, value, median: med, mad, peerCount: entries.length });
+    }
+  }
+  return out;
+}
+
+function buildOutlierError(outliers) {
+  if (!outliers || !outliers.length) return null;
+  const top = outliers.slice(0, 5).map(o =>
+    `  • ${o.sheet}!${o.addr} = ${o.value} (column ${o.col} peers: median≈${o.median}, MAD≈${o.mad}, ${o.peerCount} numeric cells)`
+  ).join('\n');
+  const more = outliers.length > 5 ? `\n  • (+${outliers.length - 5} more)` : '';
+  return `Numerical outlier guard: ${outliers.length} cell${outliers.length === 1 ? '' : 's'} in this write batch ${outliers.length === 1 ? 'is' : 'are'} ≥${OUTLIER_MAD_MULT}× MAD from the column median AND above the absolute floor (${OUTLIER_ABS_THRESHOLD.toExponential(0)}). This pattern almost always means a unit mix or wrong-row reference (a percentage put into a € column, a €/mq value multiplied by a total area, etc.). Verify each flagged cell and re-emit the write with corrected values.\n${top}${more}\nIf any flagged value is genuinely correct (e.g. a one-off grand total in a column of line items), move that cell to its own sheet/section or use an explicit formula referencing the underlying drivers so it is no longer an outlier in its column.`;
+}
 
 function resolveAgentLoopModel(modelOverride, promptVariant) {
   if (modelOverride) return modelOverride;
@@ -4234,6 +4376,13 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       if (ownedScope && params && typeof params.name === 'string' && ownedScope.includes(params.name)) {
         return { ok: true, skipped: true, reason: `sheet "${params.name}" already in slice scope (scaffolded upstream)`, sheetsCreated: [] };
       }
+      // Layer B — block creating a near-duplicate of an existing sheet.
+      if (params && typeof params.name === 'string') {
+        const knownMap = buildKnownSheetMap(context);
+        const dup = findNearDuplicateSheet(params.name, knownMap);
+        if (dup) return { error: nearDupSheetError(params.name, dup) };
+        recordRuntimeSheet(context, params.name);
+      }
       return {
         actions: [{ type: 'createSheet', name: params.name }]
       };
@@ -4270,6 +4419,15 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       }
       if (filtered.length === 0) {
         return { ok: true, skipped: true, reason: 'all requested sheets already in slice scope (scaffolded upstream)', sheetsCreated: [], skippedInScope };
+      }
+      // Layer B — reject names that near-duplicate an existing sheet
+      {
+        const knownMap = buildKnownSheetMap(context);
+        for (const n of filtered) {
+          const dup = findNearDuplicateSheet(n, knownMap);
+          if (dup) return { error: nearDupSheetError(n, dup) };
+        }
+        for (const n of filtered) recordRuntimeSheet(context, n);
       }
       return {
         ok: true,
@@ -4378,12 +4536,28 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       if (!params.sheet) {
         logger.warn(`[AgentLoop] set_cell_range called without 'sheet' param; defaulting to activeSheet="${targetSheet}". LLM should specify sheet explicitly.`);
       }
+      // Layer B — near-duplicate sheet guard
+      if (targetSheet) {
+        const knownMap = buildKnownSheetMap(context);
+        const dup = findNearDuplicateSheet(targetSheet, knownMap);
+        if (dup) return { error: nearDupSheetError(targetSheet, dup) };
+      }
 
       // Padding guard (same threshold as bulk path)
       const setRangePaddingCheck = detectPaddingRows([{ sheet: targetSheet, cells: params.cells }]);
       if (!setRangePaddingCheck.ok) {
         logger.warn(`[AgentLoop] set_cell_range padding rejected: ${setRangePaddingCheck.reason}`);
         return { error: setRangePaddingCheck.reason };
+      }
+
+      // Layer D — intra-batch numeric outlier guard
+      {
+        const outliers = detectNumericOutliers([{ sheet: targetSheet, cells: params.cells }]);
+        if (outliers.length) {
+          const msg = buildOutlierError(outliers);
+          logger.warn(`[AgentLoop] set_cell_range outlier rejected: ${outliers.length} cell(s) flagged`);
+          return { error: msg };
+        }
       }
 
       // Anti-flood-fill guard — reject scalar text replicated across many cells
@@ -4508,10 +4682,28 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
         logger.warn(`[AgentLoop] bulk_set_cell_ranges padding rejected: ${paddingCheck.reason}`);
         return { error: paddingCheck.reason };
       }
+      // Layer D — intra-batch numeric outlier guard across all writes
+      {
+        const outliersBulk = detectNumericOutliers(writes);
+        if (outliersBulk.length) {
+          const msg = buildOutlierError(outliersBulk);
+          logger.warn(`[AgentLoop] bulk_set_cell_ranges outlier rejected: ${outliersBulk.length} cell(s) flagged`);
+          return { error: msg };
+        }
+      }
       const actions = [];
       const accepted = [];
       const errors = [];
       let cellsTotal = 0;
+      // Layer B — near-duplicate sheet guard. Reject the WHOLE call if any
+      // entry targets a near-dup; partial accept here would silently split
+      // content across two sheets, which is exactly what we are preventing.
+      const knownMapBulk = buildKnownSheetMap(context);
+      for (let i = 0; i < writes.length; i++) {
+        const t = (writes[i] && writes[i].sheet) || context?.activeSheet;
+        const dup = findNearDuplicateSheet(t, knownMapBulk);
+        if (dup) return { error: `bulk_set_cell_ranges entry ${i}: ${nearDupSheetError(t, dup)}` };
+      }
       for (let i = 0; i < writes.length; i++) {
         const w = writes[i] || {};
         const sheet = w.sheet || context?.activeSheet;
@@ -5960,5 +6152,12 @@ module.exports = {
   messageCharCount,
   detectScalarTextFloodFill,
   detectDegenerateCopySeed,
+  normalizeSheetName,
+  buildKnownSheetMap,
+  findNearDuplicateSheet,
+  nearDupSheetError,
+  recordRuntimeSheet,
+  detectNumericOutliers,
+  buildOutlierError,
   detectPaddingRows
 };
