@@ -164,6 +164,8 @@ async function init() {
     state.lastContextFingerprint = null;
     forgetAll();
     state.currentPlanTasks = null;
+    state.failedSliceIds.clear();
+    state.totalSliceCount = 0;
     state.requestQueue = [];
     state.excelActionQueue = [];
     state.handledActionBatchIds.clear();
@@ -315,6 +317,8 @@ function resetAgent() {
   state.currentTurnId = null;
   forgetActiveTurn();
   state.currentPlanTasks = null;
+  state.failedSliceIds.clear();
+  state.totalSliceCount = 0;
   state.handledActionBatchIds.clear();
   state.handledRequestIds.clear();
   resetRequestQueue();
@@ -1026,6 +1030,8 @@ function openTurnEventStream(turnId, planMsgId) {
         planReceived = true;
         removeMessage(planMsgId);
         state.currentPlanTasks = data.tasks;
+        state.totalSliceCount = data.tasks.length;
+        state.failedSliceIds.clear();
         addMessage(`Piano generato: <strong>${escapeHtml(turnId)}</strong> (${data.tasks.length} task)`, 'bot');
         renderTaskTree(data.tasks);
         updateProgressBadge(data.tasks.length);
@@ -1154,6 +1160,9 @@ function openTurnEventStream(turnId, planMsgId) {
         if (item.type === 'taskExecution') {
           const status = item.status === 'error' ? 'error' : 'completed';
           updateTaskStatus(item.taskId, status);
+          if (item.status === 'error' && item.taskId) {
+            state.failedSliceIds.add(item.taskId);
+          }
           if (inReplay) return; // status updated, text log already shown earlier
           if (item.status === 'error') {
             addLog(`[${item.taskId}] ERRORE: ${item.error || 'errore sconosciuto'}`, 'error');
@@ -1223,9 +1232,18 @@ function openTurnEventStream(turnId, planMsgId) {
           addMessage(`Esecuzione interrotta: ${escapeHtml(data.error || 'errore sconosciuto')}`, 'error');
           showToast('Completato con errori', 'error');
         } else {
-          addLog('Esecuzione completata.');
-          addMessage('Modello completato! Tutti i task sono stati eseguiti su Excel.', 'bot');
-          showToast('Esecuzione completata', 'success');
+          const failed = state.failedSliceIds.size;
+          const total = state.totalSliceCount || 0;
+          if (failed > 0 && total > 0) {
+            const ok = Math.max(0, total - failed);
+            addLog(`Esecuzione completata con errori: ${failed}/${total} task falliti o skippati.`, 'error');
+            addMessage(`Modello completato con errori: <strong>${ok}/${total}</strong> task riusciti. ${failed} task hanno fallito o sono stati skippati — controlla i log per i dettagli.`, 'bot');
+            showToast(`Completato con ${failed} errori`, 'warning');
+          } else {
+            addLog('Esecuzione completata.');
+            addMessage('Modello completato! Tutti i task sono stati eseguiti su Excel.', 'bot');
+            showToast('Esecuzione completata', 'success');
+          }
         }
         resetRequestQueue();
         hideStepsPanel();

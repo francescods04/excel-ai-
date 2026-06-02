@@ -27,6 +27,8 @@ const state = {
   isAgentPaused: false, // True when agent is waiting for user response
   pausedAgentId: null, // AgentId of the paused agent (for resume)
   stepQuestionResolver: null, // Resolver fn for a stepwise paused question (free-text answer via chat)
+  failedSliceIds: new Set(), // Slice taskIds that errored or were skipped in current turn
+  totalSliceCount: 0, // Total slices declared in current plan
 };
 
 export default state;

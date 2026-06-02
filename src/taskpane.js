@@ -6,6 +6,8 @@
   let isProcessing = false;
   let currentTurnId = null;
   let currentPlanTasks = null;
+  const failedSliceIds = new Set();
+  let totalSliceCount = 0;
   let eventSource = null;
   let requestQueue = [];
   let activeRequest = null;
@@ -432,6 +434,8 @@
           planReceived = true;
           removeMessage(planMsgId);
           currentPlanTasks = data.tasks;
+          totalSliceCount = data.tasks.length;
+          failedSliceIds.clear();
           addMessage(`Piano generato: <strong>${escapeHtml(turnId)}</strong> (${data.tasks.length} task)`, 'bot');
           renderTaskTree(data.tasks);
         } catch (err) {}
@@ -503,6 +507,7 @@
           if (item.type === 'taskExecution') {
             if (item.status === 'error') {
               updateTaskStatus(item.taskId, 'error');
+              if (item.taskId) failedSliceIds.add(item.taskId);
               addLog(`[${item.taskId}] ERRORE: ${item.error || 'errore sconosciuto'}`, 'error');
             } else {
               updateTaskStatus(item.taskId, 'completed');
@@ -549,6 +554,10 @@
           if (data.status === 'error' || data.error) {
             addLog(`Esecuzione terminata con errore: ${data.error || 'errore sconosciuto'}`, 'error');
             addMessage(`Esecuzione interrotta: ${escapeHtml(data.error || 'errore sconosciuto')}`, 'error');
+          } else if (failedSliceIds.size > 0 && totalSliceCount > 0) {
+            const ok = Math.max(0, totalSliceCount - failedSliceIds.size);
+            addLog(`Esecuzione completata con errori: ${failedSliceIds.size}/${totalSliceCount} task falliti o skippati.`, 'error');
+            addMessage(`Modello completato con errori: <strong>${ok}/${totalSliceCount}</strong> task riusciti. ${failedSliceIds.size} task hanno fallito o sono stati skippati — controlla i log per i dettagli.`, 'bot');
           } else {
             addLog('Esecuzione completata.');
             addMessage('Modello completato! Tutti i task sono stati eseguiti su Excel.', 'bot');
@@ -603,6 +612,8 @@
     approveBar.classList.add('hidden');
     currentTurnId = null;
     currentPlanTasks = null;
+    failedSliceIds.clear();
+    totalSliceCount = 0;
     handledActionBatchIds.clear();
     handledRequestIds.clear();
     resetRequestState();
