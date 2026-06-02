@@ -34,6 +34,62 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
 
   // 3) Empty / missing names array -> soft error
   {
+    const ctx = {
+      messages: [],
+      iteration: 0,
+      workbookSheets: ['Sheet1'],
+      _sliceScope: { sheets_owned: ['Menu'] }
+    };
+    const r = await executeAgentTool('create_sheet', { name: 'Menu' }, ctx, null);
+    assert.strictEqual(r.skipped, undefined);
+    assert.strictEqual(r.actions.length, 1);
+    assert.strictEqual(r.actions[0].name, 'Menu');
+    console.log('OK create_sheet does not skip merely because sheet is in slice scope');
+  }
+
+  // 3b) Slice scope is not proof that bulk-created sheets already exist
+  {
+    const ctx = {
+      messages: [],
+      iteration: 0,
+      workbookSheets: ['Sheet1'],
+      _sliceScope: { sheets_owned: ['Menu', 'Revenue Forecast'] }
+    };
+    const r = await executeAgentTool(
+      'bulk_create_sheets',
+      { names: ['Menu', 'Revenue Forecast'] },
+      ctx,
+      null
+    );
+    assert.strictEqual(r.skipped, undefined);
+    assert.deepStrictEqual(r.sheetsCreated, ['Menu', 'Revenue Forecast']);
+    assert.strictEqual(r.actions.length, 2);
+    console.log('OK bulk_create_sheets does not skip merely because sheets are in slice scope');
+  }
+
+  // 3c) Existing workbook/runtime sheets are skipped after they are truly known
+  {
+    const ctx = {
+      messages: [],
+      iteration: 0,
+      workbookSheets: ['Sheet1', 'Menu'],
+      _knownSheetsRuntime: ['Revenue Forecast'],
+      _sliceScope: { sheets_owned: ['Menu', 'Revenue Forecast'] }
+    };
+    const r = await executeAgentTool(
+      'bulk_create_sheets',
+      { names: ['Menu', 'Revenue Forecast'] },
+      ctx,
+      null
+    );
+    assert.strictEqual(r.skipped, true);
+    assert.deepStrictEqual(r.skippedExisting, ['Menu', 'Revenue Forecast']);
+    assert.deepStrictEqual(r.sheetsCreated, []);
+    console.log('OK bulk_create_sheets skips only sheets known to exist');
+  }
+
+  // 4) Empty / missing names array -> soft error
+  {
     const r = await executeAgentTool(
       'bulk_create_sheets',
       { names: [] },
@@ -53,7 +109,7 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     console.log('OK bulk_create_sheets rejects empty / missing names');
   }
 
-  // 4) Over-cap (>32) rejected as a whole
+  // 5) Over-cap (>32) rejected as a whole
   {
     const names = Array.from({ length: 33 }, (_, i) => `S${i}`);
     const r = await executeAgentTool(
@@ -66,7 +122,7 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     console.log('OK bulk_create_sheets enforces max 32 sheets per call');
   }
 
-  // 5) bulk_create_named_ranges emits N createNamedRange actions
+  // 6) bulk_create_named_ranges emits N createNamedRange actions
   {
     const r = await executeAgentTool(
       'bulk_create_named_ranges',
@@ -90,7 +146,7 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     console.log('OK bulk_create_named_ranges emits N createNamedRange actions');
   }
 
-  // 6) Invalid entries are reported in "skipped" but valid ones still apply
+  // 7) Invalid entries are reported in "skipped" but valid ones still apply
   {
     const r = await executeAgentTool(
       'bulk_create_named_ranges',
@@ -113,7 +169,7 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     console.log('OK bulk_create_named_ranges reports invalid entries and applies valid ones');
   }
 
-  // 7) All-invalid batch -> error
+  // 8) All-invalid batch -> error
   {
     const r = await executeAgentTool(
       'bulk_create_named_ranges',

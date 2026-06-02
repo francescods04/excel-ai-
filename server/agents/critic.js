@@ -14,6 +14,7 @@ const RE_A1_SIMPLE = /^\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?$/;
 const RE_SHEET_REF = /^(?:'([^']+)'|([A-Za-z_]\w*))!/;
 
 const RE_FUNCTION_CALL = /\b([A-Z]{2,30})\s*\(/g;
+const RE_RANGE_CANDIDATE = /(?:(?:'[^']+'|[A-Za-z_][\w .&-]*)!)?(\$?[A-Z]{1,3}\$?\d+|\$?\d+|\$?[A-Z]{1,3})\s*:\s*(\$?[A-Z]{1,3}\$?\d+|\$?\d+|\$?[A-Z]{1,3})/gi;
 
 // Funzioni Excel comuni (whitelist per validazione aggiuntiva)
 const BUILTIN_FUNCTIONS = new Set([
@@ -72,6 +73,27 @@ function isNonEmpty(formula) {
   return typeof formula === 'string' && formula.trim().length > 1;
 }
 
+function rangeEndpointKind(token) {
+  const raw = String(token || '').replace(/\$/g, '').toUpperCase();
+  if (/^[A-Z]{1,3}\d+$/.test(raw)) return 'cell';
+  if (/^[A-Z]{1,3}$/.test(raw)) return 'column';
+  if (/^\d+$/.test(raw)) return 'row';
+  return 'unknown';
+}
+
+function malformedRangeRefs(formulaString) {
+  const bad = [];
+  if (typeof formulaString !== 'string') return bad;
+  for (const match of formulaString.matchAll(RE_RANGE_CANDIDATE)) {
+    const left = match[1];
+    const right = match[2];
+    const leftKind = rangeEndpointKind(left);
+    const rightKind = rangeEndpointKind(right);
+    if (leftKind !== rightKind || leftKind === 'unknown') bad.push(`${left}:${right}`);
+  }
+  return bad;
+}
+
 /**
  * Valida una singola formula.
  * @param {string} formulaString - La formula (es. "=SUM(Assumptions!B5:B10)")
@@ -93,6 +115,11 @@ function validateFormula(formulaString, layout = {}) {
 
   if (!isParenthesesBalanced(formulaString)) {
     errors.push('parentesi non bilanciate');
+  }
+
+  const badRanges = malformedRangeRefs(formulaString);
+  for (const ref of badRanges) {
+    errors.push(`riferimento range A1 non valido: ${ref}`);
   }
 
   // Estrai riferimenti A1
@@ -416,6 +443,7 @@ logger.info('[Critic] Initialized');
 
 module.exports = {
   validateFormula,
+  malformedRangeRefs,
   validateActions,
   validateTaskOutput,
   explainFormula,

@@ -49,12 +49,60 @@ const { executeAgentTool } = require('../../server/agents/agentLoop.js');
     console.log('OK bulk_set_cell_ranges surfaces per-entry errors and continues');
   }
 
-  // 3) Over-cap (>32) rejected
+  // 3) Over-cap (>32) auto-truncates and asks for follow-up
   {
-    const writes = Array.from({ length: 33 }, () => ({ sheet: 'X', cells: { A1: { value: 1 } } }));
+    const writes = Array.from({ length: 33 }, (_, i) => ({ sheet: 'X', cells: { [`A${i + 1}`]: { value: i + 1 } } }));
     const r = await executeAgentTool('bulk_set_cell_ranges', { writes }, { messages: [], iteration: 0 }, null);
-    assert.match(r.error, /max 32/);
-    console.log('OK bulk_set_cell_ranges enforces max 32 writes');
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.applied, 32);
+    assert.strictEqual(r.truncatedCount, 1);
+    assert.ok(/Bulk overflow auto-handled/.test(r._message));
+    console.log('OK bulk_set_cell_ranges auto-truncates >32 writes and reports follow-up');
+  }
+
+  // 3b) Common SUM(row:cell) formula typos are normalized before Excel writes
+  {
+    const r = await executeAgentTool(
+      'set_cell_range',
+      { sheet: 'X', cells: { B3: { formula: '=SUM(3:A3)' } } },
+      { messages: [], iteration: 0 },
+      null
+    );
+    assert.strictEqual(r.actions.length, 1);
+    assert.strictEqual(r.actions[0].cells.B3.formula, '=SUM(A3:A3)');
+    console.log('OK set_cell_range normalizes SUM(row:cell) formula ranges');
+  }
+
+  // 3c) Malformed formulas in bulk entries are normalized without dropping valid entries
+  {
+    const r = await executeAgentTool(
+      'bulk_set_cell_ranges',
+      {
+        writes: [
+          { sheet: 'X', cells: { A1: { value: 1 } } },
+          { sheet: 'X', cells: { B3: { formula: '=SUM(3:A3)' } } }
+        ]
+      },
+      { messages: [], iteration: 0 },
+      null
+    );
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.applied, 2);
+    assert.strictEqual(r.actions.length, 2);
+    assert.strictEqual(r.actions[1].cells.B3.formula, '=SUM(A3:A3)');
+    console.log('OK bulk_set_cell_ranges normalizes malformed SUM ranges per entry');
+  }
+
+  // 3d) Non-repairable malformed A1 ranges are still rejected
+  {
+    const r = await executeAgentTool(
+      'set_cell_range',
+      { sheet: 'X', cells: { B3: { formula: '=SUM(3:AA)' } } },
+      { messages: [], iteration: 0 },
+      null
+    );
+    assert.match(r.error, /range A1 non valido|invalid/i);
+    console.log('OK set_cell_range rejects non-repairable malformed A1 formula ranges');
   }
 
   // 4) Empty / missing -> soft error

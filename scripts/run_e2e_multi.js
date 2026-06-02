@@ -27,6 +27,8 @@ const SCENARIOS  = arg('scenarios', 'dcf,vairano,fastfood_bp,data_cleaning')
   .split(',').map(s => s.trim()).filter(Boolean);
 const TIMEOUT    = arg('timeout', '');
 const OUT_DIR    = arg('outdir', '/tmp');
+const RETRIES    = Math.max(0, Number(arg('retries', '0')) || 0);
+const FINAL_WAIT = arg('final-wait', '');
 
 if (!SCENARIOS.length) {
   console.error('No scenarios provided (--scenarios=a,b,c)');
@@ -41,31 +43,68 @@ if (!fs.existsSync(tracerPath)) {
 
 const ts = Date.now();
 
-function runOne(scenario) {
+function runOne(scenario, attempt = 0) {
   return new Promise(resolve => {
     const startedAt = Date.now();
-    const logPath = path.join(OUT_DIR, `e2e_multi_${scenario}_${ts}.log`);
-    const tracePath = path.join(OUT_DIR, `e2e_multi_${scenario}_${ts}.trace.json`);
+    const suffix = attempt > 0 ? `_try${attempt + 1}` : '';
+    const logPath = path.join(OUT_DIR, `e2e_multi_${scenario}_${ts}${suffix}.log`);
+    const tracePath = path.join(OUT_DIR, `e2e_multi_${scenario}_${ts}${suffix}.trace.json`);
     const args = [tracerPath, `--scenario=${scenario}`, `--server=${SERVER}`, `--out=${tracePath}`];
     if (TIMEOUT) args.push(`--timeout=${TIMEOUT}`);
+    if (FINAL_WAIT) args.push(`--final-wait=${FINAL_WAIT}`);
     const logFh = fs.openSync(logPath, 'w');
     const child = spawn(process.execPath, args, {
       stdio: ['ignore', logFh, logFh],
       env: { ...process.env }
     });
-    console.log(`▶ [${scenario}] pid=${child.pid} log=${logPath} trace=${tracePath}`);
+    console.log(`▶ [${scenario}${suffix}] pid=${child.pid} log=${logPath} trace=${tracePath}`);
     child.on('close', code => {
       fs.closeSync(logFh);
       const elapsedS = Math.round((Date.now() - startedAt) / 1000);
       let trace = null;
       try { trace = JSON.parse(fs.readFileSync(tracePath, 'utf-8')); } catch (_) {}
-      resolve({ scenario, code, elapsedS, logPath, tracePath, trace });
+      resolve({ scenario, attempt, code, elapsedS, logPath, tracePath, trace });
     });
     child.on('error', err => {
       try { fs.closeSync(logFh); } catch (_) {}
-      resolve({ scenario, code: -1, elapsedS: 0, logPath, tracePath, trace: null, spawnError: err.message });
+      resolve({ scenario, attempt, code: -1, elapsedS: 0, logPath, tracePath, trace: null, spawnError: err.message });
     });
   });
+}
+
+function isBadResult(r) {
+  const t = r.trace || {};
+  const status = t.finalTurn?.status;
+  if (r.spawnError || r.code !== 0) return true;
+  if (status !== 'completed') return true;
+  if (Array.isArray(t.quality?.failures) && t.quality.failures.length > 0) return true;
+  if (Array.isArray(t.errors) && t.errors.length > 0) return true;
+  return false;
+}
+
+function resultScore(r) {
+  const t = r.trace || {};
+  const q = Number(t.quality?.score || 0);
+  const statusBonus = t.finalTurn?.status === 'completed' ? 1000 : 0;
+  const qualityPenalty = Array.isArray(t.quality?.failures) ? t.quality.failures.length * 100 : 0;
+  return statusBonus + q - qualityPenalty - Math.min(300, r.elapsedS || 0) / 30;
+}
+
+async function runWithRetries(scenario) {
+  const attempts = [];
+  for (let attempt = 0; attempt <= RETRIES; attempt++) {
+    const result = await runOne(scenario, attempt);
+    attempts.push(result);
+    if (!isBadResult(result)) break;
+    if (attempt < RETRIES) {
+      const failures = result.trace?.quality?.failures || [];
+      const reason = failures[0] || result.spawnError || result.trace?.finalTurn?.status || `exit ${result.code}`;
+      console.log(`↻ [${scenario}] retry ${attempt + 2}/${RETRIES + 1}: ${reason}`);
+    }
+  }
+  const best = attempts.slice().sort((a, b) => resultScore(b) - resultScore(a))[0] || attempts[0];
+  best.attempts = attempts;
+  return best;
 }
 
 function fmtSheets(trace) {
@@ -84,6 +123,9 @@ function fmtRow(r) {
   const llmCalls = narrative.length;
   const steps = Array.isArray(t.steps) ? t.steps.length : 0;
   const errors = Array.isArray(t.errors) ? t.errors.length : 0;
+  const quality = t.quality || {};
+  const failures = Array.isArray(quality.failures) ? quality.failures.length : 0;
+  const warnings = Array.isArray(quality.warnings) ? quality.warnings.length : 0;
   const parseErrs = narrative.filter(n => n.parseError).length;
   const parseRec = narrative.filter(n => n.parseErrorRecovered).length;
   const sheetCount = (t.sheetSummary || []).length;
@@ -93,15 +135,22 @@ function fmtRow(r) {
     scenario: r.scenario,
     status,
     elapsed_s: r.elapsedS,
+    attempts: Array.isArray(r.attempts) ? r.attempts.length : 1,
     llm_calls: llmCalls,
     steps,
     errors,
+    quality: quality.ok === false || failures > 0 ? `FAIL:${quality.score ?? '-'}` : `PASS:${quality.score ?? '-'}`,
+    q_fail: failures,
+    q_warn: warnings,
     parse_errs: `${parseErrs - parseRec}/${parseErrs}`,
     sheets: sheetCount,
     formulas: formulaTotal,
     total_cells: cellTotal,
+    cells_per_s: r.elapsedS > 0 ? Math.round(cellTotal / r.elapsedS) : 0,
     log: r.logPath,
-    trace: r.tracePath
+    trace: r.tracePath,
+    quality_failures: quality.failures || [],
+    quality_warnings: quality.warnings || []
   };
 }
 
@@ -144,6 +193,7 @@ async function mintSharedToken() {
   console.log(`\n═══ MULTI-SCENARIO E2E (${SCENARIOS.length} parallel) ═══`);
   console.log(`Server:    ${SERVER}`);
   console.log(`Scenarios: ${SCENARIOS.join(', ')}`);
+  console.log(`Retries:   ${RETRIES}`);
   console.log(`Out dir:   ${OUT_DIR}\n`);
 
   let sharedToken = null;
@@ -155,11 +205,11 @@ async function mintSharedToken() {
   }
   if (sharedToken) process.env.E2E_PREMINTED_TOKEN = sharedToken;
 
-  const results = await Promise.all(SCENARIOS.map(runOne));
+  const results = await Promise.all(SCENARIOS.map(runWithRetries));
 
   console.log('\n═══ RESULTS ═══\n');
   const rows = results.map(fmtRow);
-  const cols = ['scenario','status','elapsed_s','llm_calls','steps','errors','parse_errs','sheets','formulas','total_cells'];
+  const cols = ['scenario','status','quality','attempts','elapsed_s','llm_calls','steps','errors','q_fail','q_warn','parse_errs','sheets','formulas','total_cells','cells_per_s'];
   const widths = cols.map(c => Math.max(c.length, ...rows.map(r => String(r[c] ?? '').length)));
   const sep = '  ';
   console.log(cols.map((c, i) => c.padEnd(widths[i])).join(sep));
@@ -170,6 +220,12 @@ async function mintSharedToken() {
   console.log('\nArtifacts:');
   for (const r of rows) console.log(`  ${r.scenario}: trace=${r.trace}  log=${r.log}`);
 
-  const anyError = rows.some(r => r.status === 'error' || r.status.startsWith('exit') || r.status === 'spawn-error');
+  console.log('\nQuality notes:');
+  for (const r of rows) {
+    const notes = [...(r.quality_failures || []), ...(r.quality_warnings || [])].slice(0, 6);
+    console.log(`  ${r.scenario}: ${notes.length ? notes.join(' | ') : 'no quality issues'}`);
+  }
+
+  const anyError = rows.some(r => r.status !== 'completed' || r.q_fail > 0 || r.errors > 0 || r.quality.startsWith('FAIL'));
   process.exit(anyError ? 2 : 0);
 })().catch(e => { console.error('FAIL:', e.stack || e.message); process.exit(1); });

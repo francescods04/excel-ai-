@@ -18,6 +18,7 @@ const EMAIL = arg('email', 'francescojordan04@gmail.com');
 const SCENARIO = arg('scenario', 'sumcol');
 const SCENARIO_DEFAULT_TIMEOUTS = { sumcol: 120, simple: 60, dcf: 600, vairano: 2700, data_cleaning: 600, fastfood_bp: 2700 };
 const TIMEOUT_MS = (Number(arg('timeout', String(SCENARIO_DEFAULT_TIMEOUTS[arg('scenario','sumcol')] || 300))) || 300) * 1000;
+const FINAL_STATUS_WAIT_MS = (Number(arg('final-wait', '90')) || 90) * 1000;
 const RESUME_TURN_ID = arg('resume', null); // optional: reattach to existing turn
 const OUT = arg('out', `/tmp/e2e_trace_${SCENARIO}_${Date.now()}.json`);
 
@@ -88,23 +89,36 @@ function colToIndex(c){let n=0;for(const ch of String(c||'').toUpperCase())n=n*2
 function indexToCol(n){let s='';while(n>0){const r=(n-1)%26;s=String.fromCharCode(65+r)+s;n=Math.floor((n-1)/26);}return s;}
 function parseAddr(a){const m=String(a).replace(/\$/g,'').match(/^([A-Z]+)(\d+)$/i);return m?{col:colToIndex(m[1]),row:Number(m[2])}:null;}
 function parseRange(t){const raw=String(t||'').replace(/\$/g,'');if(raw.includes('!'))return parseRange(raw.split('!').slice(1).join('!'));const[a,b]=raw.split(':');const L=parseAddr(a);if(!L)return null;const R=b?parseAddr(b):L;if(!R)return null;return{c1:Math.min(L.col,R.col),c2:Math.max(L.col,R.col),r1:Math.min(L.row,R.row),r2:Math.max(L.row,R.row)};}
+function splitQualifiedRange(t){const raw=String(t||'');const bang=raw.indexOf('!');if(bang<0)return{sheet:null,range:raw};let sheet=raw.slice(0,bang).trim();if(sheet.startsWith("'")&&sheet.endsWith("'"))sheet=sheet.slice(1,-1).replace(/''/g,"'");return{sheet,range:raw.slice(bang+1)};}
+function targetSheet(params,fallback='Sheet1'){const q=splitQualifiedRange(params.target||params.range||params.address||params.addr||params.from||params.source||params.to||params.dest||params.copyToRange);return params.sheet||params.sheetName||q.sheet||fallback;}
+function targetRange(t){return splitQualifiedRange(t).range;}
 function ensureSheet(n){if(!workbook.sheets.has(n))workbook.sheets.set(n,new Map());return workbook.sheets.get(n);}
 function translateFormula(f,dR,dC){if(typeof f!=='string')return f;return f.replace(/(\$?)([A-Z]+)(\$?)(\d+)/g,(m,ab,col,ar,row)=>{const nc=ab==='$'?col:indexToCol(colToIndex(col)+dC);const nr=ar==='$'?row:String(Number(row)+dR);return `${ab}${nc}${ar}${nr}`;});}
-function applySetCellRange(a){const s=ensureSheet(a.sheet||a.sheetName||'Sheet1');const cells=a.cells||{};for(const[ad,sp]of Object.entries(cells)){if(!parseAddr(ad))continue;s.set(ad,{value:sp.value,formula:sp.formula});}if(a.copyToRange){const d=parseRange(a.copyToRange);if(d)for(const[sa,sp]of Object.entries(cells)){if(!sp.formula)continue;const sd=parseAddr(sa);if(!sd)continue;for(let r=d.r1;r<=d.r2;r++)for(let c=d.c1;c<=d.c2;c++){if(r===sd.row&&c===sd.col)continue;s.set(`${indexToCol(c)}${r}`,{formula:translateFormula(sp.formula,r-sd.row,c-sd.col)});}}}}
-function applyAction(a){if(!a||typeof a!=='object')return;const t=a.type;if(t==='createSheet'){const n=a.name||a.sheet;if(n)ensureSheet(n);}else if(t==='deleteSheet'){if(a.name)workbook.sheets.delete(a.name);}else if(t==='setCellRange')applySetCellRange(a);}
+function cellSpec(sp){return sp&&typeof sp==='object'&&!Array.isArray(sp)?sp:{value:sp};}
+function matrixAt(value,r,c){return Array.isArray(value)?(Array.isArray(value[r])?value[r][c]:value[r]):value;}
+function writeCell(s,addr,spec){const sp=cellSpec(spec);const formula=sp.formula!==undefined?sp.formula:(typeof sp.value==='string'&&sp.value.startsWith('=')?sp.value:undefined);const value=formula!==undefined?undefined:sp.value;s.set(addr,{value,formula});}
+function writeRangeCells(s,target,spec){const r=parseRange(target);if(!r)return;const sp=cellSpec(spec);const values=sp.values!==undefined?sp.values:sp.value;const formulas=sp.formulas!==undefined?sp.formulas:sp.formula;for(let row=r.r1;row<=r.r2;row++)for(let col=r.c1;col<=r.c2;col++){const rr=row-r.r1,cc=col-r.c1,addr=`${indexToCol(col)}${row}`;const formula=matrixAt(formulas,rr,cc);if(formula!==undefined&&formula!==null&&formula!=='')s.set(addr,{formula});else{const value=matrixAt(values,rr,cc);if(value!==undefined)s.set(addr,{value});}}}
+function applySetCellRange(a){const defaultSheet=a.sheet||a.sheetName||'Sheet1';const cells=a.cells||{};for(const[ad,raw]of Object.entries(cells)){const q=splitQualifiedRange(ad);const s=ensureSheet(q.sheet||defaultSheet);const sp=cellSpec(raw);if(parseAddr(q.range))writeCell(s,q.range,sp);else writeRangeCells(s,q.range,sp);}if(a.copyToRange){const cq=splitQualifiedRange(a.copyToRange);const d=parseRange(cq.range);if(d)for(const[sa,raw]of Object.entries(cells)){const sq=splitQualifiedRange(sa);const s=ensureSheet(cq.sheet||sq.sheet||defaultSheet);const sp=cellSpec(raw);const src=parseRange(sq.range);const seed=parseAddr(sq.range);const formula=sp.formula!==undefined?sp.formula:(typeof sp.value==='string'&&sp.value.startsWith('=')?sp.value:null);if(!formula)continue;const anchor=seed||src&&{row:src.r1,col:src.c1};if(!anchor)continue;for(let r=d.r1;r<=d.r2;r++)for(let c=d.c1;c<=d.c2;c++){if(r===anchor.row&&c===anchor.col)continue;s.set(`${indexToCol(c)}${r}`,{formula:translateFormula(formula,r-anchor.row,c-anchor.col)});}}}}
+function applyWriteRange(a){const target=a.target||a.range;const s=ensureSheet(targetSheet(a));writeRangeCells(s,targetRange(target),{value:a.value,values:a.values,formulas:a.formulas});}
+function applyFillRange(a){const target=a.target||a.range;const s=ensureSheet(targetSheet(a));writeRangeCells(s,targetRange(target),{value:a.value});}
+function applyRunFormula(a){const target=a.target||a.range;const s=ensureSheet(targetSheet(a));writeRangeCells(s,targetRange(target),{formula:a.value||a.formula});}
+function applySetCellValue(a){const target=a.target||a.range;const s=ensureSheet(targetSheet(a));writeRangeCells(s,targetRange(target),{value:a.value});}
+function applyCopyRange(a){const source=a.from||a.source||a.target;const dest=a.to||a.dest||a.copyToRange;const sourceQ=splitQualifiedRange(source);const destQ=splitQualifiedRange(dest);const from=workbook.sheets.get(a.fromSheet||a.sheet||sourceQ.sheet||'Sheet1');const to=ensureSheet(a.toSheet||a.sheet||destQ.sheet||sourceQ.sheet||'Sheet1');const src=parseRange(sourceQ.range);const dst=parseRange(destQ.range);if(!from||!src||!dst)return;for(let r=0;r<=src.r2-src.r1;r++)for(let c=0;c<=src.c2-src.c1;c++){const cell=from.get(`${indexToCol(src.c1+c)}${src.r1+r}`);if(cell)to.set(`${indexToCol(dst.c1+c)}${dst.r1+r}`,{...cell});}}
+function applyAction(a){if(!a||typeof a!=='object')return;const t=a.type;if(t==='createSheet'){const n=a.name||a.sheet;if(n)ensureSheet(n);}else if(t==='deleteSheet'){const n=a.name||a.sheet;if(n)workbook.sheets.delete(n);}else if(t==='renameSheet'){const oldName=a.oldName||a.name,newName=a.newName||a.to;if(oldName&&newName&&workbook.sheets.has(oldName)){workbook.sheets.set(newName,workbook.sheets.get(oldName));workbook.sheets.delete(oldName);}}else if(t==='setCellRange')applySetCellRange(a);else if(t==='writeRange')applyWriteRange(a);else if(t==='fillRange')applyFillRange(a);else if(t==='runFormula')applyRunFormula(a);else if(t==='setCellValue')applySetCellValue(a);else if(t==='copyRange')applyCopyRange(a);}
 function sheetBounds(s){let mr=0,mc=0;for(const a of s.keys()){const p=parseAddr(a);if(!p)continue;if(p.row>mr)mr=p.row;if(p.col>mc)mc=p.col;}return{maxRow:mr,maxCol:mc};}
+function usedRangeAddress(name,b){return b.maxRow&&b.maxCol?`${name}!A1:${indexToCol(b.maxCol)}${b.maxRow}`:null;}
 function sheetTo2D(s,r1,r2,c1,c2){const v=[],f=[];for(let r=r1;r<=r2;r++){const vr=[],fr=[];for(let c=c1;c<=c2;c++){const cell=s.get(`${indexToCol(c)}${r}`);vr.push(cell?(cell.value!==undefined?cell.value:(cell.formula??null)):null);fr.push(cell?.formula||null);}v.push(vr);f.push(fr);}return{values:v,formulas:f};}
 function mockClient(toolName, params) {
-  if (toolName === 'workbook.readWorkbook') { const sheets=[...workbook.sheets.entries()].map(([n,s])=>{const b=sheetBounds(s);return{name:n,usedRange:{rowCount:b.maxRow,columnCount:b.maxCol}};}); return { data:{ sheets } }; }
-  if (toolName === 'workbook.readSheet') { const n=params.sheet||params.sheetName||'Sheet1';const s=workbook.sheets.get(n);if(!s)return{data:{name:n,values:[],formulas:[]}};const b=sheetBounds(s);const{values,formulas}=sheetTo2D(s,1,Math.max(1,b.maxRow||1),1,Math.max(1,b.maxCol||1));return{data:{name:n,values,formulas}};}
-  if (toolName === 'workbook.readRange') { const n=params.sheet||params.sheetName||'Sheet1';const r=parseRange(params.target);const s=workbook.sheets.get(n);if(!s||!r)return{data:{sheet:n,target:params.target,values:[[]],formulas:[[]]}};const{values,formulas}=sheetTo2D(s,r.r1,r.r2,r.c1,r.c2);return{data:{sheet:n,target:params.target,values,formulas}};}
+  if (toolName === 'workbook.readWorkbook') { const activeSheet=params.activeSheet||'Sheet1';const sheets=[...workbook.sheets.entries()].map(([n,s])=>{const b=sheetBounds(s);const maxRows=Number(params.maxRows)||20;const maxCols=Number(params.maxCols)||10;const rows=Math.min(Math.max(1,b.maxRow||1),maxRows);const cols=Math.min(Math.max(1,b.maxCol||1),maxCols);const{values,formulas}=sheetTo2D(s,1,rows,1,cols);return{name:n,usedRange:usedRangeAddress(n,b),rowCount:b.maxRow,columnCount:b.maxCol,preview:b.maxRow?values:[],formulas:b.maxRow&&params.includeFormulas!==false?formulas:[]};});return{data:{activeSheet,workbookSheets:[...workbook.sheets.keys()],selectedRange:`${activeSheet}!A1`,selectionSize:{rows:1,columns:1},selectedValues:[[]],selectedFormulas:[[]],selectedRangeTruncated:false,sheets}}; }
+  if (toolName === 'workbook.readSheet') { const n=targetSheet(params);const s=workbook.sheets.get(n);if(!s)return{data:{sheet:n,usedRange:null,values:[],formulas:[],rowCount:0,columnCount:0}};const b=sheetBounds(s);const maxRows=Number(params.maxRows)||30;const maxCols=Number(params.maxCols)||12;const rows=Math.min(Math.max(1,b.maxRow||1),maxRows);const cols=Math.min(Math.max(1,b.maxCol||1),maxCols);const{values,formulas}=sheetTo2D(s,1,rows,1,cols);return{data:{sheet:n,usedRange:usedRangeAddress(n,b),values:b.maxRow?values:[],formulas:b.maxRow?formulas:[],rowCount:b.maxRow,columnCount:b.maxCol}};}
+  if (toolName === 'workbook.readRange') { const target=params.target||params.range||params.address||params.addr;const n=targetSheet(params);const cleanTarget=targetRange(target);const r=parseRange(cleanTarget);const s=workbook.sheets.get(n);if(!s||!r)return{data:{sheet:n,target:cleanTarget,address:n?`${n}!${cleanTarget}`:cleanTarget,values:[],formulas:[],rowCount:0,columnCount:0,totalRowCount:0,totalColumnCount:0,truncated:false}};const maxRows=Number(params.maxRows)||100;const maxCols=Number(params.maxCols)||100;const r2=Math.min(r.r2,r.r1+maxRows-1);const c2=Math.min(r.c2,r.c1+maxCols-1);const{values,formulas}=sheetTo2D(s,r.r1,r2,r.c1,c2);return{data:{sheet:n,target:cleanTarget,address:`${n}!${cleanTarget}`,values,formulas,rowCount:r2-r.r1+1,columnCount:c2-r.c1+1,totalRowCount:r.r2-r.r1+1,totalColumnCount:r.c2-r.c1+1,truncated:r2<r.r2||c2<r.c2}};}
   if (toolName === 'workbook.listNamedRanges') return { data: { namedRanges: [] } };
   if (toolName === 'workbook.readFormatSummary') return { data: { summary: 'mock' } };
   return { data: {} };
 }
 
 // ── Step driver ──────────────────────────────────────────────────────────
-const stats = { startedAt: Date.now(), iterations: [], errors: [], steps: [], events: 0 };
+const stats = { startedAt: Date.now(), iterations: [], errors: [], steps: [], events: 0, lastControl: null, lastPayload: null };
 
 function paramsSummary(p) {
   if (!p || typeof p !== 'object') return '';
@@ -157,6 +171,8 @@ async function stepLoop(turnId, token) {
     nextClientResult = null;
     const { control, payload, stepSeq: newSeq } = r.json || {};
     if (typeof newSeq === 'number') stepSeq = newSeq;
+    stats.lastControl = control || null;
+    stats.lastPayload = payload || null;
     stats.steps.push({ ts: now(), control, payloadKind: payload ? Object.keys(payload).slice(0,5).join(',') : '' });
     if (payload && Array.isArray(payload.actions) && payload.actions.length) for (const a of payload.actions) applyAction(a);
     // Periodic progress log so a long-running test doesn't look hung.
@@ -172,7 +188,7 @@ async function stepLoop(turnId, token) {
       const results = [];
       for (const req of requests) {
         let response = { data: {} };
-        if (req.type === 'clientTool') response = mockClient(req.toolName, req.params || {});
+        if (req.type === 'clientTool' || req.toolName) response = mockClient(req.toolName, req.params || {});
         else if (req.type === 'permission') response = { approved: true };
         results.push({ requestId: req.id, response });
       }
@@ -184,6 +200,144 @@ async function stepLoop(turnId, token) {
 
 function now() { return new Date().toISOString().slice(11, 19); }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function fetchTurnJson(turnId, token) {
+  const r = await request('GET', `${SERVER}/api/turn/${turnId}`, { Authorization: `Bearer ${token}` }, null, 30000);
+  return r.json || {};
+}
+
+async function fetchFinalTurn(turnId, token) {
+  const deadline = Date.now() + FINAL_STATUS_WAIT_MS;
+  let last = {};
+  while (true) {
+    last = await fetchTurnJson(turnId, token);
+    if (last.status === 'completed' || last.status === 'error') return last;
+    if (stats.lastControl !== 'done' && stats.lastControl !== 'aborted') return last;
+    if (Date.now() >= deadline) return last;
+    console.log(`   final status still ${last.status || 'unknown'} after ${stats.lastControl}; retrying...`);
+    await sleep(3000);
+  }
+}
+
+function normText(s) {
+  return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+}
+
+function activeSheets(sheetSummary) {
+  return (sheetSummary || []).filter(s => (s.maxRow || 0) > 0 || (s.maxCol || 0) > 0 || (s.valueCells || 0) > 0 || (s.formulaCells || 0) > 0);
+}
+
+function totals(sheetSummary) {
+  return (sheetSummary || []).reduce((acc, s) => {
+    acc.formulas += s.formulaCells || 0;
+    acc.values += s.valueCells || 0;
+    acc.cells += (s.formulaCells || 0) + (s.valueCells || 0);
+    return acc;
+  }, { formulas: 0, values: 0, cells: 0 });
+}
+
+function allWorkbookText(sheetCells) {
+  return Object.entries(sheetCells || {}).map(([name, cells]) =>
+    `${name}\n${Object.entries(cells || {}).map(([addr, c]) => `${addr}:${c.f || c.v || ''}`).join('\n')}`
+  ).join('\n');
+}
+
+function rangeEndpointKind(token) {
+  const raw = String(token || '').replace(/\$/g, '').toUpperCase();
+  if (/^[A-Z]{1,3}\d+$/.test(raw)) return 'cell';
+  if (/^[A-Z]{1,3}$/.test(raw)) return 'column';
+  if (/^\d+$/.test(raw)) return 'row';
+  return 'unknown';
+}
+
+function malformedRangeRefs(formula) {
+  const bad = [];
+  const re = /(?:(?:'[^']+'|[A-Za-z_][\w .&-]*)!)?(\$?[A-Z]{1,3}\$?\d+|\$?\d+|\$?[A-Z]{1,3})\s*:\s*(\$?[A-Z]{1,3}\$?\d+|\$?\d+|\$?[A-Z]{1,3})/gi;
+  for (const match of String(formula || '').matchAll(re)) {
+    const left = match[1];
+    const right = match[2];
+    const leftKind = rangeEndpointKind(left);
+    const rightKind = rangeEndpointKind(right);
+    if (leftKind !== rightKind || leftKind === 'unknown') bad.push(`${left}:${right}`);
+  }
+  return bad;
+}
+
+function formulaQualityIssues(sheetCells) {
+  const malformed = [];
+  for (const [sheet, cells] of Object.entries(sheetCells || {})) {
+    for (const [addr, c] of Object.entries(cells || {})) {
+      const formula = c && c.f;
+      if (!formula) continue;
+      const badRanges = malformedRangeRefs(formula);
+      for (const ref of badRanges) malformed.push({ sheet, addr, ref, formula });
+    }
+  }
+  return { malformed };
+}
+
+function hasSheetLike(sheetSummary, pattern) {
+  return (sheetSummary || []).some(s => pattern.test(normText(s.name)));
+}
+
+function evaluateScenarioQuality({ scenario, finalTurn, sheetSummary, sheetCells, narrative }) {
+  const failures = [];
+  const warnings = [];
+  const sheets = activeSheets(sheetSummary);
+  const total = totals(sheetSummary);
+  const text = normText(allWorkbookText(sheetCells));
+  const formulaIssues = formulaQualityIssues(sheetCells);
+  const unrecoveredParse = (narrative || []).filter(n => n.parseError && !n.parseErrorRecovered).length;
+  const recoveredParse = (narrative || []).filter(n => n.parseError && n.parseErrorRecovered).length;
+
+  if (finalTurn.status !== 'completed') failures.push(`final status is ${finalTurn.status || 'unknown'}, expected completed`);
+  if (finalTurn.error) failures.push(`turn error: ${finalTurn.error}`);
+  if (stats.errors.length > 0) failures.push(`${stats.errors.length} runner error(s): ${stats.errors.slice(0, 2).map(e => e.message).join(' | ')}`);
+  if (stats.lastControl === 'done' && finalTurn.status !== 'completed') failures.push('step loop returned done but persisted turn is not completed');
+  if (formulaIssues.malformed.length > 0) {
+    const sample = formulaIssues.malformed.slice(0, 3).map(x => `${x.sheet}!${x.addr} ${x.formula}`).join(' | ');
+    failures.push(`malformed formula ranges detected (${formulaIssues.malformed.length}): ${sample}`);
+  }
+  if (unrecoveredParse > 0) warnings.push(`${unrecoveredParse} unrecovered parse error(s) in trace`);
+  if (recoveredParse > 0) warnings.push(`${recoveredParse} recovered parse error(s)`);
+
+  if (scenario === 'dcf') {
+    for (const [label, re] of [['Assumptions', /assum/], ['Projections', /projection/], ['Valuation', /valuation/]]) {
+      if (!hasSheetLike(sheetSummary, re)) failures.push(`missing ${label} sheet`);
+    }
+    if (total.formulas < 15) failures.push(`DCF formula count too low (${total.formulas} < 15)`);
+    if (!/npv|van|discount|sconto/.test(text)) failures.push('DCF valuation does not show NPV/discount logic');
+  } else if (scenario === 'data_cleaning') {
+    const raw = (sheetSummary || []).find(s => normText(s.name) === 'raw');
+    const clean = (sheetSummary || []).find(s => normText(s.name) === 'clean');
+    const qa = (sheetSummary || []).find(s => /qa|report/.test(normText(s.name)));
+    if (!raw || raw.maxRow < 51) failures.push(`Raw sheet too small (${raw?.maxRow || 0} rows, expected 51)`);
+    if (!clean || clean.maxRow < 51) failures.push(`Clean sheet too small (${clean?.maxRow || 0} rows, expected 51)`);
+    if (!qa || qa.maxRow < 5) failures.push('QA Report missing or too small');
+    if ((clean?.formulaCells || 0) < 250) failures.push(`Clean formula coverage too low (${clean?.formulaCells || 0} < 250)`);
+    if (!/duplicat|duplicate/.test(text)) failures.push('duplicate flag/check not found');
+  } else if (scenario === 'fastfood_bp') {
+    const required = [/assum/, /menu|menu/, /cost of goods|cogs/, /personnel/, /capex/, /revenue/, /p&l|pnl/, /cash/, /break/, /scale/, /valuation/, /sensitivity/];
+    const matched = required.filter(re => hasSheetLike(sheetSummary, re) || re.test(text)).length;
+    if (sheets.length < 10) failures.push(`fastfood workbook has too few populated sheets (${sheets.length} < 10)`);
+    if (matched < 10) failures.push(`fastfood required sections matched ${matched}/12`);
+    if (total.cells < 500) failures.push(`fastfood workbook too thin (${total.cells} cells < 500)`);
+    if (total.formulas < 100) failures.push(`fastfood formula count too low (${total.formulas} < 100)`);
+    if (!/mocho|crispy|oklahoma|banana pudding|free refill/.test(text)) failures.push('literal menu coverage missing');
+    if (!hasSheetLike(sheetSummary, /revenue/) || !((sheetSummary || []).some(s => /revenue/.test(normText(s.name)) && (s.maxCol >= 50 || s.maxRow >= 60)))) failures.push('60-month revenue forecast not detected');
+  } else if (scenario === 'vairano') {
+    if (sheets.length < 8) failures.push(`Vairano workbook has too few populated sheets (${sheets.length} < 8)`);
+    if (total.cells < 5000) failures.push(`Vairano workbook too thin (${total.cells} cells < 5000)`);
+    if (total.formulas < 1000) failures.push(`Vairano formula count too low (${total.formulas} < 1000)`);
+    if (!(sheetSummary || []).some(s => s.maxRow >= 900)) failures.push('no ~1000-row sheet detected');
+    for (const [label, re] of [['costi', /costi|cost breakdown|sottocosti/], ['ricavi', /ricavi|revenue|vendite/], ['finanziamenti', /finanziament|mutuo|loan|debt/], ['sensitivity', /sensitivity|sensitiv|scenario/]]) {
+      if (!re.test(text)) failures.push(`Vairano missing ${label} coverage`);
+    }
+  }
+
+  const score = Math.max(0, 100 - failures.length * 20 - warnings.length * 5);
+  return { ok: failures.length === 0, score, failures, warnings, totals: total, populatedSheets: sheets.length };
+}
 
 async function main() {
   console.log(`Server:   ${SERVER}`);
@@ -201,7 +355,7 @@ async function main() {
     // Sanity: ensure turn is fetchable (with retries for 404 propagation).
     let foundStatus = null;
     for (let k = 0; k < 5; k++) {
-      const r = await request('GET', `${SERVER}/api/turn/${turnId}`, { Authorization: `Bearer ${token}` });
+      const r = await request('GET', `${SERVER}/api/turn/${turnId}`, { Authorization: `Bearer ${token}` }, null, 30000);
       if (r.status === 200 && r.json) { foundStatus = r.json.status; break; }
       console.log(`   resume fetch [${r.status}], retry ${k+1}/5...`);
       await sleep(2000);
@@ -222,7 +376,7 @@ async function main() {
     let initialOk = false;
     for (let k = 0; k < 5; k++) {
       await sleep(1500);
-      const r = await request('GET', `${SERVER}/api/turn/${turnId}`, { Authorization: `Bearer ${token}` });
+      const r = await request('GET', `${SERVER}/api/turn/${turnId}`, { Authorization: `Bearer ${token}` }, null, 30000);
       if (r.status === 200 && r.json && r.json.status) { initialOk = true; break; }
       console.log(`   initial fetch [${r.status}], retry ${k+1}/5...`);
     }
@@ -232,8 +386,9 @@ async function main() {
   // Wait for approval gate (Vairano architect blueprint ~30s, allow up to 5 min)
   for (let i = 0; i < 200; i++) {
     await sleep(1500);
-    const r = await request('GET', `${SERVER}/api/turn/${turnId}`, { Authorization: `Bearer ${token}` });
+    const r = await request('GET', `${SERVER}/api/turn/${turnId}`, { Authorization: `Bearer ${token}` }, null, 30000);
     const t = r.json || {};
+    if (i > 0 && i % 20 === 0) console.log(`   wait status=${t.status || r.status || 'unknown'} (${i}/200)`);
     if (t.status === 'awaiting_approval') {
       console.log(`3) approve (${t.plan?.tasks?.length || 0} tasks)`);
       await request('POST', `${SERVER}/api/turn/approve`, { Authorization: `Bearer ${token}` }, { turnId });
@@ -245,7 +400,7 @@ async function main() {
   console.log(`4) step loop (timeout ${Math.round(TIMEOUT_MS/60000)}min)...`);
   await stepLoop(turnId, token);
 
-  const finalTurn = (await request('GET', `${SERVER}/api/turn/${turnId}`, { Authorization: `Bearer ${token}` })).json || {};
+  const finalTurn = await fetchFinalTurn(turnId, token);
 
   // 5) Pull traces
   let traceRecords = [];
@@ -293,6 +448,14 @@ async function main() {
     for (const v of s.values()) { if (v?.formula) fc++; if (v?.value !== undefined) vc++; }
     return { name: n, maxRow: b.maxRow, maxCol: b.maxCol, valueCells: vc, formulaCells: fc };
   });
+  const sheetCells = {};
+  for (const [name, s] of workbook.sheets.entries()) {
+    const out = {};
+    for (const [addr, c] of s.entries()) {
+      out[addr] = c.formula ? { f: c.formula } : { v: c.value };
+    }
+    sheetCells[name] = out;
+  }
 
   // Mark parse errors as recovered if a subsequent iter shows forward progress
   for (let i = 0; i < narrative.length; i++) {
@@ -300,6 +463,7 @@ async function main() {
     const next = narrative.slice(i + 1, i + 3).find(x => x.tool || x.thought);
     if (next) narrative[i].parseErrorRecovered = true;
   }
+  const quality = evaluateScenarioQuality({ scenario: SCENARIO, finalTurn, sheetSummary, sheetCells, narrative });
 
   // Print response-by-response analysis
   console.log('\n═══ ITERATION-BY-ITERATION ═══\n');
@@ -318,7 +482,10 @@ async function main() {
   console.log(`Elapsed:  ${Math.round((Date.now() - stats.startedAt) / 1000)}s`);
   console.log(`LLM calls: ${responses.length}  steps: ${stats.steps.length}  errors: ${stats.errors.length}`);
   console.log(`Sheets:   ${sheetSummary.map(s => `${s.name}(r=${s.maxRow},c=${s.maxCol},v=${s.valueCells},f=${s.formulaCells})`).join(' | ')}`);
+  console.log(`Quality:  ${quality.ok ? 'PASS' : 'FAIL'} score=${quality.score} populatedSheets=${quality.populatedSheets} cells=${quality.totals.cells} formulas=${quality.totals.formulas}`);
   if (stats.errors.length) console.log(`Errors:\n  ${stats.errors.slice(0, 5).map(e => e.message).join('\n  ')}`);
+  if (quality.failures.length) console.log(`Quality failures:\n  ${quality.failures.slice(0, 8).join('\n  ')}`);
+  if (quality.warnings.length) console.log(`Quality warnings:\n  ${quality.warnings.slice(0, 8).join('\n  ')}`);
 
   // Dump cells of first sheet for inspection
   if (sheetSummary[0]) {
@@ -327,17 +494,9 @@ async function main() {
     console.log(`\nSample cells (${sheetSummary[0].name}):\n  ${cells.join('\n  ')}`);
   }
 
-  const sheetCells = {};
-  for (const [name, s] of workbook.sheets.entries()) {
-    const out = {};
-    for (const [addr, c] of s.entries()) {
-      out[addr] = c.formula ? { f: c.formula } : { v: c.value };
-    }
-    sheetCells[name] = out;
-  }
-  fs.writeFileSync(OUT, JSON.stringify({ turnId, scenario: SCENARIO, finalTurn, narrative, sheetSummary, sheetCells, steps: stats.steps, errors: stats.errors }, null, 2));
+  fs.writeFileSync(OUT, JSON.stringify({ turnId, scenario: SCENARIO, finalTurn, narrative, sheetSummary, sheetCells, steps: stats.steps, errors: stats.errors, quality }, null, 2));
   console.log(`\nSaved: ${OUT}`);
-  process.exit(finalTurn.error ? 2 : 0);
+  process.exit(quality.ok ? 0 : 2);
 }
 
 main().catch(e => { console.error('FAIL:', e.stack || e.message); process.exit(1); });

@@ -4,7 +4,7 @@ const { callLLM, callLLMStreaming, getLLMConfig } = require('../tools/llm');
 const logger = require('../utils/logger');
 const { executeTool, registry } = require('../tools/registry');
 const SHARED_SCHEMAS = require('../tools/schemas');
-const { validateTaskOutput } = require('./critic');
+const { validateTaskOutput, validateFormula } = require('./critic');
 const streaming = require('./streaming');
 const { initializeTools } = require('../utils/toolSearch');
 const { detectSkills } = require('../utils/skillSuggest');
@@ -151,6 +151,25 @@ function recordRuntimeSheet(context, name) {
   if (!context || !name || typeof name !== 'string') return;
   if (!context._knownSheetsRuntime) context._knownSheetsRuntime = [];
   if (!context._knownSheetsRuntime.includes(name)) context._knownSheetsRuntime.push(name);
+}
+
+function buildExistingSheetMap(context) {
+  const map = new Map();
+  const add = (n) => {
+    if (!n || typeof n !== 'string') return;
+    const norm = normalizeSheetName(n);
+    if (!norm) return;
+    if (!map.has(norm)) map.set(norm, n);
+  };
+  for (const s of (context && context.workbookSheets) || []) add(s);
+  for (const s of Object.keys((context && context.allSheetsData) || {})) add(s);
+  for (const s of (context && context._knownSheetsRuntime) || []) add(s);
+  return map;
+}
+
+function sheetExistsInWorkbookContext(context, name) {
+  if (!name || typeof name !== 'string') return false;
+  return buildExistingSheetMap(context).has(normalizeSheetName(name));
 }
 
 const READ_ONLY_TOOLS_FOR_STAGNATION = new Set([
@@ -534,6 +553,54 @@ function isFormulaSpec(spec) {
   if (spec.formula != null) return true;
   if (typeof spec.value === 'string' && spec.value.startsWith('=')) return true;
   return false;
+}
+
+function formulaFromSpec(spec) {
+  if (!spec || typeof spec !== 'object') return null;
+  if (spec.formula != null) return String(spec.formula);
+  if (typeof spec.value === 'string' && spec.value.startsWith('=')) return spec.value;
+  return null;
+}
+
+function normalizeFormulaRangeTypos(formula) {
+  if (typeof formula !== 'string') return { formula, changed: false };
+  let changed = false;
+  const normalized = formula.replace(/\bSUM\(\s*(\$?\d+)\s*:\s*(\$?[A-Z]{1,3}\$?(\d+))\s*\)/gi, (match, leftRow, rightRef, rightRow) => {
+    const row = String(leftRow).replace(/\$/g, '');
+    if (row !== String(rightRow).replace(/\$/g, '')) return match;
+    changed = true;
+    return `SUM(A${row}:${rightRef})`;
+  });
+  return { formula: normalized, changed };
+}
+
+function normalizeCellMapFormulas(cells, label) {
+  if (!cells || typeof cells !== 'object') return { ok: true, cells };
+  let out = cells;
+  const warnings = [];
+  for (const [addr, spec] of Object.entries(cells)) {
+    const formula = formulaFromSpec(spec);
+    if (!formula) continue;
+    const normalized = normalizeFormulaRangeTypos(formula);
+    const formulaToCheck = normalized.formula;
+    if (normalized.changed) {
+      if (out === cells) out = { ...cells };
+      const nextSpec = { ...spec };
+      if (spec.formula != null) nextSpec.formula = formulaToCheck;
+      else nextSpec.value = formulaToCheck;
+      out[addr] = nextSpec;
+      warnings.push(`${addr}: ${formula} -> ${formulaToCheck}`);
+    }
+    const result = validateFormula(formulaToCheck);
+    if (!result.ok) {
+      return {
+        ok: false,
+        cells: out,
+        reason: `${label}: formula ${addr} invalid: ${result.errors.join('; ')}. Rewrite it with a valid Excel A1 range (e.g. =SUM(A3:A10), =SUM(3:3), or =SUM(A:A); never mix row-only and cell references like =SUM(3:A3).`
+      };
+    }
+  }
+  return { ok: true, cells: out, warning: warnings.length ? `${label}: normalized malformed SUM range(s): ${warnings.slice(0, 3).join('; ')}` : null };
 }
 
 function isTextScalar(spec) {
@@ -4375,13 +4442,11 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       };
     }
     case 'create_sheet': {
-      // If this is a slice worker and the requested sheet is already in the
-      // slice's owned scope, the workbook_scaffold slice already created it.
-      // Re-creating an existing sheet is a no-op at the Excel layer but wastes
-      // a client round-trip; skip it and tell the agent.
+      // Scope ownership is not proof that the worksheet exists yet. Only skip
+      // creates that are already visible in the workbook/runtime context.
       const ownedScope = (context && context._sliceScope && Array.isArray(context._sliceScope.sheets_owned)) ? context._sliceScope.sheets_owned : null;
-      if (ownedScope && params && typeof params.name === 'string' && ownedScope.includes(params.name)) {
-        return { ok: true, skipped: true, reason: `sheet "${params.name}" already in slice scope (scaffolded upstream)`, sheetsCreated: [] };
+      if (ownedScope && params && typeof params.name === 'string' && ownedScope.includes(params.name) && sheetExistsInWorkbookContext(context, params.name)) {
+        return { ok: true, skipped: true, reason: `sheet "${params.name}" already exists in workbook/runtime context`, sheetsCreated: [] };
       }
       // Layer B — block creating a near-duplicate of an existing sheet.
       if (params && typeof params.name === 'string') {
@@ -4412,20 +4477,20 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
           unique.push(trimmed);
         }
       }
-      // Same scope-aware skip as create_sheet: if a slice worker asks to bulk
-      // create sheets that are all in its scope, it's wasted work.
+      // Same existence-aware skip as create_sheet: scope ownership alone does
+      // not mean the sheet has been created in Excel.
       const ownedScopeBulk = (context && context._sliceScope && Array.isArray(context._sliceScope.sheets_owned)) ? context._sliceScope.sheets_owned : null;
       let filtered = unique;
-      let skippedInScope = [];
+      let skippedExisting = [];
       if (ownedScopeBulk) {
         filtered = [];
         for (const n of unique) {
-          if (ownedScopeBulk.includes(n)) skippedInScope.push(n);
+          if (ownedScopeBulk.includes(n) && sheetExistsInWorkbookContext(context, n)) skippedExisting.push(n);
           else filtered.push(n);
         }
       }
       if (filtered.length === 0) {
-        return { ok: true, skipped: true, reason: 'all requested sheets already in slice scope (scaffolded upstream)', sheetsCreated: [], skippedInScope };
+        return { ok: true, skipped: true, reason: 'all requested sheets already exist in workbook/runtime context', sheetsCreated: [], skippedExisting };
       }
       // Layer B — reject names that near-duplicate an existing sheet
       {
@@ -4440,7 +4505,7 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
         ok: true,
         sheetsCreated: filtered,
         count: filtered.length,
-        skippedInScope: skippedInScope.length > 0 ? skippedInScope : undefined,
+        skippedExisting: skippedExisting.length > 0 ? skippedExisting : undefined,
         actions: filtered.map(name => ({ type: 'createSheet', name }))
       };
     }
@@ -4572,6 +4637,13 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       for (let i = 0; i < splitWrite.writes.length; i++) {
         const write = splitWrite.writes[i];
         const label = splitWrite.writes.length > 1 ? `set_cell_range part ${i + 1}` : 'set_cell_range';
+        const formulaCheck = normalizeCellMapFormulas(write.cells, label);
+        if (!formulaCheck.ok) {
+          logger.warn(`[AgentLoop] ${formulaCheck.reason}`);
+          return { error: formulaCheck.reason };
+        }
+        if (formulaCheck.warning) logger.warn(`[AgentLoop] ${formulaCheck.warning}`);
+        write.cells = formulaCheck.cells;
         const floodCheck = detectScalarTextFloodFill(write.cells, write.copyToRange);
         if (!floodCheck.ok) {
           logger.warn(`[AgentLoop] ${floodCheck.reason}`);
@@ -4742,6 +4814,13 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
           const label = splitWrite.writes.length > 1
             ? `bulk_set_cell_ranges entry ${i} part ${part + 1}`
             : `bulk_set_cell_ranges entry ${i}`;
+          const formulaCheck = normalizeCellMapFormulas(write.cells, label);
+          if (!formulaCheck.ok) {
+            entryError = formulaCheck.reason;
+            break;
+          }
+          if (formulaCheck.warning) logger.warn(`[AgentLoop] ${formulaCheck.warning}`);
+          write.cells = formulaCheck.cells;
           const floodCheck = detectScalarTextFloodFill(write.cells, write.copyToRange);
           if (!floodCheck.ok) {
             entryError = floodCheck.reason;

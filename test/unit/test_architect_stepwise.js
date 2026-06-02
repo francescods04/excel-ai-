@@ -259,6 +259,46 @@ async function testDenseMaterialWriteAutoCompletesSlice() {
   console.log('OK dense material writes auto-complete slice without waiting for ceremonial done');
 }
 
+async function testWritableSliceDoneWithoutWritesFails() {
+  const state = initArchitectRun(blueprint([
+    {
+      id: 'empty',
+      title: 'Empty Writer',
+      deps: [],
+      scope: { sheets_owned: ['Empty'], ranges_owned: ['Empty!A1:B10'], may_read_from: [] },
+      instructions: 'Write real cells before done.',
+      estimated_iters: 4
+    },
+    {
+      id: 'downstream',
+      title: 'Downstream',
+      deps: ['empty'],
+      scope: { sheets_owned: ['Downstream'], ranges_owned: ['Downstream!A1:B10'], may_read_from: ['Empty!A1:B10'] },
+      instructions: 'Depends on Empty.',
+      estimated_iters: 4
+    }
+  ]));
+  const mock = makeStepMock((agent) => ({
+    state: { ...agent, status: 'completed', summary: 'claimed done', iteration: 2 },
+    control: 'done',
+    payload: { summary: 'claimed done' }
+  }));
+
+  const result = await advanceArchitectRun(state, {
+    context: {},
+    initAgentRunFn: initAgentRunMock,
+    runAgentStepFn: mock.runAgentStepFn,
+    maxParallel: 1
+  });
+
+  assert.strictEqual(result.control, 'done');
+  assert.strictEqual(result.state.sliceStates.empty, 'failed');
+  assert.strictEqual(result.state.sliceResults.empty.status, 'failed_no_writes');
+  assert.match(result.state.sliceResults.empty.error, /without writing any cells/);
+  assert.strictEqual(result.state.sliceStates.downstream, 'skipped');
+  console.log('OK writable slice done without writes fails and skips dependents');
+}
+
 async function testSliceWorkerPromptForcesReadBeforeWriteAndBansOfficeJs() {
   const bp = blueprint([
     { id: 'a',  title: 'A', deps: [], scope: { sheets_owned: ['A'], may_read_from: [] }, instructions: 'Build A', estimated_iters: 4 },
@@ -359,6 +399,7 @@ async function testLegacySliceWithoutActionsUsesWorkerLlm() {
   await testMultiSliceClientReadBatch();
   await testActionsTakePriorityOverReads();
   await testDenseMaterialWriteAutoCompletesSlice();
+  await testWritableSliceDoneWithoutWritesFails();
   await testSliceWorkerPromptForcesReadBeforeWriteAndBansOfficeJs();
   await testDeterministicSliceActionsBypassWorkerLlm();
   await testLegacySliceWithoutActionsUsesWorkerLlm();
