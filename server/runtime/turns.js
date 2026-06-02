@@ -2681,6 +2681,12 @@ async function executeArchitectParallelTurn(turnId) {
   return _getTurnRef(turnId);
 }
 
+// Tracks in-flight planTurn promises so startTurnAwaitPlan can await them.
+// Cleared on resolve/reject. Survives within a single Node process; on Vercel
+// serverless each function instance gets its own map but that's fine: the
+// same instance serves both startTurn (sync init) and the await.
+const _pendingPlanPromises = new Map();
+
 function startTurn(message, context, parentTurnId = null, options = {}) {
   const turn = buildTurn(message, context, parentTurnId, options);
   saveTurn(turn);
@@ -2731,9 +2737,11 @@ function startTurn(message, context, parentTurnId = null, options = {}) {
   // crash the process; the planTurn error path also emits 'turnCompleted'
   // with status=error so SSE clients see it.
   planningPromise.catch(err => { logger.warn(`[Turn] background planTurn failed: ${err.message}`); });
-  // Attach the promise to the turn object so callers can await it without
-  // changing the existing function signature.
-  turn._planningPromise = planningPromise;
+  // Track the promise in a module-level map so startTurnAwaitPlan can await
+  // it. Attaching to `turn` itself didn't work because the loadTurn() return
+  // is a fresh snapshot without local-variable annotations.
+  _pendingPlanPromises.set(turn.id, planningPromise);
+  planningPromise.finally(() => { _pendingPlanPromises.delete(turn.id); });
   return loadTurn(turn.id);
 }
 
@@ -2742,8 +2750,9 @@ function startTurn(message, context, parentTurnId = null, options = {}) {
 // with the response.
 async function startTurnAwaitPlan(message, context, parentTurnId = null, options = {}) {
   const turn = startTurn(message, context, parentTurnId, options);
-  if (turn && turn._planningPromise) {
-    try { await turn._planningPromise; } catch (_) { /* logged in startTurn */ }
+  const pending = _pendingPlanPromises.get(turn.id);
+  if (pending) {
+    try { await pending; } catch (_) { /* logged in startTurn */ }
   }
   return loadTurn(turn.id);
 }
