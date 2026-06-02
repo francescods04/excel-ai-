@@ -579,7 +579,8 @@ function buildActionErrorObservation(record) {
     const loc = `${e.sheet || ''}${e.target ? '!' + e.target : ''}` || '?';
     const formula = e.formula ? ` (formula: ${e.formula})` : '';
     const value = !e.formula && e.value ? ` (value: ${e.value})` : '';
-    return `${i + 1}. ${loc} — ${e.message || 'errore Excel'}${formula}${value}`;
+    const copyTo = e.copyToRange ? ` (copyToRange: ${e.copyToRange})` : '';
+    return `${i + 1}. ${loc} — ${e.message || 'errore Excel'}${formula}${value}${copyTo}`;
   }).join('\n');
   const header = `EXCEL WRITE ERRORS — last batch (taskId=${record.taskId}, ${record.errorCount || errs.length} of ${record.actionCount} actions failed). The previous tool call landed in Excel but produced invalid results. Read the offending cells if you need context, then emit corrected writes (fix formulas, references, or values). Do NOT call done while these errors remain.`;
   return lines ? `${header}\n${lines}` : header;

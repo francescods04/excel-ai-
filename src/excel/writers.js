@@ -1156,14 +1156,40 @@ async function executeActions(actions, updateStepsPanel, _attempt = 0) {
                       ? Object.keys(single.cells).slice(0, 4).join(',')
                       : null);
                   const sheetHint = single.sheet || single.sheetName || null;
+                  // Extract first formula/value so the LLM gets actionable
+                  // context rather than just "argument invalid". Without this
+                  // the agent loop iterates blindly retrying the same payload.
+                  let formulaHint = null;
+                  let valueHint = null;
+                  let copyToHint = single.copyToRange || null;
+                  if (single.cells && typeof single.cells === 'object') {
+                    const firstKey = Object.keys(single.cells)[0];
+                    const spec = firstKey ? single.cells[firstKey] : null;
+                    if (spec) {
+                      if (spec.formula) formulaHint = String(spec.formula).slice(0, 200);
+                      else if (typeof spec.value === 'string' && spec.value.startsWith('=')) formulaHint = spec.value.slice(0, 200);
+                      else if (spec.value !== undefined) valueHint = String(spec.value).slice(0, 80);
+                    }
+                  } else if (single.formula) {
+                    formulaHint = String(single.formula).slice(0, 200);
+                  } else if (single.value !== undefined) {
+                    valueHint = String(single.value).slice(0, 80);
+                  }
                   result.errors.push({
                     type: single.type,
                     sheet: sheetHint,
                     target: targetHint,
+                    formula: formulaHint,
+                    value: valueHint,
+                    copyToRange: copyToHint,
                     message: singleErr.message,
                     queueBatchKey: single[QUEUE_BATCH_KEY] || null
                   });
-                  addLog(`Azione ${single.type} fallita isolata (sheet=${sheetHint || '?'}, target=${targetHint || '?'}): ${singleErr.message}`, 'error');
+                  const extra = formulaHint
+                    ? ` formula="${formulaHint.slice(0, 80)}"`
+                    : (valueHint ? ` value="${valueHint.slice(0, 40)}"` : '');
+                  const copy = copyToHint ? ` copyTo=${copyToHint}` : '';
+                  addLog(`Azione ${single.type} fallita isolata (sheet=${sheetHint || '?'}, target=${targetHint || '?'}${extra}${copy}): ${singleErr.message}`, 'error');
                 }
               }
             } else {

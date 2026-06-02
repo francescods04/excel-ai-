@@ -423,13 +423,17 @@
       src.addEventListener('planUpdated', (e) => {
         try {
           const data = JSON.parse(e.data);
-          if (data.tasks && !planReceived) {
+          if (!data.tasks || planReceived) return;
+          // Dedupe across SSE reconnects (planReceived is per-EventSource).
+          if (Array.isArray(currentPlanTasks) && currentPlanTasks.length) {
             planReceived = true;
-            removeMessage(planMsgId);
-            currentPlanTasks = data.tasks;
-            addMessage(`Piano generato: <strong>${escapeHtml(turnId)}</strong> (${data.tasks.length} task)`, 'bot');
-            renderTaskTree(data.tasks);
+            return;
           }
+          planReceived = true;
+          removeMessage(planMsgId);
+          currentPlanTasks = data.tasks;
+          addMessage(`Piano generato: <strong>${escapeHtml(turnId)}</strong> (${data.tasks.length} task)`, 'bot');
+          renderTaskTree(data.tasks);
         } catch (err) {}
       });
 

@@ -1014,15 +1014,22 @@ function openTurnEventStream(turnId, planMsgId) {
     src.addEventListener('planUpdated', (e) => {
       try {
         const data = JSON.parse(e.data);
-        if (data.tasks && !planReceived) {
+        if (!data.tasks) return;
+        // Suppress during SSE history replay — UI already aligned.
+        // Also dedupe across reconnects via module-level state.currentPlanTasks
+        // (planReceived is local to setupListeners and resets on each new EventSource).
+        if (planReceived || inReplay) return;
+        if (Array.isArray(state.currentPlanTasks) && state.currentPlanTasks.length) {
           planReceived = true;
-          removeMessage(planMsgId);
-          state.currentPlanTasks = data.tasks;
-          addMessage(`Piano generato: <strong>${escapeHtml(turnId)}</strong> (${data.tasks.length} task)`, 'bot');
-          renderTaskTree(data.tasks);
-          updateProgressBadge(data.tasks.length);
-          showToast(`Piano: ${data.tasks.length} task`, 'info');
+          return;
         }
+        planReceived = true;
+        removeMessage(planMsgId);
+        state.currentPlanTasks = data.tasks;
+        addMessage(`Piano generato: <strong>${escapeHtml(turnId)}</strong> (${data.tasks.length} task)`, 'bot');
+        renderTaskTree(data.tasks);
+        updateProgressBadge(data.tasks.length);
+        showToast(`Piano: ${data.tasks.length} task`, 'info');
       } catch (err) {}
     });
 

@@ -2520,7 +2520,11 @@ function tryRecoverTruncatedAgentJson(raw) {
     if (ch === '{' || ch === '[') stack.push(ch);
     else if (ch === '}' || ch === ']') stack.pop();
   }
-  if (stack.length === 0) return null; // JSON was already complete — JSON.parse should have handled it.
+  if (stack.length === 0) {
+    // Brackets balanced but JSON.parse still failed → likely a missing-comma
+    // syntax error inside the body. Try to repair adjacent }{ / ]{ / ]" etc.
+    return tryRecoverMissingCommas(trimmed);
+  }
   // Build the suffix to close. Walk the stack from outermost to innermost
   // and emit the matching closers in reverse. If the LAST open was a string
   // (i.e. the truncation happened inside a string literal), also emit a
@@ -2539,6 +2543,44 @@ function tryRecoverTruncatedAgentJson(raw) {
     if (!parsed || typeof parsed !== 'object') return null;
     // Recognise the agent tool-call shape. If neither tool nor params is
     // present it's not actionable, so fall back to the normal parse-fail path.
+    if (typeof parsed.tool !== 'string' && !parsed.params) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+// LLMs occasionally emit "{...} {...}" or "...] [..." inside arrays, dropping
+// the comma. Inject a comma between any close-bracket/brace followed (modulo
+// whitespace) by an opening brace/bracket/quote. Skip work inside string
+// literals. Cheap, idempotent, and safe to attempt as a last-resort repair
+// before giving up and forcing the LLM to retry.
+function tryRecoverMissingCommas(raw) {
+  let out = '';
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    out += ch;
+    if (escape) { escape = false; continue; }
+    if (ch === '\\' && inString) { escape = true; continue; }
+    let justClosedString = false;
+    if (ch === '"') {
+      if (inString) justClosedString = true;
+      inString = !inString;
+    }
+    if (inString) continue;
+    if (ch === '}' || ch === ']' || justClosedString) {
+      let j = i + 1;
+      while (j < raw.length && (raw[j] === ' ' || raw[j] === '\n' || raw[j] === '\r' || raw[j] === '\t')) j++;
+      if (j < raw.length && (raw[j] === '{' || raw[j] === '[' || raw[j] === '"')) {
+        out += ',';
+      }
+    }
+  }
+  try {
+    const parsed = JSON.parse(out);
+    if (!parsed || typeof parsed !== 'object') return null;
     if (typeof parsed.tool !== 'string' && !parsed.params) return null;
     return parsed;
   } catch {
