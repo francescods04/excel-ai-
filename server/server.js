@@ -455,7 +455,13 @@ app.post('/api/turn/start', authenticate, quotaCheck, async (req, res) => {
     const overlay = speedModeStrategyOverlay(speedMode);
     const effectiveModelOverride = modelOverride || overlay.modelOverride || undefined;
 
-    const turn = turns.startTurn(message, context, parentTurnId || null, {
+    // Detect serverless deployment: Vercel sends fire-and-forget background
+    // tasks to die when the response ends. Block on planning so the client
+    // doesn't poll a half-built turn that never advances. Local servers can
+    // still use the async path (env VERCEL is set on Vercel only).
+    const isServerless = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NETLIFY);
+    const startFn = isServerless ? turns.startTurnAwaitPlan : turns.startTurn;
+    const turn = await Promise.resolve(startFn(message, context, parentTurnId || null, {
       modelOverride: effectiveModelOverride,
       userId: req.userId,
       speedMode: overlay.speedMode,
@@ -463,7 +469,7 @@ app.post('/api/turn/start', authenticate, quotaCheck, async (req, res) => {
       postWriteCritic: overlay.postWriteCritic,
       executionEngineOverride: executionEngine,
       forceWorkerTier: forceWorkerTier === 'flash' || forceWorkerTier === 'pro' ? forceWorkerTier : null
-    });
+    }));
     res.json({
       turnId: turn.id,
       status: turn.status,

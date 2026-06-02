@@ -2715,7 +2715,11 @@ function startTurn(message, context, parentTurnId = null, options = {}) {
   });
   emitItemStarted(turn.id, planItem);
 
-  void runWithExecutionContext({
+  // Kick off planning. Returns a promise the caller can await for sync mode
+  // (required on Vercel serverless — `void` fires die when the response is
+  // sent and the function instance terminates). Local long-running servers
+  // can still use the sync wrapper (startTurn) and ignore the promise.
+  const planningPromise = runWithExecutionContext({
     turnId: turn.id,
     userId: turn.userId || null,
     parentTurnId: turn.parentTurnId || null,
@@ -2723,6 +2727,24 @@ function startTurn(message, context, parentTurnId = null, options = {}) {
     workflow: 'turn',
     source: 'turn.start',
   }, () => planTurn(turn.id));
+  // Swallow unhandled rejection so old callers that don't await still don't
+  // crash the process; the planTurn error path also emits 'turnCompleted'
+  // with status=error so SSE clients see it.
+  planningPromise.catch(err => { logger.warn(`[Turn] background planTurn failed: ${err.message}`); });
+  // Attach the promise to the turn object so callers can await it without
+  // changing the existing function signature.
+  turn._planningPromise = planningPromise;
+  return loadTurn(turn.id);
+}
+
+// Same as startTurn but resolves only after planTurn completes. Use on
+// serverless platforms (Vercel) where fire-and-forget background tasks die
+// with the response.
+async function startTurnAwaitPlan(message, context, parentTurnId = null, options = {}) {
+  const turn = startTurn(message, context, parentTurnId, options);
+  if (turn && turn._planningPromise) {
+    try { await turn._planningPromise; } catch (_) { /* logged in startTurn */ }
+  }
   return loadTurn(turn.id);
 }
 
@@ -3465,6 +3487,7 @@ function drainSteerQueue(turnId) {
 
 module.exports = {
   startTurn,
+  startTurnAwaitPlan,
   approveTurn,
   stepTurn,
   resolveExecutionEngine,
