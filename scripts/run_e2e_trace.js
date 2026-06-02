@@ -16,7 +16,9 @@ const arg = (n, d) => { const f = process.argv.slice(2).find(a => a.startsWith(`
 const SERVER = (arg('server', 'https://excel-six-plum.vercel.app')).replace(/\/$/, '');
 const EMAIL = arg('email', 'francescojordan04@gmail.com');
 const SCENARIO = arg('scenario', 'sumcol');
-const TIMEOUT_MS = (Number(arg('timeout', '300')) || 300) * 1000;
+const SCENARIO_DEFAULT_TIMEOUTS = { sumcol: 120, simple: 60, dcf: 600, vairano: 2700 };
+const TIMEOUT_MS = (Number(arg('timeout', String(SCENARIO_DEFAULT_TIMEOUTS[arg('scenario','sumcol')] || 300))) || 300) * 1000;
+const RESUME_TURN_ID = arg('resume', null); // optional: reattach to existing turn
 const OUT = arg('out', `/tmp/e2e_trace_${SCENARIO}_${Date.now()}.json`);
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -121,8 +123,8 @@ async function stepLoop(turnId, token) {
   const savePartial = () => {
     try { fs.writeFileSync(partialPath, JSON.stringify({ turnId, scenario: SCENARIO, partial: true, steps: stats.steps, errors: stats.errors, sheetSnapshot: [...workbook.sheets.keys()] }, null, 2)); } catch (_) {}
   };
-  for (let i = 0; i < 500; i++) {
-    if (i % 10 === 0 && i > 0) savePartial();
+  for (let i = 0; i < 1000; i++) {
+    if (i % 5 === 0 && i > 0) savePartial();
     if (Date.now() - t0 > TIMEOUT_MS) { stats.errors.push({ ts: now(), message: 'timeout' }); break; }
     const body = nextClientResult ? { turnId, clientResult: nextClientResult, stepSeq } : { turnId, stepSeq };
     let r;
@@ -142,6 +144,11 @@ async function stepLoop(turnId, token) {
     if (typeof newSeq === 'number') stepSeq = newSeq;
     stats.steps.push({ ts: now(), control, payloadKind: payload ? Object.keys(payload).slice(0,5).join(',') : '' });
     if (payload && Array.isArray(payload.actions) && payload.actions.length) for (const a of payload.actions) applyAction(a);
+    // Periodic progress log so a long-running test doesn't look hung.
+    if (i % 10 === 0 && i > 0) {
+      const elapsed = Math.round((Date.now() - t0) / 1000);
+      console.log(`   [step ${i}] ${elapsed}s elapsed, control=${control}, sheets=${workbook.sheets.size}`);
+    }
     if (control === 'done') return;
     if (control === 'aborted') { stats.errors.push({ ts: now(), message: `aborted: ${payload?.reason || ''}` }); return; }
     if (control === 'paused') { nextClientResult = { results: [{ requestId: payload?.requestId || 'q', response: { data: { answer: 'continue' } } }] }; continue; }
@@ -172,16 +179,43 @@ async function main() {
   console.log('1) mint token...');
   const token = await mintAccessToken(EMAIL);
 
-  console.log('2) start turn...');
-  const startResp = await request('POST', `${SERVER}/api/turn/start`,
-    { Authorization: `Bearer ${token}` },
-    { message: OBJECTIVE, context: { activeSheet: 'Sheet1', workbookSheets: ['Sheet1'] } });
-  if (startResp.status !== 200) { console.error(`start [${startResp.status}]: ${startResp.body.slice(0, 400)}`); process.exit(1); }
-  const turnId = startResp.json.turnId;
-  console.log(`   turnId: ${turnId}`);
+  let turnId;
+  if (RESUME_TURN_ID) {
+    turnId = RESUME_TURN_ID;
+    console.log(`2) RESUME existing turn: ${turnId}`);
+    // Sanity: ensure turn is fetchable (with retries for 404 propagation).
+    let foundStatus = null;
+    for (let k = 0; k < 5; k++) {
+      const r = await request('GET', `${SERVER}/api/turn/${turnId}`, { Authorization: `Bearer ${token}` });
+      if (r.status === 200 && r.json) { foundStatus = r.json.status; break; }
+      console.log(`   resume fetch [${r.status}], retry ${k+1}/5...`);
+      await sleep(2000);
+    }
+    if (!foundStatus) { console.error(`Resume failed: turn ${turnId} not fetchable`); process.exit(1); }
+    console.log(`   resumed at status=${foundStatus}`);
+  } else {
+    console.log('2) start turn...');
+    const startResp = await request('POST', `${SERVER}/api/turn/start`,
+      { Authorization: `Bearer ${token}` },
+      { message: OBJECTIVE, context: { activeSheet: 'Sheet1', workbookSheets: ['Sheet1'] } });
+    if (startResp.status !== 200) { console.error(`start [${startResp.status}]: ${startResp.body.slice(0, 400)}`); process.exit(1); }
+    turnId = startResp.json.turnId;
+    console.log(`   turnId: ${turnId}`);
 
-  // Wait for approval gate (Vairano architect blueprint ~30s, allow up to 4 min)
-  for (let i = 0; i < 160; i++) {
+    // 404 retry — Supabase eventual consistency means the GET right after
+    // start can return "not found" for 500-2000ms. Retry up to 5 times.
+    let initialOk = false;
+    for (let k = 0; k < 5; k++) {
+      await sleep(1500);
+      const r = await request('GET', `${SERVER}/api/turn/${turnId}`, { Authorization: `Bearer ${token}` });
+      if (r.status === 200 && r.json && r.json.status) { initialOk = true; break; }
+      console.log(`   initial fetch [${r.status}], retry ${k+1}/5...`);
+    }
+    if (!initialOk) console.warn(`   ⚠ turn not yet visible after 5 retries; continuing anyway`);
+  }
+
+  // Wait for approval gate (Vairano architect blueprint ~30s, allow up to 5 min)
+  for (let i = 0; i < 200; i++) {
     await sleep(1500);
     const r = await request('GET', `${SERVER}/api/turn/${turnId}`, { Authorization: `Bearer ${token}` });
     const t = r.json || {};
@@ -193,7 +227,7 @@ async function main() {
     if (t.status === 'running' || t.status === 'completed' || t.status === 'error') break;
   }
 
-  console.log('4) step loop...');
+  console.log(`4) step loop (timeout ${Math.round(TIMEOUT_MS/60000)}min)...`);
   await stepLoop(turnId, token);
 
   const finalTurn = (await request('GET', `${SERVER}/api/turn/${turnId}`, { Authorization: `Bearer ${token}` })).json || {};
