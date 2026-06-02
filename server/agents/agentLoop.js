@@ -4675,13 +4675,19 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
     }
     case 'bulk_set_cell_ranges': {
       // LLM kept passing "ranges" instead of "writes". Accept either.
-      const writes = Array.isArray(params && (params.writes || params.ranges)) ? (params.writes || params.ranges) : [];
-      if (writes.length === 0) {
+      const writesRaw = Array.isArray(params && (params.writes || params.ranges)) ? (params.writes || params.ranges) : [];
+      if (writesRaw.length === 0) {
         return { error: 'bulk_set_cell_ranges: "writes" must be a non-empty array (alias: "ranges").' };
       }
-      if (writes.length > 32) {
-        return { error: `bulk_set_cell_ranges: max 32 writes per call, got ${writes.length}` };
-      }
+      // Accept-and-truncate when oversized: a hard-reject made the LLM enter
+      // a retry loop (try 103 → reject → try 33 → reject → try 2 → parse
+      // error → function timeout). Process the first BULK_MAX deterministically
+      // and report the remaining count so the model emits the leftover in its
+      // next call. Idempotent: a follow-up bulk simply continues from where
+      // this one stopped.
+      const BULK_MAX = 32;
+      const writes = writesRaw.slice(0, BULK_MAX);
+      const truncatedCount = writesRaw.length - writes.length;
       // Zero-deterministic-fill gate: aggregate scalar values across all writes
       // and reject if any column would receive the same literal in >= 20 rows.
       const paddingCheck = detectPaddingRows(writes);
@@ -4788,7 +4794,11 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
         cellsTotal: accepted.reduce((s, a) => s + a.cellCount, 0),
         warnings: accepted.map(a => a.warning).filter(Boolean),
         errors: errors.length ? errors : undefined,
-        actions
+        actions,
+        truncatedCount: truncatedCount || undefined,
+        _message: truncatedCount > 0
+          ? `Bulk overflow auto-handled: applied first ${writes.length} writes (max ${BULK_MAX} per call); ${truncatedCount} entries from your batch were NOT processed. Issue a follow-up bulk_set_cell_ranges call with those remaining ${truncatedCount} writes. Do NOT re-send the first ${writes.length}.`
+          : undefined
       };
     }
     case 'bulk_set_format': {

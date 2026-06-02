@@ -1182,6 +1182,12 @@ function autoLoadDomainSkill(objective) {
 // retries the original 60s often timed out the WHOLE attempt → fallback to
 // single agent_loop, losing parallel slicing entirely.
 const ARCHITECT_DEFAULT_TIMEOUT_MS = Math.max(60000, Number(process.env.ARCHITECT_TIMEOUT_MS) || 120000);
+// Total wall-clock budget for the entire blueprint generation (initial call
+// + all repair attempts). Vercel functions die at 300s; staying ≤240s leaves
+// headroom for the HTTP response. If the budget is exceeded, the architect
+// throws and runtime falls back to agent_loop — better a degraded mode than
+// a hung "Turn non in modalità stepwise" failure that loses the whole run.
+const ARCHITECT_WALL_BUDGET_MS = Math.max(120000, Number(process.env.ARCHITECT_WALL_BUDGET_MS) || 240000);
 const ARCHITECT_MAX_REPAIR_ATTEMPTS = Math.max(1, Number(process.env.ARCHITECT_MAX_REPAIR_ATTEMPTS) || 2);
 
 async function generateBlueprint({ objective, context = {}, triage = null, callLLMFn = callLLM, modelOverride = null } = {}) {
@@ -1220,6 +1226,9 @@ async function generateBlueprint({ objective, context = {}, triage = null, callL
     let lastRaw = llmRaw;
     let repaired = false;
     for (let repairAttempt = 1; repairAttempt <= ARCHITECT_MAX_REPAIR_ATTEMPTS; repairAttempt++) {
+      if (Date.now() - start > ARCHITECT_WALL_BUDGET_MS) {
+        throw new Error(`Architect wall-clock budget (${ARCHITECT_WALL_BUDGET_MS}ms) exceeded after ${repairAttempt - 1} repair attempt(s); aborting to leave headroom for HTTP response.`);
+      }
       const retryable = lastValidation.errors.some(err => /verbatim menu coverage|formula references sheet|unquoted sheet reference|density coverage failed|actions\[\d+\]|copyToRange|unbounded|invalid A1 range|format target|finite A1 range/i.test(err));
       if (!retryable) break;
       const repairUserContent = `${userContent}\n\nVALIDATION FAILED${repairAttempt > 1 ? ` AGAIN (repair attempt ${repairAttempt})` : ''}. Regenerate the full JSON blueprint fixing these errors:\n- ${lastValidation.errors.join('\n- ')}\n\nMake the smallest structural change that fixes the errors; do not add thin filler slices.\nFor menu coverage errors, add a deterministic Menu/Menu Detail slice whose actions write every extracted item and price exactly, then build revenue formulas from that sheet.\nFor density coverage errors, make at least four major operating sheets reach the requested row depth with finite formula copyToRange blocks (for example A6:G1005). Do not satisfy a 1000-rows-per-sheet request with only one dense detail sheet.\nFor action-shape errors, emit only finite single A1 ranges; split disjoint formats into multiple formats instead of comma-separated targets. copyToRange source cells must be formulas, so write static headers/labels in a separate action and copy formulas only.\nFor formula reference errors, use the exact declared sheet names from scope/actions. If the sheet is "Cost Breakdown", formulas must reference ='Cost Breakdown'!A1 or 'Cost Breakdown'!A1, never CostBreakdown!A1.`;
