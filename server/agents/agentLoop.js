@@ -507,7 +507,7 @@ function detectPaddingRows(writes) {
           return {
             ok: false,
             sheet, col, value: preview, count: rowSet.size,
-            reason: `Write rejected: column ${sheet === '__active' ? '' : sheet + '!'}${col} would receive the literal value "${preview}" repeated in ${rowSet.size} distinct rows. This is padding (filler junk to "reach 1000 rows"), not real data. Zero-deterministic-fill policy: write only rows containing MEANINGFUL data; use formulas/copyToRange/index arithmetic for varying values across rows. If 1000 rows are required, each row must carry a distinct piano/mese/voce/scenario — not the same scalar repeated. Observed in 2026-06-01 Vairano Per-Floor Detail where "Scavi e movimentazione terra" appeared in 60 contiguous rows per piano. Drop the padding; if the sheet has only N real rows of data, stop at N rows and call done.`
+            reason: `Write rejected: column ${sheet === '__active' ? '' : sheet + '!'}${col} would receive the literal value "${preview}" repeated in ${rowSet.size} distinct rows. This is padding (filler to "reach 1000 rows"), not real data. Zero-deterministic-fill policy: write only rows containing MEANINGFUL data; use formulas/copyToRange/index arithmetic for varying values across rows. If 1000 rows are required, each row must carry a distinct piano/mese/voce/scenario — not the same scalar repeated. Drop the padding; if the sheet has only N real rows of data, stop at N rows and call done.`
           };
         }
       }
@@ -567,7 +567,7 @@ function detectDegenerateCopySeed(cells, copyToRange) {
     if (coeff === 1) continue; // identity is a noop chain — copy through
     return {
       ok: false,
-      reason: `set_cell_range rejected: degenerate copy seed. Seed at "${seedAddr}" formula "${formula.slice(0, 80)}" references "${fullRef}" (${delta} row${delta > 1 ? 's' : ''} above the seed, INSIDE the copyToRange destination "${copyToRange}") with a multiplicative coefficient ~${coeff}. Over ${rows} rows this compounds exponentially — row ${destBounds.r2} would be approximately seed × ${coeff}^${rows}, which underflows to ~0 or overflows to #NUM!. Observed in the 2026-06-01 Vairano Per-Floor Detail slice where 1000 mq decayed to 1E-97 mq across 1000 rows. Fix: use an ABSOLUTE reference to a stable upstream constant (e.g. "=$A$2 * (1 + (ROW()-${seedRow}) * ${coeff})") or index arithmetic from the seed row. Never chain a relative ref to the previous row inside the same copyToRange.`
+      reason: `set_cell_range rejected: degenerate copy seed. Seed at "${seedAddr}" formula "${formula.slice(0, 80)}" references "${fullRef}" (${delta} row${delta > 1 ? 's' : ''} above the seed, INSIDE the copyToRange destination "${copyToRange}") with a multiplicative coefficient ~${coeff}. Over ${rows} rows this compounds exponentially — row ${destBounds.r2} would be approximately seed × ${coeff}^${rows}, which underflows to ~0 or overflows to #NUM!. Fix: use an ABSOLUTE reference to a stable upstream constant (e.g. "=$A$2 * (1 + (ROW()-${seedRow}) * ${coeff})") or index arithmetic from the seed row. Never chain a relative ref to the previous row inside the same copyToRange.`
     };
   }
   return { ok: true };
@@ -3500,7 +3500,7 @@ async function runAgentLoop(objective, context, options = {}) {
       if (legacyBulkAlt) {
         const recentLegacy = recentToolTrail.slice(-2).map(e => e.toolName);
         if (recentLegacy.length === 2 && recentLegacy.every(n => n === toolName)) {
-          const forceMsg = `STAGNATION GUARD: "${toolName}" was called 3 times in a row. Your NEXT call MUST be "${legacyBulkAlt}" with ALL remaining items in one payload. Sequential one-at-a-time calls have killed prior runs by exhausting the iteration budget (2026-06-01 Vairano pro bench: 79 sequential set_cell_range × 12s/iter = 16 min wasted). This call is rejected; retry as ${legacyBulkAlt}.`;
+          const forceMsg = `STAGNATION GUARD: "${toolName}" was called 3 times in a row. Your NEXT call MUST be "${legacyBulkAlt}" with ALL remaining items in one payload. Sequential one-at-a-time calls exhaust the iteration budget without making proportionate progress. This call is rejected; retry as ${legacyBulkAlt}.`;
           logger.warn(`[AgentLoop] ${forceMsg}`);
           messages.push(makeUserMessage(forceMsg));
           results.push({ type: 'error', error: forceMsg, blocked: true, tool: toolName });
@@ -5262,7 +5262,7 @@ function detectFormatErrorLoop(results, currentToolName) {
 function bulkNudgeFor(lastN) {
   if (lastN.length !== 2) return null;
   if (lastN.every(n => n === 'set_cell_range')) {
-    return 'BATCH HINT (HARD): you just called set_cell_range twice. Your NEXT write MUST be bulk_set_cell_ranges with ALL remaining sections in one call (cap 32 entries). Sequential set_cell_range calls in a slice worker burn the iter budget and have cascade-killed downstream waves in prior runs. After all data lands, run ONE bulk_set_format pass.';
+    return 'BATCH HINT (HARD): you just called set_cell_range twice. Your NEXT write MUST be bulk_set_cell_ranges with ALL remaining sections in one call (cap 32 entries). Sequential set_cell_range calls in a slice worker burn the iter budget and cascade-kill downstream waves. After all data lands, run ONE bulk_set_format pass.';
   }
   if (lastN.every(n => n === 'bulk_set_cell_ranges')) {
     return 'BATCH HINT: you just called bulk_set_cell_ranges twice in a row. Keep going with bulk_set_cell_ranges for any further sections — but if you have many small remaining sections, consider whether they can be combined into a single larger bulk call (up to 32 entries per call). Sliced workers run fastest when each call writes dozens of cells, not 1-2 entries.';
@@ -5749,7 +5749,7 @@ async function runAgentStep(state, clientResult, deps = {}) {
     if (bulkReplacement) {
       const recent = state.recentToolTrail.slice(-2).map(e => e.toolName);
       if (recent.length === 2 && recent.every(n => n === toolName)) {
-        const forceMsg = `STAGNATION GUARD: "${toolName}" was called 3 times in a row. Your NEXT call MUST be "${bulkReplacement}" with ALL remaining items in one payload. Sequential one-at-a-time calls have killed prior runs by exhausting the iteration budget (2026-06-01 Vairano pro bench: 79 sequential set_cell_range × 12s/iter = 16min wasted that one bulk_set_cell_ranges of 30 entries would have done in 1 iter). This call is rejected; retry as ${bulkReplacement}.`;
+        const forceMsg = `STAGNATION GUARD: "${toolName}" was called 3 times in a row. Your NEXT call MUST be "${bulkReplacement}" with ALL remaining items in one payload. Sequential one-at-a-time calls exhaust the iteration budget without proportionate progress; one bulk call of 30 entries does the work of 30 sequential calls in a single iter. This call is rejected; retry as ${bulkReplacement}.`;
         state.messages.push(makeUserMessage(forceMsg));
         state.results.push({ type: 'error', error: forceMsg, blocked: true, tool: toolName });
         onProgress('iterationError', { iteration: state.iteration, error: forceMsg });

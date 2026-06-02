@@ -10,6 +10,8 @@
     "serve:static": "npx http-server . -p 3000 -c-1",
     "build": "node build.js",
     "logs:llm": "node scripts/analyze-llm-traces.js",
+    "e2e:multi": "node scripts/run_e2e_multi.js",
+    "e2e:single": "node scripts/run_e2e_trace.js",
     "bench:modes": "node bench/runtime_mode_compare.js",
     "bench:cost": "node bench/model_cost_quality.js",
     "bench:cost:sweep": "bash bench/sweep_models.sh",
