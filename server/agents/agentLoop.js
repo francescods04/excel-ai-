@@ -628,6 +628,13 @@ function detectPaddingRows(writes) {
       const v = spec.value;
       if (v == null || v === '') continue;
       if (typeof v === 'string' && v.startsWith('=')) continue;
+      // Short text values (≤10 chars, non-numeric) are legitimate unit /
+      // category labels — e.g. "€/mq", "%", "mq", "cad", "forfait", "EUR" —
+      // which are SUPPOSED to repeat down a Unit column. Exempt them so the
+      // guard does not push the model into "I'll make every unit unique
+      // ('€/mq1', '€/mq2'…)" gaming behaviour. Numeric padding and long-text
+      // row-label padding (the actual failure modes) are still caught.
+      if (typeof v === 'string' && v.length <= 10 && !/^[-+]?\d/.test(v.trim())) continue;
       const col = colLetterOfAddr(addr);
       if (!col) continue;
       const rowMatch = String(addr).replace(/\$/g, '').match(/^[A-Z]+(\d+)/i);
