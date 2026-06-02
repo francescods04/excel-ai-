@@ -1550,6 +1550,17 @@ function validateBlueprint(raw, context = {}) {
   errors.push(...validateDensityCoverage(normalizedSlices, context));
   if (errors.length) return { ok: false, errors };
 
+  // Layer A — promote any final-verification slice into a structured
+  // self-audit + repair pass so the agent detects its own mistakes
+  // (near-duplicate sheets, empty declared sheets, dangling refs, broken
+  // formula chains) and fixes them before declaring the workbook done.
+  for (const slice of normalizedSlices) {
+    if (!isFinalVerificationSlice(slice)) continue;
+    slice.instructions = buildAuditAndRepairInstructions(slice.instructions);
+    slice.estimated_iters = Math.max(slice.estimated_iters || 0, 12);
+    slice.tier = 'pro'; // audit + repair benefits from deeper reasoning
+  }
+
   return {
     ok: true,
     blueprint: {
@@ -1564,6 +1575,45 @@ function validateBlueprint(raw, context = {}) {
       waves: waves.map(w => [...w])
     }
   };
+}
+
+function buildAuditAndRepairInstructions(originalInstructions) {
+  const orig = String(originalInstructions || '').trim();
+  const auditProtocol = `SELF-AUDIT + REPAIR PROTOCOL (this is the final slice — every prior content worker has already run; the workbook is in whatever state they left it).
+
+PHASE 1 — Inventory scan (no writes yet)
+  1a. Call read_workbook to enumerate every sheet with row/column counts.
+  1b. From that inventory, identify these anomalies generically (no domain rules):
+      • NEAR-DUPLICATE SHEETS: two sheets whose names match after lowercasing and stripping spaces/punctuation. Examples: "Cost Breakdown" vs "CostBreakdown", "P&L" vs "PL", "Cash Flow" vs "CashFlow". These split content across two parallel sheets.
+      • EMPTY DECLARED SHEETS: a sheet that exists but has maxRow ≤ 2 (header only or fully blank) when the architect plan declared it as a content sheet. Common when an upstream slice crashed.
+      • TINY SHEETS: a sheet that should be a schedule (named "Schedule", "Cash Flow", "P&L", "Forecast") but has fewer than 10 rows.
+  1c. For each near-duplicate pair, read both sheets with read_sheet to compare content. Pick the one with more cells (or the one matching the architect's declared canonical name) as the keeper.
+
+PHASE 2 — Targeted repairs (skip entirely if Phase 1 found nothing)
+  2a. NEAR-DUP MERGE:
+      • Copy any non-overlapping content from the duplicate into the keeper via bulk_set_cell_ranges (preserve the original cell addresses).
+      • delete_sheet the duplicate.
+      • If the keeper itself is partially empty AND the duplicate had more useful content, swap: rename the duplicate to the canonical name (delete the empty keeper first).
+  2b. EMPTY DECLARED SHEET:
+      • If the architect plan said this sheet should exist and contain real content, do NOT try to fabricate it from scratch — you don't have the domain context the original slice had. Instead, in your done summary, list it as "MISSING: <sheet name> — content slice did not populate" so the user knows.
+      • Exception: if the empty sheet is a simple reference table (e.g. labels copied from another sheet), and you can derive it from sheets that DID populate, do so.
+  2c. FORMULA ERROR CELLS:
+      • If the health-scan injected any #VALUE!/#REF!/#NAME?/#NUM! cells into your prior context, those are still broken. Read each one + its precedents and rewrite the formula.
+  2d. Budget: maximum TWO repair sub-iterations. If a third would be needed, stop repairing and surface the remaining issues in your done summary.
+
+PHASE 3 — Format pass
+  Apply your normal formatting to canonical sheets only (number formats for currency / percentage / dates, bold headers, freeze top row, column widths). One bulk_set_format call per sheet is the goal.
+
+PHASE 4 — Done summary
+  When you call done, include these fields in 'summary':
+      • sheets_total: <int>
+      • sheets_repaired: <list of names or "none">
+      • merges_applied: <list of "kept X / dropped Y" pairs, or "none">
+      • missing_or_incomplete: <list with one-line reason each, or "none">
+      • formula_errors_remaining: <count> (if >0, name them)
+  Be honest. A truthful "missing_or_incomplete" entry is far more useful than a clean-looking but partial workbook the user will discover later.`;
+  if (!orig) return auditProtocol;
+  return `${orig}\n\n${auditProtocol}`.slice(0, 12000);
 }
 
 /**
