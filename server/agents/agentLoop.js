@@ -2055,6 +2055,27 @@ function compactWriteForHistory(write) {
   return out;
 }
 
+// Returns an options object suitable for the conversation history. Keeps the
+// canonical "options" shape (so the LLM mimics the right key on next call) but
+// caps stringified size so a 24-format payload doesn't blow context.
+function summarizeFormatOptionsForHistory(options) {
+  if (!options || typeof options !== 'object') return {};
+  try {
+    const serialized = JSON.stringify(options);
+    if (serialized.length <= 240) return options;
+  } catch (_) { /* fall through */ }
+  const out = {};
+  let used = 0;
+  for (const [k, v] of Object.entries(options)) {
+    const piece = JSON.stringify(v);
+    if (piece == null) continue;
+    if (used + piece.length > 200) { out._truncated = true; break; }
+    out[k] = v;
+    used += piece.length;
+  }
+  return out;
+}
+
 function compactToolParamsForHistory(toolName, params) {
   if (!params || typeof params !== 'object') return params || {};
   if (toolName === 'set_cell_range') {
@@ -2073,7 +2094,13 @@ function compactToolParamsForHistory(toolName, params) {
     return {
       sheet: params.sheet || params.sheetName || params.sheet_name,
       target: params.target || params.range || params.addr || params.address,
-      optionKeys: Object.keys(options || {})
+      // Emit the actual options object (truncated) under the canonical "options"
+      // key. Earlier versions emitted `optionKeys: [...]` which the LLM mistook
+      // for a tool parameter — it then started sending `optionKeys: {bold:true}`
+      // as the input and got stuck in a 20+ iter retry loop. Keep the field
+      // name aligned with the input schema so the LLM's "monkey see, monkey do"
+      // pattern reinforces correct behavior instead of breaking it.
+      options: summarizeFormatOptionsForHistory(options)
     };
   }
   if (toolName === 'bulk_set_format') {
@@ -2083,7 +2110,10 @@ function compactToolParamsForHistory(toolName, params) {
       formats: formats.slice(0, 24).map(f => ({
         sheet: f?.sheet || f?.sheetName || f?.sheet_name,
         target: f?.target || f?.range || f?.addr || f?.address,
-        optionKeys: Object.keys(f?.options || f?.format || f?.style || {})
+        options: summarizeFormatOptionsForHistory(
+          f?.options || f?.format || f?.style || f?.cellStyles || f?.cell_styles
+          || f?.styles || f?.formatting || f?.props || f?.properties || {}
+        )
       })),
       truncatedFormats: Math.max(0, formats.length - 24)
     };
@@ -4257,9 +4287,13 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
       if (!target || typeof target !== 'string') return { error: 'set_format: missing or invalid target (aliases: range, addr, address)' };
       const rawOptions = params.options || params.format || params.style
         || params.cellStyles || params.cell_styles || params.styles
-        || params.formatting || params.props || params.properties;
-      if (!rawOptions || typeof rawOptions !== 'object') {
-        return { error: 'set_format: missing options. Accepted aliases: format, style, cellStyles, styles, formatting.' };
+        || params.formatting || params.props || params.properties
+        || (params.optionKeys && typeof params.optionKeys === 'object' && !Array.isArray(params.optionKeys) ? params.optionKeys : null);
+      if (!rawOptions || typeof rawOptions !== 'object' || Array.isArray(rawOptions)) {
+        const hint = Array.isArray(params.optionKeys)
+          ? ' "optionKeys" was an array — pass key→value pairs under "options", e.g. {"options":{"bold":true}}.'
+          : '';
+        return { error: `set_format: missing options. Accepted aliases: format, style, cellStyles, styles, formatting.${hint}` };
       }
       const options = expandPresetInOptions(rawOptions);
       if (!options || Object.keys(options).length === 0) {
@@ -4407,16 +4441,26 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
         // Options aliases — the LLM nests under many names. Accept every shape
         // we have seen in production logs so it stays on this structured path
         // instead of falling back to brittle hand-written execute_office_js.
+        // Note: optionKeys is accepted as a last-resort alias because earlier
+        // versions of the history compactor exposed "optionKeys: [...]" in the
+        // conversation trace, training some slice workers to send the bad key.
+        // Compactor now emits "options" — alias kept for backward compat with
+        // long-lived sessions / cached prompts. Array shapes are still rejected.
         const rawOptions = f.options || f.format || f.style
           || f.cellStyles || f.cell_styles || f.styles
-          || f.formatting || f.props || f.properties;
-        if (!rawOptions || typeof rawOptions !== 'object') {
+          || f.formatting || f.props || f.properties
+          || (f.optionKeys && typeof f.optionKeys === 'object' && !Array.isArray(f.optionKeys) ? f.optionKeys : null);
+        if (!rawOptions || typeof rawOptions !== 'object' || Array.isArray(rawOptions)) {
           const seenKeys = Object.keys(f).filter(k => !['sheet', 'target', 'range', 'addr', 'address'].includes(k));
+          const optionKeysAsArray = Array.isArray(f.optionKeys);
+          const hint = optionKeysAsArray
+            ? ` "optionKeys" was an array of names — pass the actual key→value mapping under "options", e.g. {"options":{"bold":true,"fontColor":"#666"}}.`
+            : '';
           errors.push({
             index: i,
             sheet,
             target,
-            reason: `missing options. Pass the formatting as "options" (aliases also accepted: format, style, cellStyles, styles, formatting). Keys seen on this entry: [${seenKeys.join(', ') || 'none'}].`
+            reason: `missing options. Pass the formatting as "options" (aliases also accepted: format, style, cellStyles, styles, formatting). Keys seen on this entry: [${seenKeys.join(', ') || 'none'}].${hint}`
           });
           continue;
         }
@@ -4994,6 +5038,46 @@ function normalizeClientResults(clientResult) {
   });
 }
 
+// Detect ≥3 consecutive set_format / bulk_set_format calls that all returned
+// "missing options" or a no-supported-options error. The LLM gets stuck here
+// when its conversation history shows past attempts in a confusing shape — see
+// the optionKeys reflection bug. Returns a verbatim corrective nudge or null.
+const FORMAT_TOOLS_FOR_LOOP_DETECTION = new Set(['set_format', 'bulk_set_format']);
+function detectFormatErrorLoop(results, currentToolName) {
+  if (!FORMAT_TOOLS_FOR_LOOP_DETECTION.has(currentToolName)) return null;
+  if (!Array.isArray(results) || results.length < 3) return null;
+  // Walk backwards through the latest tool results. Need 3+ in a row where:
+  //  - tool is set_format / bulk_set_format
+  //  - result contains an error mentioning "missing options" or a related key complaint
+  let streak = 0;
+  for (let i = results.length - 1; i >= 0 && streak < 4; i--) {
+    const r = results[i];
+    if (!r || r.type !== 'tool') continue;
+    if (!FORMAT_TOOLS_FOR_LOOP_DETECTION.has(r.tool)) break;
+    const blob = r.result || {};
+    const topError = typeof blob.error === 'string' ? blob.error : '';
+    const subErrors = Array.isArray(blob.errors) ? blob.errors.map(e => (e && e.reason) || '').join(' | ') : '';
+    const combined = `${topError} ${subErrors}`.toLowerCase();
+    const isFormatKeyError = combined.includes('missing options')
+      || combined.includes('no supported format options')
+      || combined.includes('optionkeys');
+    if (!isFormatKeyError) break;
+    streak++;
+  }
+  if (streak < 3) return null;
+  return [
+    'FORMAT-LOOP DETECTED: 3+ consecutive bulk_set_format / set_format calls failed with the same "missing options" / unsupported-keys error. You are stuck in a self-reinforcing pattern (likely sending "optionKeys" or another wrong wrapper).',
+    'STOP and use this EXACT shape on the next call. Copy verbatim, only swap in your sheet/target/values:',
+    '',
+    '  { "formats": [',
+    '    { "sheet": "Sheet1", "target": "A1:F1", "options": { "bold": true, "fontColor": "#666666" } },',
+    '    { "sheet": "Sheet1", "target": "B2:F2", "options": { "numberFormat": "#,##0" } }',
+    '  ] }',
+    '',
+    'Rules: the key is "options" (literal, no s on "option", no "Keys" suffix). Inside options, use backgroundColor / fontColor / bold / italic / numberFormat / horizontalAlignment / borders / columnWidth / rowHeight. If you have nothing left to format, call `done` with a summary instead.'
+  ].join('\n');
+}
+
 function bulkNudgeFor(lastN) {
   if (lastN.length !== 2) return null;
   if (lastN.every(n => n === 'set_cell_range')) {
@@ -5244,6 +5328,19 @@ async function finishToolExecution(state, toolName, params, thought, toolResult,
   if (process.env.AGENT_BULK_NUDGE !== 'false') {
     const nudge = bulkNudgeFor(state.recentToolTrail.slice(-2).map(e => e.toolName));
     if (nudge) state.messages.push(makeUserMessage(nudge));
+  }
+  // Format-error loop break: when the LLM repeatedly retries set_format /
+  // bulk_set_format with the same root-cause error (missing options key), the
+  // stagnation detector misses it because each retry varies signatures while
+  // staying broken. Detect 3+ consecutive "missing options" errors on
+  // format tools and inject a verbatim, copy-pasteable corrective example.
+  // The DCF E2E run on 2026-06-02 burned 20+ iterations on this exact loop
+  // before completing; one rescue message breaks it deterministically.
+  const formatErrorNudge = detectFormatErrorLoop(state.results, toolName);
+  if (formatErrorNudge && !state._formatErrorRescueSent) {
+    state.messages.push(makeUserMessage(formatErrorNudge));
+    state._formatErrorRescueSent = true;
+    state.forceThinkingNext = true;
   }
 
   const stagnation = detectToolStagnation(state.recentToolTrail);
