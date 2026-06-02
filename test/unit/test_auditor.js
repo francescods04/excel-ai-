@@ -41,7 +41,7 @@ t('catches Vairano IF(2=0,...) bug across rows', () => {
   const issues = detectTemplatedClones({ Revenue: cells }, { minClones: 30 });
   assert.ok(issues.length === 1, `expected 1 issue, got ${issues.length}`);
   assert.strictEqual(issues[0].type, 'templated_clones');
-  assert.strictEqual(issues[0].severity, 'warn');
+  assert.strictEqual(issues[0].severity, 'fail');
   assert.strictEqual(issues[0].count, 50);
 });
 t('escalates to fail-severity at large clone count', () => {
@@ -149,8 +149,9 @@ t('builds focused multi-line repair msg', () => {
   for (let r = 2; r <= 700; r++) cells[`A${r}`] = { f: `=INDEX(X,2)+5` };
   const audit = auditStatic({ S: cells });
   const msg = buildRepairInstruction(audit.fails);
-  assert.ok(msg.includes('Auditor flagged'));
+  assert.ok(msg.includes('Auditor blocked done'));
   assert.ok(msg.includes('templated_clones'));
+  assert.ok(msg.includes('fix:'), 'repair message must include suggested fix');
 });
 
 console.log(`\n[Auditor] ${passed} passed, ${failed} failed`);

@@ -46,6 +46,25 @@ function literalIntsOutsideRefs(formula) {
   return ints;
 }
 
+// Build a concrete repair suggestion for a templated-clone group. Heuristic:
+// look at which row most refs sit on; if it matches the FIRST cell's row, the
+// LLM probably forgot to anchor. Otherwise it's an absolute-row template that
+// needs ROW() or COLUMN().
+function suggestRefFix(sampleFormula, cells) {
+  if (!cells || !cells.length) return 'Use ROW()/COLUMN() or relative refs so each cell pulls its own data.';
+  const firstAddr = cells[0].addr;
+  const firstPos = parseAddr(firstAddr);
+  if (!firstPos) return 'Anchor refs with $ on the row that should stay fixed and let the other axis vary; use ROW()/COLUMN() when no clean anchor exists.';
+  const rowRefs = [...sampleFormula.matchAll(/(\$?)([A-Z]{1,3})(\$?)(\d+)/g)];
+  if (rowRefs.length === 0) return 'Formula has no cell refs — likely a constant-only template; reference workbook data instead.';
+  // Most refs at firstPos.row?
+  const sameRow = rowRefs.filter(m => Number(m[4]) === firstPos.row).length;
+  if (sameRow > 0 && sameRow >= rowRefs.length / 2) {
+    return `Refs sit on row ${firstPos.row}; if this is meant to apply per-row, drop the row literals (e.g. ${rowRefs[0][2]}${firstPos.row} → ${rowRefs[0][2]}<ROW> with the row varying per cell). If row ${firstPos.row} is a fixed driver row, anchor it with $ (${rowRefs[0][2]}$${firstPos.row}) and let other refs vary.`;
+  }
+  return `Vary the column ref per column (use ${rowRefs[0][2]}<col-driven> or COLUMN()-based indexing) and anchor only what should stay fixed with $.`;
+}
+
 // Extract all numeric row tokens from cell refs in a formula. Used to detect
 // whether a formula's refs "track" the cell's own row (legitimate column-fill)
 // vs sit on a fixed row (templated clone).
@@ -105,14 +124,23 @@ function detectTemplatedClones(sheetCells, opts = {}) {
       // the LLM did the right thing (just used relative refs that happen to
       // share a shape). Don't flag.
       if (rowSet.size >= 2 && isLegitimateColumnFill(g)) continue;
+      // Severity ramps with count. ≥50 cells = fail (will block done and
+      // trigger repair). Below that = warn-only signal. The old threshold of
+      // 500 was too tolerant — fastfood_bp P&L "=IF(B4,B6/B4,0)" ×298 (a real
+      // semantic bug: same column-4 percentage cloned across every month)
+      // came through as a mere warning.
+      const severity = g.cells.length >= 50 ? 'fail' : 'warn';
+      const sampleAddrs = g.cells.slice(0, 5).map(c => c.addr);
+      const fix = suggestRefFix(g.sampleFormula, g.cells);
       issues.push({
         type: 'templated_clones',
         sheet,
-        severity: g.cells.length > 500 ? 'fail' : 'warn',
+        severity,
         count: g.cells.length,
-        sampleAddrs: g.cells.slice(0, 5).map(c => c.addr),
+        sampleAddrs,
         sampleFormula: g.sampleFormula,
-        msg: `${g.cells.length} cells on "${sheet}" share identical formula+literals "${g.sampleFormula.slice(0, 60)}"; LLM likely hardcoded an index where a relative ref (ROW(), A2) was needed`
+        suggestedFix: fix,
+        msg: `${g.cells.length} cells on "${sheet}" share identical formula+literals "${g.sampleFormula.slice(0, 60)}"; LLM hardcoded an index where a relative ref was needed. ${fix}`
       });
     }
   }
@@ -166,13 +194,15 @@ function detectConstantGuards(sheetCells) {
   for (const [key, occ] of seenShapes.entries()) {
     if (occ.length < 5) continue;
     const sample = occ[0];
+    const severity = occ.length >= 20 ? 'fail' : 'warn';
     issues.push({
       type: 'constant_guard',
       sheet: sample.sheet,
-      severity: occ.length > 100 ? 'fail' : 'warn',
+      severity,
       count: occ.length,
       sampleAddr: sample.addr,
       sampleFormula: sample.formula,
+      suggestedFix: `Replace literal-vs-literal IF check with a cell-based condition (e.g. IF(${sample.addr}<>"",…) or IF(ROW()>1,…))`,
       msg: `${occ.length} cells on "${sample.sheet}" use IF(${key.split('|')[1]},…) — constant condition, likely meant a per-row reference`
     });
   }
@@ -210,13 +240,15 @@ function detectFrozenIndex(sheetCells) {
       // tracking their own row, the literal INDEX arg is a static column
       // selector — legitimate.
       if (isLegitimateColumnFill({ cells: occ })) continue;
+      const severity = occ.length >= 50 ? 'fail' : 'warn';
       issues.push({
         type: 'frozen_index',
         sheet,
-        severity: occ.length > 200 ? 'fail' : 'warn',
+        severity,
         count: occ.length,
         sampleAddr: occ[0].addr,
         sampleFormula: occ[0].formula,
+        suggestedFix: `Replace literal index ${key.split('|')[1]} with ROW()-N (relative row) or MATCH(lookup_value, range, 0) so each cell looks up its own data`,
         msg: `${occ.length} cells on "${sheet}" reuse same INDEX/OFFSET/INDIRECT literal index ${key.split('|')[1]} across multiple rows — likely needed ROW()/MATCH()`
       });
     }
@@ -272,13 +304,15 @@ function detectRowTemplates(sheetCells, opts = {}) {
     }
     for (const [shape, info] of byShape.entries()) {
       if (info.rows < minRows) continue;
+      const severity = info.cells >= 100 ? 'fail' : 'warn';
       issues.push({
         type: 'row_template',
         sheet,
-        severity: info.cells > 1000 ? 'fail' : 'warn',
+        severity,
         count: info.cells,
         rowsAffected: info.rows,
         sampleFormula: info.sampleFormula,
+        suggestedFix: `Vary at least one ref per column. If cols represent series (months, floors, scenarios) anchor by COLUMN() or reference a per-column header. Sample bad: "${info.sampleFormula.slice(0, 60)}" — needs to differ across A:E`,
         msg: `${info.cells} cells across ${info.rows} rows on "${sheet}" replicate the same formula shape across ≥${minCols} columns; columns A:E should differ per-column (likely missing COLUMN()/header-driven ref)`
       });
     }
@@ -298,16 +332,24 @@ function summarizeIssues(issues) {
   };
 }
 
-// Builds a focused repair instruction the agent can act on. One short message
-// per issue, addr-specific. Max N issues to keep prompt short.
+// Builds a focused repair instruction the agent can act on. One block per
+// issue with: type, sheet, sample addrs, bad formula, and a concrete fix
+// suggestion. Tight enough to fit in a single user message without padding the
+// context window.
 function buildRepairInstruction(issues, opts = {}) {
-  const maxLines = opts.maxLines || 6;
-  const lines = ['Auditor flagged the following formula issues. Fix ONLY these cells, then call done again:'];
+  const maxLines = opts.maxLines || 8;
+  const lines = [
+    'Auditor blocked done — formula bugs detected in the writes you just made.',
+    'For each block below, READ the cells listed, REWRITE the formulas with the suggested fix, then call done.',
+    'Do NOT add new sheets or columns. Do NOT call done before fixing.'
+  ];
   for (const issue of issues.slice(0, maxLines)) {
-    const samples = (issue.sampleAddrs || [issue.sampleAddr]).filter(Boolean).slice(0, 3).join(', ');
-    lines.push(`- [${issue.type}] sheet="${issue.sheet}" cells=${samples}${issue.count ? ` (×${issue.count})` : ''}: ${issue.msg}. Sample formula: ${(issue.sampleFormula || '').slice(0, 100)}`);
+    const samples = (issue.sampleAddrs || [issue.sampleAddr]).filter(Boolean).slice(0, 4).join(', ');
+    const fix = issue.suggestedFix ? `\n  fix: ${issue.suggestedFix}` : '';
+    const formula = issue.sampleFormula ? `\n  bad formula: ${issue.sampleFormula.slice(0, 120)}` : '';
+    lines.push(`• [${issue.type}] sheet="${issue.sheet}" sample cells: ${samples}${issue.count ? ` (×${issue.count} affected)` : ''}${formula}${fix}`);
   }
-  if (issues.length > maxLines) lines.push(`- (+ ${issues.length - maxLines} more similar issues; fixing the patterns above usually fixes the rest)`);
+  if (issues.length > maxLines) lines.push(`(+ ${issues.length - maxLines} more issues of the same kind — applying the patterns above will fix them)`);
   return lines.join('\n');
 }
 

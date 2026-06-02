@@ -6171,7 +6171,7 @@ async function runAgentStep(state, clientResult, deps = {}) {
       // issue is found and auditRetries < cap, push focused repair feedback and
       // force one more iteration. Otherwise pass through. Auditor has zero LLM
       // cost (static rules) and ~5ms per slice.
-      const maxAuditRetries = Number(state.config?.maxAuditRetries) || 1;
+      const maxAuditRetries = Number(state.config?.maxAuditRetries) || 2;
       state.auditRetries = state.auditRetries || 0;
       if (!state.config?.disableAuditor && state.auditRetries < maxAuditRetries) {
         try {
