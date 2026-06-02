@@ -94,7 +94,11 @@ const STAGNATION_MAX_TRAIL = Math.max(8, (STAGNATION_ALT_CYCLES * 2) + 2);
 // just to sample Assumptions sections + the Revenue total row before writing,
 // and was killed before its first write. 8 allows the inspection phase without
 // re-allowing the LBO-style "verify → re-verify" loop we originally guarded.
-const READS_WITHOUT_WRITE_LIMIT = Math.max(4, Number(process.env.AGENT_READS_WITHOUT_WRITE_LIMIT) || 8);
+// Lowered 8 → 5 (2026-06-02 Vairano real run): cash_flow slice burned 9
+// consecutive get_cell_ranges saying "now I see structure" then re-reading.
+// 5 is enough for 2-3 upstream sheets (Assumptions + 1-2 others), forces
+// write-after-inspection sooner. May_read_from declares ranges already.
+const READS_WITHOUT_WRITE_LIMIT = Math.max(4, Number(process.env.AGENT_READS_WITHOUT_WRITE_LIMIT) || 5);
 const READ_ONLY_TOOLS_FOR_STAGNATION = new Set([
   'read_workbook',
   'read_sheet',
@@ -2047,8 +2051,9 @@ function compactWriteForHistory(write) {
   };
   if (write?.allow_overwrite !== undefined) out.allow_overwrite = write.allow_overwrite;
   if (shouldCompactCellMapForHistory(write?.cells)) {
-    out.cellsOmitted = true;
-    out.cellsSummary = summarizeCellMapForHistory(write?.cells);
+    const summary = summarizeCellMapForHistory(write?.cells);
+    out._historyNote = `cells applied successfully (${summary.cellCount} addresses, ${summary.formulas} formulas, ${summary.values} values); full payload omitted from history to save context. Do NOT re-send these cells.`;
+    out._cellsSample = summary.sample;
   } else {
     out.cells = write?.cells || {};
   }

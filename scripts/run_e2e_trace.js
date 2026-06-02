@@ -312,7 +312,15 @@ async function main() {
     console.log(`\nSample cells (${sheetSummary[0].name}):\n  ${cells.join('\n  ')}`);
   }
 
-  fs.writeFileSync(OUT, JSON.stringify({ turnId, scenario: SCENARIO, finalTurn, narrative, sheetSummary, steps: stats.steps, errors: stats.errors }, null, 2));
+  const sheetCells = {};
+  for (const [name, s] of workbook.sheets.entries()) {
+    const out = {};
+    for (const [addr, c] of s.entries()) {
+      out[addr] = c.formula ? { f: c.formula } : { v: c.value };
+    }
+    sheetCells[name] = out;
+  }
+  fs.writeFileSync(OUT, JSON.stringify({ turnId, scenario: SCENARIO, finalTurn, narrative, sheetSummary, sheetCells, steps: stats.steps, errors: stats.errors }, null, 2));
   console.log(`\nSaved: ${OUT}`);
   process.exit(finalTurn.error ? 2 : 0);
 }

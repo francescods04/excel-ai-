@@ -137,9 +137,9 @@ const {
     const serialized = JSON.stringify(compact);
     assert.strictEqual(compact.sheet, 'Dense');
     assert.strictEqual(compact.cells, undefined, 'dense history must not expose fake cells params');
-    assert.strictEqual(compact.cellsOmitted, true);
-    assert.strictEqual(compact.cellsSummary.cellCount, 500);
-    assert.strictEqual(compact.cellsSummary.sample.length, 8);
+    assert.ok(typeof compact._historyNote === 'string' && compact._historyNote.includes('500'));
+    assert.ok(compact._historyNote.includes('Do NOT re-send'));
+    assert.strictEqual(compact._cellsSample.length, 8);
     assert.ok(serialized.length < 2500, `history params should stay compact, got ${serialized.length}`);
     assert.ok(!serialized.includes('A499'), 'tail cell payload omitted from prompt history');
     console.log('OK dense write params are summarized for agent history');
@@ -158,7 +158,8 @@ const {
       copyToRange: 'A3:B601'
     });
     assert.ok(compact.cells.A2.formula, 'small write should preserve actual formula cells');
-    assert.strictEqual(compact.cellsSummary, undefined);
+    assert.strictEqual(compact._historyNote, undefined);
+    assert.strictEqual(compact._cellsSample, undefined);
     console.log('OK small write params remain reusable in agent history');
   }
 
@@ -177,7 +178,8 @@ const {
     assert.strictEqual(compact.writes.length, 16);
     assert.strictEqual(compact.truncatedWrites, 24);
     assert.strictEqual(compact.writes[0].cells, undefined, 'dense bulk entries must not expose fake cells params');
-    assert.strictEqual(compact.writes[0].cellsSummary.cellCount, 120);
+    assert.ok(typeof compact.writes[0]._historyNote === 'string' && compact.writes[0]._historyNote.includes('120'));
+    assert.ok(Array.isArray(compact.writes[0]._cellsSample));
     console.log('OK bulk write params keep intent and cap history size');
   }
 
