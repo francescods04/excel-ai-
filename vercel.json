@@ -5,6 +5,7 @@
       "src": "api/index.js",
       "use": "@vercel/node",
       "config": {
+        "maxDuration": 800,
         "excludeFiles": "node_modules/{@remotion,remotion,@rspack,@esbuild,esbuild,mediabunny,@mediabunny,prettier,react,react-dom,@types}/**"
       }
     },
