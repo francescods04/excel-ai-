@@ -3158,6 +3158,53 @@ function tryRecoverMissingCommas(raw) {
   }
 }
 
+// Fast-fail: same WRITE tool consecutively rejected with an error N times in
+// a row. Catches the "LLM emits broken bulk → server rejects → LLM emits
+// the same broken bulk again" loop before the broader NO_PROGRESS_LIMIT (12)
+// kicks in. Specifically targeted at the schema-validation-rejection failure
+// mode observed 2026-06-03 turn ia3yjxxm loops 13-22: 10 consecutive
+// bulk_set_cell_ranges calls all rejected for missing `cells` field.
+const SAME_TOOL_REJECT_LIMIT = Math.max(3, Number(process.env.AGENT_SAME_TOOL_REJECT_LIMIT) || 5);
+const WRITE_TOOLS_FOR_REJECT_GUARD = new Set([
+  'set_cell_range',
+  'bulk_set_cell_ranges',
+  'set_format',
+  'bulk_set_format',
+  'execute_excel_formula'
+]);
+function detectSameToolRejectLoop(results, options = {}) {
+  const limit = options.limit || SAME_TOOL_REJECT_LIMIT;
+  if (!Array.isArray(results) || results.length < limit) return null;
+  // Walk backwards: collect the last `limit` tool-type entries. If ALL are
+  // the SAME write tool AND ALL have errors AND none produced actions → loop.
+  const tail = [];
+  for (let i = results.length - 1; i >= 0 && tail.length < limit; i--) {
+    const r = results[i];
+    if (!r || r.type !== 'tool') continue;
+    tail.push(r);
+  }
+  if (tail.length < limit) return null;
+  const firstTool = tail[0].tool;
+  if (!WRITE_TOOLS_FOR_REJECT_GUARD.has(firstTool)) return null;
+  for (const r of tail) {
+    if (r.tool !== firstTool) return null;
+    const res = r.result;
+    if (!res || typeof res !== 'object') return null;
+    const hasErr = (typeof res.error === 'string' && res.error.length > 0) ||
+                   (Array.isArray(res.errors) && res.errors.length > 0);
+    if (!hasErr) return null;
+    if (Array.isArray(res.actions) && res.actions.length > 0) return null;
+  }
+  // Extract a sample of the rejection reason for the abort message.
+  const sampleErr = tail[0].result?.error || (tail[0].result?.errors?.[0]?.reason) || 'unknown';
+  return {
+    pattern: 'same_tool_reject_loop',
+    tool: firstTool,
+    count: tail.length,
+    sampleReason: String(sampleErr).slice(0, 200)
+  };
+}
+
 function detectNoProgress(results, options = {}) {
   const limit = options.limit || NO_PROGRESS_LIMIT;
   if (!Array.isArray(results) || results.length === 0) return null;
@@ -4197,6 +4244,37 @@ async function runAgentLoop(objective, context, options = {}) {
       // tool results contain no successful mutation. The detectNoProgress
       // helper already excludes errors/blocked so legitimate retries don't
       // trip it.
+      // Fast-fail: same write tool consecutively rejected with errors.
+      // Catches schema-rejection retry loops (e.g. bulk_set_cell_ranges
+      // with missing cells) before the generic 12-iter no-progress fires.
+      // First strike injects a strong corrective msg + tool-change hint
+      // and skips abort; second strike aborts hard.
+      const sameToolReject = detectSameToolRejectLoop(results);
+      if (sameToolReject) {
+        const sameToolStrikes = (context && context._sameToolRejectStrikes) || 0;
+        if (sameToolStrikes === 0) {
+          if (context && typeof context === 'object') context._sameToolRejectStrikes = 1;
+          const corrective = `STAGNATION GUARD — your last ${sameToolReject.count} ${sameToolReject.tool} calls were ALL rejected with the same error: "${sameToolReject.sampleReason}". You are in a retry loop emitting the SAME broken shape. STOP. Either: (a) emit ONE single set_cell_range with 2-3 concrete cells to confirm your understanding of the schema (sheet + cells: {"A1":{"value":"x"}} + nothing else), then resume bulk; OR (b) call done with a summary of what you completed and what is blocking you. Do NOT emit ${sameToolReject.tool} again with the same shape.`;
+          messages.push(makeUserMessage(corrective));
+          logger.warn(`[AgentLoop] same_tool_reject_loop strike 1: ${sameToolReject.tool} x${sameToolReject.count}`);
+          onEvent('iterationError', { iteration, error: `same_tool_reject_loop:${sameToolReject.tool}:x${sameToolReject.count}`, stagnation: false, pattern: 'same_tool_reject_loop_soft' });
+        } else {
+          aborted = true;
+          abortReason = `stagnation_same_tool_reject:${sameToolReject.tool}:x${sameToolReject.count}`;
+          results.push({
+            type: 'error',
+            error: abortReason,
+            stagnation: true,
+            pattern: 'same_tool_reject_loop',
+            tool: sameToolReject.tool,
+            count: sameToolReject.count
+          });
+          logger.warn(`[AgentLoop] same_tool_reject_loop strike 2: aborting (${abortReason})`);
+          onEvent('iterationError', { iteration, error: abortReason, stagnation: true, pattern: 'same_tool_reject_loop' });
+          break;
+        }
+      }
+
       const noProgress = detectNoProgress(results);
       if (noProgress) {
         aborted = true;
@@ -5150,7 +5228,24 @@ async function executeAgentTool(toolName, params, context, requestClientTool) {
         actions.push(...entryActions);
       }
       if (actions.length === 0) {
-        return { error: 'bulk_set_cell_ranges: no valid writes', errors };
+        // Generic "no valid writes" was leaving flash tier stuck in a loop:
+        // the LLM thought says "I need to provide the cells object" but the
+        // next call repeats the same broken shape (observed 2026-06-03
+        // turn ia3yjxxm loops 13-22). Surface a PRESCRIPTIVE message with
+        // a concrete copy-pasteable example so the next emission fixes the
+        // shape on retry instead of repeating it.
+        const firstReason = (Array.isArray(errors) && errors[0] && errors[0].reason) || '';
+        const isMissingCells = /must be an object|must contain at least one A1/i.test(firstReason);
+        const example = isMissingCells
+          ? `\n\nCORRECTIVE EXAMPLE — your previous call had a writes entry without a populated "cells" field. The cells field is REQUIRED and must be an A1→{value|formula} map. Minimal correct shape:\n{\n  "writes": [{\n    "sheet": "Revenue Model",\n    "cells": {\n      "A1": {"value": "Month"},\n      "B1": {"value": "Revenue"},\n      "A2": {"value": "Jan"},\n      "B2": {"value": 10000}\n    }\n  }]\n}\nIf you cannot enumerate cells reliably, switch to set_cell_range and write 3-5 cells at a time — small valid writes beat repeated empty bulks. Do NOT emit another bulk_set_cell_ranges with a writes entry missing "cells".`
+          : '';
+        return {
+          error: `bulk_set_cell_ranges: no valid writes (${(errors || []).length} entries rejected — first reason: ${firstReason || 'unknown'})${example}`,
+          errors,
+          _message: isMissingCells
+            ? 'bulk_set_cell_ranges rejected because writes[*].cells was missing or empty. Next emission MUST include an A1→{value|formula} map per entry, or switch to single set_cell_range calls.'
+            : undefined
+        };
       }
       return {
         ok: true,
@@ -6192,6 +6287,34 @@ async function finishToolExecution(state, toolName, params, thought, toolResult,
     }
   }
 
+  // Same-tool reject loop (fast-fail). Mirrors the runAgentLoop path:
+  // first strike injects a strong corrective message and continues;
+  // second strike aborts. Catches schema-rejection retry loops before
+  // the broader 12-iter no-progress safety net fires.
+  const sameToolRejectStep = detectSameToolRejectLoop(state.results);
+  if (sameToolRejectStep) {
+    state._sameToolRejectStrikes = Number(state._sameToolRejectStrikes || 0) + 1;
+    if (state._sameToolRejectStrikes === 1) {
+      const corrective = `STAGNATION GUARD — your last ${sameToolRejectStep.count} ${sameToolRejectStep.tool} calls were ALL rejected with the same error: "${sameToolRejectStep.sampleReason}". You are in a retry loop emitting the SAME broken shape. STOP. Either: (a) emit ONE single set_cell_range with 2-3 concrete cells to confirm your understanding of the schema (sheet + cells: {"A1":{"value":"x"}} + nothing else), then resume bulk; OR (b) call done with a summary of what you completed and what is blocking you. Do NOT emit ${sameToolRejectStep.tool} again with the same shape.`;
+      state.messages.push(makeUserMessage(corrective));
+      state.forceThinkingNext = true;
+      onProgress('iterationError', { iteration: state.iteration, error: `same_tool_reject_loop:${sameToolRejectStep.tool}:x${sameToolRejectStep.count}`, stagnation: false, pattern: 'same_tool_reject_loop_soft' });
+    } else {
+      state.status = 'aborted';
+      state.abortReason = `stagnation_same_tool_reject:${sameToolRejectStep.tool}:x${sameToolRejectStep.count}`;
+      state.results.push({
+        type: 'error',
+        error: state.abortReason,
+        stagnation: true,
+        pattern: 'same_tool_reject_loop',
+        tool: sameToolRejectStep.tool,
+        count: sameToolRejectStep.count
+      });
+      onProgress('iterationError', { iteration: state.iteration, error: state.abortReason, stagnation: true, pattern: 'same_tool_reject_loop' });
+      return { state, control: 'aborted', payload: { reason: state.abortReason } };
+    }
+  }
+
   // No-progress safety net (per user: no hard cap if useful, only cap when
   // nothing happens). Fires when AGENT_NO_PROGRESS_LIMIT consecutive tool
   // results contain no successful mutation. Replaces the old hard iter cap
@@ -6599,6 +6722,7 @@ module.exports = {
   detectToolStagnation,
   detectSemanticErrorLoop,
   buildSemanticLoopReplanMessage,
+  detectSameToolRejectLoop,
   formatToolStagnationReason,
   executeAgentTool,
   formatToolResultForMessages,
