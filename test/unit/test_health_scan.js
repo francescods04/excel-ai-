@@ -114,4 +114,85 @@ function extractErrorsFromMatrix(sheetName, baseAddress, values, formulas, maxEr
   console.log('OK recordHealthReport is exported from turns.js');
 }
 
+// 5) classifyRootCause — turns raw error + enriched refs into a single
+//    actionable label. Mirrors src/excel/healthScan.js classifyRootCause +
+//    _isNumericFormula. Kept in sync by inspection.
+{
+  const ERR = new Set(['#REF!', '#VALUE!', '#NAME?', '#DIV/0!', '#N/A', '#NULL!', '#NUM!']);
+  const NUM_FN = /\b(?:SUM|SUMPRODUCT|SUMIF|SUMIFS|PRODUCT|AVERAGE|AVERAGEIF|AVERAGEIFS|MIN|MAX|MEDIAN|ROUND|ROUNDUP|ROUNDDOWN|ABS|POWER|MOD|INT|TRUNC|FLOOR|CEILING|LOG|LN|EXP|SQRT|NPV|IRR|PMT|FV|PV|RATE|XNPV|XIRR)\s*\(/i;
+  function isNumericFormula(f) {
+    if (typeof f !== 'string' || !f.length) return false;
+    const s = f.replace(/"(?:[^"\\]|\\.)*"/g, '""');
+    if (/[+\-*/^]/.test(s.replace(/^=/, ''))) return true;
+    return NUM_FN.test(s);
+  }
+  function classifyRootCause(err) {
+    if (!err) return 'unknown';
+    const ev = String(err.value || '').toUpperCase();
+    if (ev === '#NAME?') return 'name-mismatch';
+    const refs = Array.isArray(err.refs) ? err.refs : [];
+    for (const r of refs) {
+      if (r && typeof r.value === 'string' && ERR.has(r.value.toUpperCase().trim())) return 'upstream-error';
+    }
+    if (isNumericFormula(err.formula)) {
+      for (const r of refs) {
+        if (!r) continue;
+        const v = r.value;
+        if (v == null || v === '') return 'empty-in-numeric';
+        if (typeof v === 'string' && !/^-?\d+(\.\d+)?$/.test(v.trim())) return 'string-in-numeric';
+      }
+    }
+    return 'unknown';
+  }
+
+  // MEAT CREW canonical case — Assumptions!B15 reads 'Sides' from
+  // Menu Economics!B20; Revenue Model AOV row evaluates to #VALUE!.
+  assert.strictEqual(classifyRootCause({
+    value: '#VALUE!',
+    formula: '=Assumptions!B15*B16',
+    refs: [{ sheet: 'Assumptions', addr: 'B15', value: 'Sides', formula: "='Menu Economics'!B20" }]
+  }), 'string-in-numeric');
+  console.log('OK classifyRootCause flags string-in-numeric (MEAT CREW)');
+
+  // Upstream is empty + formula numeric.
+  assert.strictEqual(classifyRootCause({
+    value: '#VALUE!',
+    formula: '=SUM(A1:A10)',
+    refs: [{ sheet: 'X', addr: 'A1', value: null }]
+  }), 'empty-in-numeric');
+  console.log('OK classifyRootCause flags empty-in-numeric');
+
+  // Upstream is itself an error.
+  assert.strictEqual(classifyRootCause({
+    value: '#VALUE!',
+    formula: '=Assumptions!B5+1',
+    refs: [{ sheet: 'Assumptions', addr: 'B5', value: '#REF!' }]
+  }), 'upstream-error');
+  console.log('OK classifyRootCause flags upstream-error');
+
+  // #NAME? always wins.
+  assert.strictEqual(classifyRootCause({
+    value: '#NAME?',
+    formula: '=SOMA(A1:A10)', // typo
+    refs: []
+  }), 'name-mismatch');
+  console.log('OK classifyRootCause flags name-mismatch');
+
+  // Numeric ref → no classification trigger.
+  assert.strictEqual(classifyRootCause({
+    value: '#DIV/0!',
+    formula: '=A1/B1',
+    refs: [{ sheet: 'X', addr: 'A1', value: '5' }, { sheet: 'X', addr: 'B1', value: '0' }]
+  }), 'unknown');
+  console.log('OK classifyRootCause unknown when refs look numeric');
+
+  // Non-numeric formula (TEXT/CONCAT/etc.) with a string ref → NOT mis-classified.
+  assert.strictEqual(classifyRootCause({
+    value: '#VALUE!',
+    formula: '=CONCAT(A1, B1)',
+    refs: [{ sheet: 'X', addr: 'A1', value: 'hello' }]
+  }), 'unknown');
+  console.log('OK classifyRootCause does not flag text formula with string upstream');
+}
+
 console.log('\nhealth scan tests completed.');

@@ -62,7 +62,14 @@ async function getExcelContext() {
           c
         );
         const previewCells = r * c;
-        if (entry.isActive && previewCells <= MAX_FORMULA_PREVIEW_CELLS) {
+        // Load formulas for every sheet whose preview fits the budget — not
+        // just the active one. The markdown context encoder shows the model
+        // formulas side-by-side with computed values so it can catch
+        // cross-sheet bugs (e.g. an upstream formula evaluating to text
+        // when a number was expected). Non-active sheets use the smaller
+        // OTHER_PREVIEW_ROWS×COLS window (12×8=96 cells) so they easily
+        // stay under MAX_FORMULA_PREVIEW_CELLS.
+        if (previewCells <= MAX_FORMULA_PREVIEW_CELLS) {
           entry.previewRange.load('values,formulas');
           entry.loadedFormulas = true;
         } else {

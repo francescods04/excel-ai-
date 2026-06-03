@@ -321,6 +321,167 @@ function detectRowTemplates(sheetCells, opts = {}) {
 }
 
 // Audit summary: groups issues by severity, returns top-N actionable ones.
+// Detect labels that recur in MULTIPLE sheets with conflicting numeric
+// neighbours. Catches the canonical MEAT CREW symptom: "Revenue Y1" =
+// 94,011 in P&L vs 1,128,139 in Dashboard (12× delta — neither cell is
+// in error state, both look fine in isolation, but cross-sheet they
+// contradict). Strategy:
+//   1) For each sheet, scan cells: when a TEXT label sits in cell (col,
+//      row) and the cell at (col+1, row) is numeric, record (label,
+//      sheet, addr, value).
+//   2) Group by normalized label (lowercased, whitespace-collapsed,
+//      trailing colons/punctuation stripped).
+//   3) For every label appearing in ≥2 sheets, compare its numeric
+//      values. Flag when the relative gap > tolerance AND the absolute
+//      gap > floor (so trivial rounding doesn't trigger).
+//
+// Heuristics:
+//   - Skip labels < MIN_LABEL_LEN chars (avoids "A", "B", ":", etc.)
+//   - Skip generic non-financial labels (Year, Month, Total, etc.) by
+//     allow-list of financial keywords (revenue, ebitda, fcf, …) so
+//     "Total" appearing 30 times across sheets does not flood reports.
+//     Conservative: only fire on FINANCIAL labels — false negatives
+//     beat 50 noise issues.
+const FIN_LABEL_RE = /(revenue|sales|fatturat|ricavi|ebitda|ebit|net income|gross profit|cogs|opex|capex|fcf|free cash|enterprise value|equity value|debt|wacc|terminal value|labor cost|marketing|tax|d&a|depreci|margin|aov|customers?\b|annual customers?|monthly|cumulative)/i;
+const MIN_LABEL_LEN = 4;
+function normLabel(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[\s ]+/g, ' ')
+    .replace(/[:;,.\-()\[\]€$£%]+/g, '')
+    .trim();
+}
+function isFinancialLabel(s) {
+  return typeof s === 'string' && s.length >= MIN_LABEL_LEN && FIN_LABEL_RE.test(s);
+}
+function isNumericValue(v) {
+  if (typeof v === 'number' && Number.isFinite(v)) return true;
+  if (typeof v === 'string') {
+    const t = v.replace(/[€$£%,\s]/g, '');
+    return /^-?\d+(\.\d+)?$/.test(t);
+  }
+  return false;
+}
+function numericValue(v) {
+  if (typeof v === 'number') return v;
+  return Number(String(v).replace(/[€$£%,\s]/g, ''));
+}
+function detectCrossSheetCoherence(sheetCells, opts = {}) {
+  const tolPct = opts.tolerancePct != null ? opts.tolerancePct : 0.01; // 1 % relative
+  const absFloor = opts.absoluteFloor != null ? opts.absoluteFloor : 1; // floor 1 unit
+  // (label → [{sheet, addr, value}])
+  const byLabel = new Map();
+  for (const [sheet, cells] of Object.entries(sheetCells || {})) {
+    // Build (col,row) → cell map
+    const byPos = new Map();
+    for (const [addr, c] of Object.entries(cells || {})) {
+      const p = parseAddr(addr);
+      if (!p) continue;
+      byPos.set(`${p.col}:${p.row}`, { addr, p, ...c });
+    }
+    for (const cell of byPos.values()) {
+      const labelVal = cell.v;
+      if (typeof labelVal !== 'string') continue;
+      if (!isFinancialLabel(labelVal)) continue;
+      const neighbour = byPos.get(`${cell.p.col + 1}:${cell.p.row}`);
+      if (!neighbour) continue;
+      if (!isNumericValue(neighbour.v)) continue;
+      const key = normLabel(labelVal);
+      if (!key) continue;
+      if (!byLabel.has(key)) byLabel.set(key, []);
+      byLabel.get(key).push({ sheet, addr: neighbour.addr, value: numericValue(neighbour.v), labelOriginal: labelVal });
+    }
+  }
+  const issues = [];
+  for (const [key, hits] of byLabel.entries()) {
+    // Need ≥2 distinct sheets
+    const sheets = new Set(hits.map(h => h.sheet));
+    if (sheets.size < 2) continue;
+    // Compute spread: pick min/max numeric. If reldelta exceeds tolerance AND
+    // absolute delta exceeds floor → mismatch.
+    const values = hits.map(h => h.value).filter(v => Number.isFinite(v));
+    if (values.length < 2) continue;
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const absDelta = Math.abs(max - min);
+    const denom = Math.max(Math.abs(max), Math.abs(min), 1e-9);
+    const relDelta = absDelta / denom;
+    if (relDelta < tolPct) continue;
+    if (absDelta < absFloor) continue;
+    const samples = hits.slice(0, 4).map(h => `${h.sheet}!${h.addr}=${h.value}`).join(', ');
+    const severity = relDelta >= 0.1 ? 'fail' : 'warn'; // 10 % delta = fail
+    issues.push({
+      type: 'cross_sheet_coherence',
+      severity,
+      label: hits[0].labelOriginal,
+      sheets: [...sheets],
+      values,
+      relDelta: Number(relDelta.toFixed(4)),
+      msg: `Label "${hits[0].labelOriginal}" appears in ${sheets.size} sheets with mismatched values (${(relDelta * 100).toFixed(1)}% spread): ${samples}. Verify one sheet is the source of truth and link the others by formula.`
+    });
+  }
+  return issues;
+}
+
+// Detect a label repeated within the SAME sheet in the SAME column, with
+// different numeric neighbours. Catches the MEAT CREW "Net Income" row
+// written twice in the P&L (one row = +21,132, second row = -14,459, the
+// second one shadowing the first). Within-sheet duplicates are almost
+// always a write bug (model wrote, then re-wrote, then forgot to remove
+// the original).
+function detectDuplicateRowLabels(sheetCells, opts = {}) {
+  const issues = [];
+  for (const [sheet, cells] of Object.entries(sheetCells || {})) {
+    // (col → [{row, labelRaw, normLabel, neighbour}])
+    const byCol = new Map();
+    const byPos = new Map();
+    for (const [addr, c] of Object.entries(cells || {})) {
+      const p = parseAddr(addr);
+      if (!p) continue;
+      byPos.set(`${p.col}:${p.row}`, { addr, p, ...c });
+    }
+    for (const cell of byPos.values()) {
+      if (typeof cell.v !== 'string') continue;
+      if (!isFinancialLabel(cell.v)) continue;
+      const neighbour = byPos.get(`${cell.p.col + 1}:${cell.p.row}`);
+      const neighbourV = neighbour && isNumericValue(neighbour.v) ? numericValue(neighbour.v) : null;
+      const colKey = cell.p.col;
+      if (!byCol.has(colKey)) byCol.set(colKey, []);
+      byCol.get(colKey).push({ row: cell.p.row, labelRaw: cell.v, normLabel: normLabel(cell.v), neighbour: neighbourV, addr: cell.addr });
+    }
+    for (const entries of byCol.values()) {
+      const groups = new Map();
+      for (const e of entries) {
+        if (!e.normLabel) continue;
+        if (!groups.has(e.normLabel)) groups.set(e.normLabel, []);
+        groups.get(e.normLabel).push(e);
+      }
+      for (const [norm, group] of groups.entries()) {
+        if (group.length < 2) continue;
+        // Filter to rows where neighbour is numeric (the label is acting
+        // as a row driver). If neighbours match, it's a coincidence
+        // (e.g. "Revenue" used as section header and as row label both
+        // pointing at the same number) → skip. Mismatch is the signal.
+        const vs = group.map(g => g.neighbour).filter(v => v != null && Number.isFinite(v));
+        if (vs.length < 2) continue;
+        const min = Math.min(...vs);
+        const max = Math.max(...vs);
+        if (Math.abs(max - min) < 1) continue;
+        const samples = group.slice(0, 4).map(g => `${g.addr}=${g.neighbour}`).join(', ');
+        issues.push({
+          type: 'duplicate_row_label',
+          severity: 'fail',
+          sheet,
+          label: group[0].labelRaw,
+          rows: group.map(g => g.row),
+          msg: `Sheet "${sheet}" has label "${group[0].labelRaw}" on ${group.length} different rows with conflicting neighbour values (${samples}). The agent likely wrote the same line twice without removing the older row — delete the wrong copy.`
+        });
+      }
+    }
+  }
+  return issues;
+}
+
 function summarizeIssues(issues) {
   const fails = issues.filter(i => i.severity === 'fail');
   const warns = issues.filter(i => i.severity === 'warn');
@@ -361,7 +522,9 @@ function auditStatic(sheetCells, opts = {}) {
     ...detectConstantGuards(sheetCells),
     ...detectFrozenIndex(sheetCells),
     ...detectRowTemplates(sheetCells, opts),
-    ...detectSelfRefs(sheetCells)
+    ...detectSelfRefs(sheetCells),
+    ...detectCrossSheetCoherence(sheetCells, opts),
+    ...detectDuplicateRowLabels(sheetCells, opts)
   ];
   const result = summarizeIssues(issues);
   if (issues.length > 0) {
@@ -377,6 +540,8 @@ module.exports = {
   detectFrozenIndex,
   detectRowTemplates,
   detectSelfRefs,
+  detectCrossSheetCoherence,
+  detectDuplicateRowLabels,
   buildRepairInstruction,
   formulaShape,
   literalIntsOutsideRefs,

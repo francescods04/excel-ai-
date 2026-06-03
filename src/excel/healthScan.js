@@ -125,6 +125,59 @@ function extractFormulaCellRefs(formula, maxRefs = 5) {
   return out;
 }
 
+// Detect whether a formula uses its referenced cells in a numeric context
+// (arithmetic ops, SUM/AVG/etc.). Heuristic — false positives are cheap but
+// false negatives mean we miss a root-cause label. Pattern matches any of:
+//   + - * / ^  (binary ops, anywhere outside strings)
+//   SUM/PRODUCT/AVERAGE/MIN/MAX/ROUND/ABS/POWER etc. function calls
+const _NUMERIC_FN = /\b(?:SUM|SUMPRODUCT|SUMIF|SUMIFS|PRODUCT|AVERAGE|AVERAGEIF|AVERAGEIFS|MIN|MAX|MEDIAN|ROUND|ROUNDUP|ROUNDDOWN|ABS|POWER|MOD|INT|TRUNC|FLOOR|CEILING|LOG|LN|EXP|SQRT|NPV|IRR|PMT|FV|PV|RATE|XNPV|XIRR)\s*\(/i;
+function _isNumericFormula(formula) {
+  if (typeof formula !== 'string' || formula.length === 0) return false;
+  // Strip string literals so an "operator" inside text doesn't count.
+  const stripped = formula.replace(/"(?:[^"\\]|\\.)*"/g, '""');
+  if (/[+\-*/^]/.test(stripped.replace(/^=/, ''))) return true;
+  return _NUMERIC_FN.test(stripped);
+}
+
+// Classify why an Excel cell is in an error state. The classifier turns the
+// raw error + enriched-ref information into a single label the agent loop
+// can surface as a human-readable diagnosis. Categories:
+//   - 'string-in-numeric'   upstream ref carries a non-empty NON-ERROR
+//                            STRING value but the failing formula uses it
+//                            arithmetically — the agent typed a label where
+//                            a number was expected (root cause MEAT CREW
+//                            8:38 — Menu Economics!B20 = "Sides" feeding
+//                            Assumptions!B15 → Revenue Model AOV row).
+//   - 'empty-in-numeric'    upstream ref is empty / undefined, formula
+//                            expects numeric. Often "you wrote a downstream
+//                            formula before populating its source".
+//   - 'upstream-error'      upstream ref is itself an Excel error marker —
+//                            fix the upstream first.
+//   - 'name-mismatch'       #NAME? — function or named range typo.
+//   - 'unknown'             default.
+function classifyRootCause(err) {
+  if (!err || typeof err !== 'object') return 'unknown';
+  const errVal = String(err.value || '').toUpperCase();
+  if (errVal === '#NAME?') return 'name-mismatch';
+  const refs = Array.isArray(err.refs) ? err.refs : [];
+  const numericFormula = _isNumericFormula(err.formula);
+  for (const r of refs) {
+    if (!r) continue;
+    if (typeof r.value === 'string' && ERROR_MARKERS.has(r.value.toUpperCase().trim())) {
+      return 'upstream-error';
+    }
+  }
+  if (numericFormula) {
+    for (const r of refs) {
+      if (!r) continue;
+      const v = r.value;
+      if (v == null || v === '') return 'empty-in-numeric';
+      if (typeof v === 'string' && !/^-?\d+(\.\d+)?$/.test(v.trim())) return 'string-in-numeric';
+    }
+  }
+  return 'unknown';
+}
+
 async function scanWorkbookErrors({
   maxSheets = MAX_SHEETS_PER_SCAN_DEFAULT,
   maxCellsPerSheet = MAX_CELLS_PER_SHEET_DEFAULT,
@@ -205,6 +258,64 @@ async function scanWorkbookErrors({
             formula: typeof f === 'string' && f.length > 0 ? f.slice(0, 160) : null
           });
         }
+      }
+
+      // Second hop: if any 1st-hop ref is itself a formula, follow it ONE
+      // more time. Lets the agent see the literal root cause directly
+      // ("Menu Economics!B20 = 'Sides'") instead of needing another
+      // read_cell iteration to chase the chain.
+      const hop2Loads = [];
+      for (let i = 0; i < allErrors.length; i++) {
+        const err = allErrors[i];
+        if (!Array.isArray(err.refs)) continue;
+        for (let j = 0; j < err.refs.length; j++) {
+          const r = err.refs[j];
+          if (!r || !r.formula) continue;
+          if (totalEnrichLoads >= maxEnrichTotal) break;
+          const subRefs = extractFormulaCellRefs(r.formula, 2);
+          for (const sub of subRefs) {
+            if (totalEnrichLoads >= maxEnrichTotal) break;
+            const subSheet = sheetByName.get(sub.sheet);
+            if (!subSheet) continue;
+            try {
+              const range = subSheet.getRange(sub.addr);
+              range.load('values,formulas');
+              hop2Loads.push({ errorIndex: i, refIndex: j, sub, range });
+              totalEnrichLoads++;
+            } catch (_) {}
+          }
+        }
+      }
+      if (hop2Loads.length > 0) {
+        await ctx.sync();
+        for (const { errorIndex, refIndex, sub, range } of hop2Loads) {
+          const v = (((range.values || [])[0]) || [])[0];
+          const f = (((range.formulas || [])[0]) || [])[0];
+          const parent = allErrors[errorIndex].refs[refIndex];
+          if (!parent.refs) parent.refs = [];
+          parent.refs.push({
+            sheet: sub.sheet,
+            addr: sub.addr,
+            value: v == null || v === '' ? null : String(v).slice(0, 80),
+            formula: typeof f === 'string' && f.length > 0 ? f.slice(0, 160) : null
+          });
+        }
+      }
+
+      // Final pass: classify root cause for each error using all collected
+      // refs (1st + 2nd hop). The agent loop reads err.rootCause to surface
+      // a clear "this is what to fix" line instead of a generic enrichment.
+      for (const err of allErrors) {
+        // Promote 2nd-hop refs into the flat list so the classifier sees
+        // the deepest known value — not just the proximate one.
+        if (Array.isArray(err.refs)) {
+          const deeper = [];
+          for (const r of err.refs) {
+            if (r && Array.isArray(r.refs)) deeper.push(...r.refs);
+          }
+          if (deeper.length > 0) err.refs = [...err.refs, ...deeper];
+        }
+        err.rootCause = classifyRootCause(err);
       }
     }
     return allErrors;

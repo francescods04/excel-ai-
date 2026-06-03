@@ -1511,7 +1511,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'bulk_set_cell_ranges',
-      description: `Write MANY independent ranges (same or different sheets) in ONE iteration. Each entry has the same shape as set_cell_range. Use when sections are tightly coupled (e.g., Assumptions feeding a Driver sheet) and you would otherwise need 2-3 sequential calls. Hard cap 32 entries.\n\n**When NOT to bulk:** if sections are independent and the user benefits from seeing them appear incrementally, prefer separate set_cell_range calls per section — visible progress beats a 1-call payload that completes in silence.\n\n**Formatting:** as with set_cell_range, prefer to write values/formulas here, then apply formatting in a separate bulk_set_format pass after the data is verified. style_preset/cellStyles per cell are accepted for back-compat but discouraged.\n\nExample (3 coupled sections, no inline formatting):\n{\n  "writes": [\n    { "sheet": "Assumptions", "cells": {\n        "A1": { "value": "Driver" }, "B1": { "value": "Value" },\n        "A2": { "value": "Revenue growth %" }, "B2": { "value": 0.08 }\n    } },\n    { "sheet": "Sources & Uses", "cells": {\n        "A1": { "value": "Sources" },\n        "A2": { "value": "Equity" }, "B2": { "value": 100 },\n        "A3": { "value": "Total Sources" }, "B3": { "formula": "=SUM(B2:B2)" }\n    } },\n    { "sheet": "Debt Schedule", "cells": {\n        "A1": { "value": "Year" }\n    }, "copyToRange": "A2:A6" }\n  ]\n}\n\nEach write may include copyToRange and allow_overwrite, identical to set_cell_range. Failures on individual writes do NOT abort the batch; they surface under "errors" in the result.`,
+      description: `Write MANY independent ranges (same or different sheets) in ONE iteration. Each entry has the same shape as set_cell_range. Use when sections are tightly coupled (e.g., Assumptions feeding a Driver sheet) and you would otherwise need 2-3 sequential calls. Hard cap 32 entries.\n\n**Payload sizing — IMPORTANT for output reliability:** keep each call ≤20 entries AND ≤200 total cells when possible. Large JSON arrays (~4 KB of output) are where flash-model emission tends to lose coherence (missing commas, truncated arrays). If a section needs more, split it across consecutive bulk_set_cell_ranges calls — the orchestrator does not penalize this. Observed 2026-06-02 MEAT CREW iter 20: a single bulk call mid-Staffing produced three consecutive JSON parse failures at ~3.5-4.4 KB output, costing ~2 min of LLM round-trips before the agent split it.\n\n**When NOT to bulk:** if sections are independent and the user benefits from seeing them appear incrementally, prefer separate set_cell_range calls per section — visible progress beats a 1-call payload that completes in silence.\n\n**Formatting:** as with set_cell_range, prefer to write values/formulas here, then apply formatting in a separate bulk_set_format pass after the data is verified. style_preset/cellStyles per cell are accepted for back-compat but discouraged.\n\nExample (3 coupled sections, no inline formatting):\n{\n  "writes": [\n    { "sheet": "Assumptions", "cells": {\n        "A1": { "value": "Driver" }, "B1": { "value": "Value" },\n        "A2": { "value": "Revenue growth %" }, "B2": { "value": 0.08 }\n    } },\n    { "sheet": "Sources & Uses", "cells": {\n        "A1": { "value": "Sources" },\n        "A2": { "value": "Equity" }, "B2": { "value": 100 },\n        "A3": { "value": "Total Sources" }, "B3": { "formula": "=SUM(B2:B2)" }\n    } },\n    { "sheet": "Debt Schedule", "cells": {\n        "A1": { "value": "Year" }\n    }, "copyToRange": "A2:A6" }\n  ]\n}\n\nEach write may include copyToRange and allow_overwrite, identical to set_cell_range. Failures on individual writes do NOT abort the batch; they surface under "errors" in the result.`,
       parameters: {
         type: 'object',
         required: ['writes'],
@@ -2422,10 +2422,118 @@ function compactAgentContext(context) {
       empty: !!info.empty,
       omitted: !!info.omitted,
       preview: truncateMatrix(info.preview, isActive ? 30 : 10, isActive ? 14 : 8),
-      formulas: isActive ? truncateMatrix(info.formulas, 30, 14) : undefined
+      // Formulas now come through for ALL sheets within the client-side
+      // preview budget (src/excel/context.js loads them). Surfacing them in
+      // the JSON form too keeps parity with the markdown encoder.
+      formulas: Array.isArray(info.formulas) && info.formulas.length > 0
+        ? truncateMatrix(info.formulas, isActive ? 30 : 10, isActive ? 14 : 8)
+        : undefined
     };
   }
   return out;
+}
+
+// Encode workbook context as compact markdown for the LLM. Replaces the
+// previous `JSON.stringify(compactAgentContext(ctx), null, 2)` payload which
+// (1) cost ~2× the tokens for the same info, (2) hid formula↔value
+// correspondence by storing them in two parallel matrices the model had to
+// mentally zip, and (3) had no cell addresses so the model had to count
+// rows/cols. Markdown tables keep the spatial layout, expose A1 addresses,
+// and put formulas and computed values side-by-side per cell. Bench
+// (bench/encoding_compare.js): -53 % tokens AND surfaces cross-sheet bugs
+// (e.g. AOV cell holding text 'Sides') that the JSON form lost.
+function _colLetter(idx) {
+  let s = '';
+  let n = idx + 1;
+  while (n > 0) {
+    const r = (n - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
+function _formatCell(value, formula) {
+  const hasF = formula && String(formula).trim().length > 0;
+  const hasV = value !== '' && value != null;
+  if (hasF && hasV) return `${formula} →${value}`;
+  if (hasF) return String(formula);
+  if (hasV) return String(value);
+  return '';
+}
+
+// Active-sheet preview budget mirrors compactAgentContext (30×14). For other
+// sheets we keep 10×8 — same as the old compact form — and DO emit formulas
+// when the client provided them (see src/excel/context.js extension).
+const _MD_ACTIVE_ROWS = 30;
+const _MD_ACTIVE_COLS = 14;
+const _MD_OTHER_ROWS = 10;
+const _MD_OTHER_COLS = 8;
+
+function formatContextMarkdown(context) {
+  if (!context || typeof context !== 'object') return '(no workbook context)';
+  const lines = [];
+  const sheets = Array.isArray(context.workbookSheets) ? context.workbookSheets : [];
+  lines.push(`# Workbook (active: \`${context.activeSheet || '?'}\`, ${context.sheetCount || sheets.length} sheets)`);
+  if (context.selectedRange) {
+    const selV = (context.selectedValues && context.selectedValues[0] && context.selectedValues[0][0]);
+    const selF = (context.selectedFormulas && context.selectedFormulas[0] && context.selectedFormulas[0][0]);
+    const sel = _formatCell(selV, selF);
+    lines.push(`Selection: \`${context.selectedRange}\`${sel ? ` = ${sel}` : ''}`);
+  }
+  lines.push('');
+  const all = context.allSheetsData || {};
+  for (const [name, info] of Object.entries(all)) {
+    if (!info) continue;
+    const isActive = info.isActive || name === context.activeSheet;
+    const tag = isActive ? ' ★active' : '';
+    if (info.empty) {
+      lines.push(`## \`${name}\`${tag} — empty`);
+      lines.push('');
+      continue;
+    }
+    if (info.omitted) {
+      lines.push(`## \`${name}\`${tag} — ${info.usedRange || '?'} (${info.rowCount}×${info.columnCount}) _preview omitted (sheet budget)_`);
+      lines.push('');
+      continue;
+    }
+    const headerExtras = info.truncated ? ' _[truncated]_' : '';
+    lines.push(`## \`${name}\`${tag} — ${info.usedRange || '?'} (${info.rowCount}×${info.columnCount})${headerExtras}`);
+    const maxRows = isActive ? _MD_ACTIVE_ROWS : _MD_OTHER_ROWS;
+    const maxCols = isActive ? _MD_ACTIVE_COLS : _MD_OTHER_COLS;
+    const previewRows = Array.isArray(info.preview) ? info.preview.slice(0, maxRows) : [];
+    const formulaRows = Array.isArray(info.formulas) ? info.formulas.slice(0, maxRows) : [];
+    if (previewRows.length === 0) { lines.push('_(no preview)_'); lines.push(''); continue; }
+    // Compute actual column span needed within the budget — sparse sheets
+    // shouldn't pay for empty trailing columns.
+    let actualCols = 0;
+    for (const row of previewRows) {
+      if (Array.isArray(row)) actualCols = Math.max(actualCols, Math.min(row.length, maxCols));
+    }
+    if (actualCols === 0) actualCols = 1;
+    // Header: |   | A | B | … |
+    const headerCells = ['   '];
+    for (let c = 0; c < actualCols; c++) headerCells.push(_colLetter(c));
+    lines.push('| ' + headerCells.join(' | ') + ' |');
+    lines.push('|' + headerCells.map(() => '---').join('|') + '|');
+    // Body rows. Skip rows that are entirely blank in both values and formulas
+    // to keep dense tables compact (we still preserve correct row numbers).
+    for (let r = 0; r < previewRows.length; r++) {
+      const valRow = previewRows[r] || [];
+      const fRow = formulaRows[r] || [];
+      const cells = [];
+      let rowHasContent = false;
+      for (let c = 0; c < actualCols; c++) {
+        const formatted = _formatCell(valRow[c], fRow[c]);
+        if (formatted !== '') rowHasContent = true;
+        cells.push(formatted);
+      }
+      if (!rowHasContent) continue;
+      lines.push('| ' + [String(r + 1), ...cells].join(' | ') + ' |');
+    }
+    lines.push('');
+  }
+  return lines.join('\n').trim();
 }
 
 function buildWorkbookOverview(context) {
@@ -2751,6 +2859,72 @@ function detectToolStagnation(trail, maxRepeat = STAGNATION_MAX_REPEAT, altCycle
     }
   }
   return null;
+}
+
+// Semantic-error loop detector. Watches the healthSeen array (rolling list
+// of workbook errors caught by the health scanner with their rootCause
+// classification) and trips when the SAME (sheet, rootCause) pair recurs
+// repeatedly across iterations — even when the agent VARIES the tool it
+// uses between writes and reads. The original detectToolStagnation only
+// catches same-signature loops, so a "write #VALUE! → read → re-write
+// same wrong way → #VALUE! → read …" cycle slips through.
+//
+// Returns null, or `{ pattern: 'semantic_error_loop', rootCause, sheet,
+//   count, severity }`. Severity is:
+//   - 'soft' for count in [softThreshold, hardThreshold)  → inject replan
+//     hint, keep the run going
+//   - 'hard' for count >= hardThreshold                    → abort
+//
+// Defaults: soft = 3, hard = 5. Tunable via AGENT_SEMANTIC_LOOP_SOFT /
+// AGENT_SEMANTIC_LOOP_HARD env vars. Returns null when fewer than
+// softThreshold matching entries are present, so single transient errors
+// never trigger.
+const SEMANTIC_LOOP_SOFT = Math.max(2, Number(process.env.AGENT_SEMANTIC_LOOP_SOFT) || 3);
+const SEMANTIC_LOOP_HARD = Math.max(SEMANTIC_LOOP_SOFT + 1, Number(process.env.AGENT_SEMANTIC_LOOP_HARD) || 5);
+const SEMANTIC_LOOP_WINDOW = Math.max(SEMANTIC_LOOP_HARD * 2, Number(process.env.AGENT_SEMANTIC_LOOP_WINDOW) || 12);
+
+function detectSemanticErrorLoop(healthSeen, {
+  softThreshold = SEMANTIC_LOOP_SOFT,
+  hardThreshold = SEMANTIC_LOOP_HARD,
+  windowSize = SEMANTIC_LOOP_WINDOW
+} = {}) {
+  if (!Array.isArray(healthSeen) || healthSeen.length === 0) return null;
+  const window = healthSeen.slice(-windowSize);
+  // Bucket by (sheet, rootCause). Ignore entries without a classified
+  // rootCause (the legacy ones predate the classifier).
+  const buckets = new Map();
+  for (const e of window) {
+    if (!e || typeof e !== 'object') continue;
+    const sheet = e.sheet || '?';
+    const rc = e.rootCause;
+    if (!rc || rc === 'unknown') continue;
+    const key = `${sheet}::${rc}`;
+    if (!buckets.has(key)) buckets.set(key, { sheet, rootCause: rc, count: 0, samples: [] });
+    const b = buckets.get(key);
+    b.count += 1;
+    if (b.samples.length < 3) b.samples.push(`${e.sheet || '?'}!${e.addr || '?'}`);
+  }
+  let worst = null;
+  for (const b of buckets.values()) {
+    if (b.count < softThreshold) continue;
+    if (!worst || b.count > worst.count) worst = b;
+  }
+  if (!worst) return null;
+  const severity = worst.count >= hardThreshold ? 'hard' : 'soft';
+  return {
+    pattern: 'semantic_error_loop',
+    rootCause: worst.rootCause,
+    sheet: worst.sheet,
+    count: worst.count,
+    severity,
+    samples: worst.samples
+  };
+}
+
+function buildSemanticLoopReplanMessage(sig) {
+  if (!sig) return '';
+  const samples = (sig.samples || []).slice(0, 3).join(', ');
+  return `STOP TACTICAL FIXES — the same root cause "${sig.rootCause}" has been re-emerging in sheet "${sig.sheet}" for ${sig.count} consecutive workbook scans (e.g. ${samples}). Patching individual cells is not converging. STEP BACK and address the underlying structure: identify the ONE upstream cell whose contents are driving the cascade (likely a misplaced label, an empty driver, or a wrong reference), fix THAT cell with a correct value/formula, and only then revisit the dependent cells. If the section cannot be repaired in 2-3 writes, abandon it and call done with a summary of what is blocking you.`;
 }
 
 // No-progress detector: scan recent tool results and abort if the agent has
@@ -3228,11 +3402,28 @@ function collectBlockingErrorsWithHealth(results, healthSeen, options = {}) {
   const merged = { ok: false, blockingErrors: [...base.blockingErrors] };
   for (const e of dedup.slice(0, 8)) {
     const refsPart = Array.isArray(e.refs) && e.refs.length > 0
-      ? ` (upstream: ${e.refs.slice(0, 2).map(r => `${r.sheet || ''}!${r.addr || ''}=${r.value == null ? 'EMPTY' : '"' + String(r.value).slice(0, 40) + '"'}`).join('; ')})`
+      ? ` (upstream: ${e.refs.slice(0, 3).map(r => `${r.sheet || ''}!${r.addr || ''}=${r.value == null ? 'EMPTY' : '"' + String(r.value).slice(0, 40) + '"'}`).join('; ')})`
       : '';
+    // Promote the rootCause classifier (added in healthScan.js) to a
+    // leading "ROOT CAUSE" tag so the agent's next iteration can skip
+    // the diagnostic read loop and go straight to a fix. Observed in
+    // MEAT CREW 8:38-8:39 log: agent burned 3 iterations re-reading
+    // cells to discover that an upstream label-string was feeding a
+    // numeric formula — info that the enrichment already had.
+    let rootCausePart = '';
+    if (e.rootCause && e.rootCause !== 'unknown') {
+      const HINTS = {
+        'string-in-numeric': 'an upstream cell stores TEXT but is used in a numeric formula — fix the upstream cell with a number (not a label)',
+        'empty-in-numeric': 'an upstream cell is EMPTY but the formula expects a number — populate the upstream cell first',
+        'upstream-error': 'an upstream cell is already in an error state — fix the upstream BEFORE retouching this cell',
+        'name-mismatch': 'a function or named range typo — check the formula for misspelled SUM/IF/etc. or a named range that does not exist'
+      };
+      const hint = HINTS[e.rootCause] || '';
+      rootCausePart = ` [ROOT CAUSE: ${e.rootCause}${hint ? ' — ' + hint : ''}]`;
+    }
     merged.blockingErrors.push({
       tool: 'healthScan',
-      message: `${e.sheet || '?'}!${e.addr || '?'} → ${e.value || 'errore'}${e.formula ? ' (formula: ' + String(e.formula).slice(0, 80) + ')' : ''}${refsPart}`
+      message: `${e.sheet || '?'}!${e.addr || '?'} → ${e.value || 'errore'}${rootCausePart}${e.formula ? ' (formula: ' + String(e.formula).slice(0, 80) + ')' : ''}${refsPart}`
     });
   }
   return merged;
@@ -3332,9 +3523,16 @@ async function runAgentLoop(objective, context, options = {}) {
   ];
 
   // Build enhanced user prompt with known-data hints for common companies
-  const compactCtx = compactAgentContext(context);
   const overview = buildWorkbookOverview(context);
-  let userPrompt = `Goal: ${objective}\n\n${overview}\n\nWorkbook context (compact JSON):\n${JSON.stringify(compactCtx, null, 2)}\n\nProceed step by step. When writing, ALWAYS pass an explicit "sheet" parameter — the active sheet at task start may NOT be where the user wants the data.`;
+  // AGENT_CONTEXT_FORMAT controls the on-prompt workbook serialization.
+  // Default markdown is ~2× cheaper in tokens than the legacy compact-JSON
+  // form AND surfaces formula↔value mismatches the JSON form hid (see
+  // bench/encoding_compare.js). Set AGENT_CONTEXT_FORMAT=json to roll back.
+  const ctxFormat = (process.env.AGENT_CONTEXT_FORMAT || 'markdown').toLowerCase();
+  const contextBlock = ctxFormat === 'json'
+    ? `Workbook context (compact JSON):\n${JSON.stringify(compactAgentContext(context), null, 2)}`
+    : `Workbook context (markdown):\n${formatContextMarkdown(context)}`;
+  let userPrompt = `Goal: ${objective}\n\n${overview}\n\n${contextBlock}\n\nProceed step by step. When writing, ALWAYS pass an explicit "sheet" parameter — the active sheet at task start may NOT be where the user wants the data.`;
   const lowerObjective = objective.toLowerCase();
   if (lowerObjective.includes('apple') || lowerObjective.includes('aapl')) {
     userPrompt += `\n\nHINT — These publicly known Apple FY2024 figures are rough sanity-check anchors, not live sources:\n- Revenue: ~$394B\n- Net Income: ~$97B\n- EBITDA: ~$120B\n- CapEx: ~$10B\n- D&A: ~$12B\n- Shares Outstanding: ~15.5B\n- Cash & Equivalents: ~$70B\n- Total Debt: ~$110B\n- Tax Rate: ~16%\nVerify or update current market/filing inputs with tools when available, then build the model with visible sources and review flags.`;
@@ -3537,10 +3735,22 @@ async function runAgentLoop(objective, context, options = {}) {
       if (parseFailed) {
         parseFailureStreak++;
         if (AGENT_FORCE_THINKING_AFTER_ERROR) forceThinkingNext = true;
-        logger.warn(`[AgentLoop] iter ${iteration} LLM JSON parse failed: ${llmResult.jsonError}`);
+        logger.warn(`[AgentLoop] iter ${iteration} LLM JSON parse failed (streak ${parseFailureStreak}): ${llmResult.jsonError}`);
         onEvent('iterationError', { iteration, error: `LLM JSON parse failed: ${llmResult.jsonError}` });
+        // After the second consecutive parse failure the model is almost
+        // always overflowing JSON-emission coherence on a too-large
+        // bulk_set_cell_ranges payload. The default "reply with a single
+        // JSON object" message does not address the actual cause. Switch
+        // to a payload-split prompt that names the size threshold and asks
+        // the model to halve its next call. Observed 2026-06-02 MEAT CREW
+        // iter 20: 3 consecutive parse fails at ~3.5-4.4 KB output, all
+        // recovered only after the model split the payload.
+        const rawLen = (llmResult.raw || '').length;
+        const splitHint = parseFailureStreak >= 2
+          ? ` Your previous output reached ~${rawLen} characters before breaking — that is the size range where JSON emission becomes unreliable. Halve the next call: emit a bulk_set_cell_ranges with AT MOST 10 entries (or split into 2-3 sequential calls), then continue with the rest in the following iterations. Do NOT try to retry the same large payload.`
+          : '';
         messages.push(makeUserMessage(
-          `Your previous response was not valid JSON (${llmResult.jsonError}). Reply with ONLY a single JSON object {"thought","tool","params"} — no extra text, no trailing characters. Continue the task from where you left off.`
+          `Your previous response was not valid JSON (${llmResult.jsonError}). Reply with ONLY a single JSON object {"thought","tool","params"} — no extra text, no trailing characters.${splitHint} Continue the task from where you left off.`
         ));
         if (parseFailureStreak <= 2) {
           iteration = Math.max(0, iteration - 1);
@@ -3939,6 +4149,47 @@ async function runAgentLoop(objective, context, options = {}) {
           pattern: stagnation.pattern
         });
         break;
+      }
+
+      // Semantic-error loop: same root cause recurring in the same sheet
+      // even though the tool varies. Soft severity = inject replan hint
+      // (don't kill the run, the agent may still recover). Hard severity
+      // = abort like a regular stagnation pattern.
+      const semanticLoop = detectSemanticErrorLoop(options.healthSeen || (context && context._healthSeen) || []);
+      if (semanticLoop) {
+        if (semanticLoop.severity === 'hard') {
+          aborted = true;
+          abortReason = `stagnation_semantic_loop:${semanticLoop.rootCause}@${semanticLoop.sheet}:x${semanticLoop.count}`;
+          results.push({
+            type: 'error',
+            error: abortReason,
+            stagnation: true,
+            pattern: 'semantic_error_loop',
+            rootCause: semanticLoop.rootCause,
+            sheet: semanticLoop.sheet,
+            count: semanticLoop.count
+          });
+          logger.warn(`[AgentLoop] Semantic loop detected (${abortReason})`);
+          onEvent('iterationError', { iteration, error: abortReason, stagnation: true, pattern: 'semantic_error_loop' });
+          break;
+        }
+        // Soft severity — inject a replan hint once per detection threshold
+        // crossing and let the loop continue. Mark on context so we don't
+        // re-inject the same hint every iteration after detection trips.
+        const lastInjected = context && context._semanticLoopHintAt;
+        const sigKey = `${semanticLoop.rootCause}@${semanticLoop.sheet}:${semanticLoop.count}`;
+        if (lastInjected !== sigKey) {
+          if (context && typeof context === 'object') context._semanticLoopHintAt = sigKey;
+          const replanMsg = buildSemanticLoopReplanMessage(semanticLoop);
+          messages.push(makeUserMessage(replanMsg));
+          logger.info(`[AgentLoop] Semantic loop soft-hint injected (${sigKey})`);
+          onEvent('iterationError', {
+            iteration,
+            error: `semantic_loop_soft:${sigKey}`,
+            stagnation: false,
+            pattern: 'semantic_error_loop_soft'
+          });
+        }
       }
 
       // No-progress safety net (per user: no hard cap if useful, only cap
@@ -5403,9 +5654,16 @@ function initAgentRun(objective, context, options = {}) {
   const promptVariant = options.promptVariant || DEFAULT_PROMPT_VARIANT;
   const systemPromptForRun = getSystemPrompt(promptVariant);
 
-  const compactCtx = compactAgentContext(context);
   const overview = buildWorkbookOverview(context);
-  let userPrompt = `Goal: ${objective}\n\n${overview}\n\nWorkbook context (compact JSON):\n${JSON.stringify(compactCtx, null, 2)}\n\nProceed step by step. When writing, ALWAYS pass an explicit "sheet" parameter — the active sheet at task start may NOT be where the user wants the data.`;
+  // AGENT_CONTEXT_FORMAT controls the on-prompt workbook serialization.
+  // Default markdown is ~2× cheaper in tokens than the legacy compact-JSON
+  // form AND surfaces formula↔value mismatches the JSON form hid (see
+  // bench/encoding_compare.js). Set AGENT_CONTEXT_FORMAT=json to roll back.
+  const ctxFormat = (process.env.AGENT_CONTEXT_FORMAT || 'markdown').toLowerCase();
+  const contextBlock = ctxFormat === 'json'
+    ? `Workbook context (compact JSON):\n${JSON.stringify(compactAgentContext(context), null, 2)}`
+    : `Workbook context (markdown):\n${formatContextMarkdown(context)}`;
+  let userPrompt = `Goal: ${objective}\n\n${overview}\n\n${contextBlock}\n\nProceed step by step. When writing, ALWAYS pass an explicit "sheet" parameter — the active sheet at task start may NOT be where the user wants the data.`;
   const lowerObjective = String(objective || '').toLowerCase();
   if (lowerObjective.includes('apple') || lowerObjective.includes('aapl')) {
     userPrompt += `\n\nHINT — These publicly known Apple FY2024 figures are rough sanity-check anchors, not live sources:\n- Revenue: ~$394B\n- Net Income: ~$97B\n- EBITDA: ~$120B\n- CapEx: ~$10B\n- D&A: ~$12B\n- Shares Outstanding: ~15.5B\n- Cash & Equivalents: ~$70B\n- Total Debt: ~$110B\n- Tax Rate: ~16%\nVerify or update current market/filing inputs with tools when available, then build the model with visible sources and review flags.`;
@@ -5903,6 +6161,37 @@ async function finishToolExecution(state, toolName, params, thought, toolResult,
     return { state, control: 'aborted', payload: { reason: state.abortReason } };
   }
 
+  // Semantic-error loop: complements detectToolStagnation by catching
+  // repeated SAME root-cause errors even when the agent rotates tools
+  // between writes and reads. Soft hint first; abort on hard.
+  const healthSeenStep = (state.context && state.context._healthSeen)
+    || (state.config && state.config._healthSeen) || [];
+  const semanticLoopStep = detectSemanticErrorLoop(healthSeenStep);
+  if (semanticLoopStep) {
+    if (semanticLoopStep.severity === 'hard') {
+      state.status = 'aborted';
+      state.abortReason = `stagnation_semantic_loop:${semanticLoopStep.rootCause}@${semanticLoopStep.sheet}:x${semanticLoopStep.count}`;
+      state.results.push({
+        type: 'error',
+        error: state.abortReason,
+        stagnation: true,
+        pattern: 'semantic_error_loop',
+        rootCause: semanticLoopStep.rootCause,
+        sheet: semanticLoopStep.sheet,
+        count: semanticLoopStep.count
+      });
+      onProgress('iterationError', { iteration: state.iteration, error: state.abortReason, stagnation: true, pattern: 'semantic_error_loop' });
+      return { state, control: 'aborted', payload: { reason: state.abortReason } };
+    }
+    const sigKey = `${semanticLoopStep.rootCause}@${semanticLoopStep.sheet}:${semanticLoopStep.count}`;
+    if (state._semanticLoopHintAt !== sigKey) {
+      state._semanticLoopHintAt = sigKey;
+      state.messages.push(makeUserMessage(buildSemanticLoopReplanMessage(semanticLoopStep)));
+      state.forceThinkingNext = true;
+      onProgress('agentSemanticLoopNudge', { iteration: state.iteration, rootCause: semanticLoopStep.rootCause, sheet: semanticLoopStep.sheet, count: semanticLoopStep.count });
+    }
+  }
+
   // No-progress safety net (per user: no hard cap if useful, only cap when
   // nothing happens). Fires when AGENT_NO_PROGRESS_LIMIT consecutive tool
   // results contain no successful mutation. Replaces the old hard iter cap
@@ -6001,7 +6290,14 @@ async function runAgentStep(state, clientResult, deps = {}) {
       state.parseFailureStreak++;
       if (AGENT_FORCE_THINKING_AFTER_ERROR) state.forceThinkingNext = true;
       onProgress('iterationError', { iteration: state.iteration, error: `LLM JSON parse failed: ${llmResult.jsonError}` });
-      state.messages.push(makeUserMessage(`Your previous response was not valid JSON (${llmResult.jsonError}). Reply with ONLY a single JSON object {"thought","tool","params"} — no extra text, no trailing characters. Continue the task from where you left off.`));
+      // Mirror runAgentLoop: after the 2nd consecutive parse fail the model
+      // is overflowing JSON-emission coherence on a too-large payload.
+      // Add a split hint that names the size threshold.
+      const rawLen = (llmResult.raw || '').length;
+      const splitHint = state.parseFailureStreak >= 2
+        ? ` Your previous output reached ~${rawLen} characters before breaking — that is the size range where JSON emission becomes unreliable. Halve the next call: emit a bulk_set_cell_ranges with AT MOST 10 entries (or split into 2-3 sequential calls), then continue with the rest in the following iterations. Do NOT try to retry the same large payload.`
+        : '';
+      state.messages.push(makeUserMessage(`Your previous response was not valid JSON (${llmResult.jsonError}). Reply with ONLY a single JSON object {"thought","tool","params"} — no extra text, no trailing characters.${splitHint} Continue the task from where you left off.`));
       // Refund up to 2 parse failures per slice. DeepSeek pro occasionally emits
       // truncated / malformed JSON that has nothing to do with the agent's task;
       // counting these toward maxIter pushed format_and_verify past cap in the
@@ -6301,6 +6597,8 @@ module.exports = {
   shouldUseAgentThinking,
   buildToolStagnationSignature,
   detectToolStagnation,
+  detectSemanticErrorLoop,
+  buildSemanticLoopReplanMessage,
   formatToolStagnationReason,
   executeAgentTool,
   formatToolResultForMessages,
