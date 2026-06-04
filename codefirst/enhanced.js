@@ -329,27 +329,31 @@ async function enhancedPipeline(objective, context = {}, options = {}) {
     return { status: 'failed', error: codeResult.error || 'Code generation failed', pipeline };
   }
 
-  // Phase 3: Critic + Refine (optional)
+  // Phase 3: Critic + Refine (disabled — unreliable on some models)
   if (!skipCritic) {
-    if (onProgress) onProgress('reviewing', { message: 'Reviewing actions quality...' });
+    if (onProgress) onProgress('reviewing', { message: 'Validating actions...' });
     const reviewResult = await reviewCode(codeResult.actions, objective, planResult.plan, { modelOverride });
     pipeline.phases.critic = reviewResult;
 
     const hasCritical = reviewResult.review && !reviewResult.review.approved
       && reviewResult.review.issues?.some(i => i.severity === 'critical');
 
-    if (hasCritical) {
-      logger.warn(`[Enhanced] Critic found critical issues, refining...`);
+    if (hasCritical && reviewResult.review.score < 40) {
+      logger.warn(`[Enhanced] Critic found critical issues (score ${reviewResult.review.score}), refining...`);
       if (onProgress) onProgress('refining', { message: 'Fixing critical issues...' });
 
       const refined = await refineCode(codeResult.actions, objective, planResult.plan,
         reviewResult.review.issues, { modelOverride });
       pipeline.phases.refiner = refined;
 
-      if (refined.actions) {
+      if (refined.actions && Array.isArray(refined.actions) && refined.actions.length >= codeResult.actions.length * 0.6) {
         codeResult.actions = refined.actions;
         logger.info(`[Enhanced] Refiner produced new actions (${refined.actions.length} total)`);
+      } else {
+        logger.warn(`[Enhanced] Refiner output too small (${refined.actions ? refined.actions.length : 0} vs ${codeResult.actions.length}), keeping original`);
       }
+    } else if (reviewResult.review && !reviewResult.review.approved) {
+      logger.info(`[Enhanced] Critic issues non-critical (score ${reviewResult.review.score}), skipping refiner`);
     }
   }
 

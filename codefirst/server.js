@@ -114,8 +114,6 @@ router.post('/start', async (req, res) => {
 
   logger.info(`[CodeFirst] Starting turn ${turnId}: "${message.slice(0, 100)}..."`);
 
-  activeRuns.set(turnId, { status: 'generating', start: Date.now() });
-
   try {
     const result = await generateAndExecute(message, context, {
       turnId,
@@ -123,36 +121,54 @@ router.post('/start', async (req, res) => {
       timeoutMs: 180000,
     });
 
-    activeRuns.set(turnId, {
-      ...activeRuns.get(turnId),
-      status: 'ready',
-      batchCount: result.batches.length,
-      cellCount: result.cellCount,
-      codeLength: result.codeLength,
-      plan: result.plan,
-      review: result.review,
-      warnings: result.warnings,
-      tokenUsage: result.tokenUsage,
-      timings: result.timings,
-      skillNames: result.skillNames,
-      code: result.code,
-    });
+    const IS_VERCEL = !!process.env.VERCEL;
 
-    res.json({
-      turnId,
-      status: 'ready',
-      batchCount: result.batches.length,
-      cellCount: result.cellCount,
-      codeLength: result.codeLength,
-      plan: result.plan ? { sections: result.plan.sections?.length, model_type: result.plan.model_type, estimated_cells: result.plan.estimated_cells } : null,
-      review: result.review ? { approved: result.review.approved, score: result.review.score, issues: result.review.issues?.length } : null,
-      warnings: result.warnings,
-      tokenUsage: result.tokenUsage,
-      timings: result.timings,
-      skillNames: result.skillNames,
-    });
+    if (IS_VERCEL) {
+      res.json({
+        turnId,
+        status: 'ready',
+        actions: result.actions,
+        batches: result.batches,
+        cellCount: result.cellCount,
+        codeLength: result.codeLength,
+        plan: result.plan ? { sections: result.plan.sections?.length, model_type: result.plan.model_type, estimated_cells: result.plan.estimated_cells } : null,
+        review: result.review ? { approved: result.review.approved, score: result.review.score, issues: result.review.issues?.length } : null,
+        warnings: result.warnings,
+        tokenUsage: result.tokenUsage,
+        timings: result.timings,
+        skillNames: result.skillNames,
+      });
+    } else {
+      activeRuns.set(turnId, {
+        batches: result.batches,
+        cellCount: result.cellCount,
+        codeLength: result.codeLength,
+        plan: result.plan,
+        review: result.review,
+        warnings: result.warnings,
+        tokenUsage: result.tokenUsage,
+        timings: result.timings,
+        skillNames: result.skillNames,
+        code: result.code,
+        status: 'ready',
+        batchCount: result.batches.length,
+      });
+
+      res.json({
+        turnId,
+        status: 'ready',
+        batchCount: result.batches.length,
+        cellCount: result.cellCount,
+        codeLength: result.codeLength,
+        plan: result.plan ? { sections: result.plan.sections?.length, model_type: result.plan.model_type, estimated_cells: result.plan.estimated_cells } : null,
+        review: result.review ? { approved: result.review.approved, score: result.review.score, issues: result.review.issues?.length } : null,
+        warnings: result.warnings,
+        tokenUsage: result.tokenUsage,
+        timings: result.timings,
+        skillNames: result.skillNames,
+      });
+    }
   } catch (error) {
-    activeRuns.set(turnId, { ...activeRuns.get(turnId), status: 'error', error: error.message });
     logger.error(`[CodeFirst] Error for ${turnId}: ${error.message}`);
     res.status(500).json({ error: error.message, turnId });
   }

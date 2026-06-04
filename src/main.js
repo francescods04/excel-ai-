@@ -703,14 +703,40 @@ async function runCodeFirstMode(text) {
     }
 
     removeMessage(planMsgId);
-    addMessage(`CodeFirst pronto. ${startData.batchCount} batch da applicare. In attesa di streaming...`, 'bot');
 
-    openCodeFirstStream(turnId, planMsgId);
+    if (startData.actions && startData.actions.length > 0) {
+      addMessage(`CodeFirst: ${startData.cellCount} celle generate. Applicazione su Excel...`, 'bot');
+      applyCodeFirstActions(startData.actions, turnId);
+    } else if (startData.batchCount > 0) {
+      addMessage(`CodeFirst pronto. ${startData.batchCount} batch da applicare. In attesa di streaming...`, 'bot');
+      openCodeFirstStream(turnId, planMsgId);
+    } else {
+      addMessage('CodeFirst completato ma nessuna azione generata.', 'error');
+      resetAgent();
+    }
   } catch (err) {
     removeMessage(planMsgId);
     addMessage('CodeFirst fallito: ' + err.message, 'error');
     resetAgent();
   }
+}
+
+function applyCodeFirstActions(actions, turnId) {
+  if (!actions || actions.length === 0) {
+    addLog('CodeFirst: nessuna azione da applicare');
+    addMessage('CodeFirst completato.', 'bot');
+    resetAgent();
+    return;
+  }
+
+  addLog(`CodeFirst: applico ${actions.length} azioni su Excel`);
+
+  enqueueActions({ actions, meta: { turnId, taskId: 'codefirst', itemId: 'direct_response' } },
+    state.excelActionQueue, showActionsPreview, hideActionsPreview,
+    (acts) => execActions(acts, updateStepsPanel));
+
+  addMessage(`Fatto! ${actions.length} azioni applicate. Apri il workbook per vedere il risultato.`, 'bot');
+  resetAgent();
 }
 
 function openCodeFirstStream(turnId, planMsgId) {
