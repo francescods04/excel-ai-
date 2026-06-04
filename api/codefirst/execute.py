@@ -76,7 +76,19 @@ class Workbook:
             if isinstance(props, (int, float, str)):
                 buf.set_cell(addr, value=props)
             elif isinstance(props, dict):
-                buf.set_cell(addr, **props)
+                p = dict(props)
+                if 'cellStyles' in p:
+                    cs = p.pop('cellStyles')
+                    for k, v in cs.items():
+                        if k == 'bold': p['bold'] = v
+                        elif k == 'italic': p['italic'] = v
+                        elif k == 'fontSize': p['fontSize'] = v
+                        elif k == 'numberFormat': p['numberFormat'] = v
+                        elif k == 'fill': p['fill'] = v
+                        elif k == 'fontColor': p['fontColor'] = v
+                        elif k == 'alignment': p['alignment'] = v
+                        elif k == 'border': p['border'] = v
+                buf.set_cell(addr, **p)
 
     def write_range(self, sheet_name, start_addr, data_2d):
         self._maybe_flush(except_sheet=sheet_name)
@@ -86,7 +98,20 @@ class Workbook:
             if not isinstance(row, (list, tuple)): row = [row]
             for ci, val in enumerate(row):
                 addr = _make_addr(sc + ci, sr + ri)
-                if isinstance(val, dict): buf.set_cell(addr, **val)
+                if isinstance(val, dict):
+                    p = dict(val)
+                    if 'cellStyles' in p:
+                        cs = p.pop('cellStyles')
+                        for k, v in cs.items():
+                            if k == 'bold': p['bold'] = v
+                            elif k == 'italic': p['italic'] = v
+                            elif k == 'fontSize': p['fontSize'] = v
+                            elif k == 'numberFormat': p['numberFormat'] = v
+                            elif k == 'fill': p['fill'] = v
+                            elif k == 'fontColor': p['fontColor'] = v
+                            elif k == 'alignment': p['alignment'] = v
+                            elif k == 'border': p['border'] = v
+                    buf.set_cell(addr, **p)
                 else: buf.set_cell(addr, value=val)
 
     def fill(self, sheet_name, start_addr, end_addr, formula=None, value=None):

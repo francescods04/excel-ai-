@@ -10,10 +10,6 @@
       }
     },
     {
-      "src": "api/codefirst/execute.py",
-      "use": "@vercel/python"
-    },
-    {
       "src": "src/**",
       "use": "@vercel/static"
     },
@@ -48,7 +44,6 @@
     { "src": "/dashboard", "dest": "/public/dashboard.html" },
     { "src": "/dashboard.html", "dest": "/public/dashboard.html" },
     { "src": "/manifest.xml", "dest": "/api/index.js" },
-    { "src": "/api/codefirst/execute", "dest": "/api/codefirst/execute" },
     { "src": "/api/(.*)", "dest": "/api/index.js" },
     { "src": "/admin", "dest": "/api/index.js" },
     { "src": "/warmup", "dest": "/api/index.js" },

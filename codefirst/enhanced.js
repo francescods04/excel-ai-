@@ -3,8 +3,6 @@
 const fs = require('fs');
 const path = require('path');
 const { callLLM, resetUsageStats, getUsageStats } = require('../server/tools/llm');
-const { executeCode } = require('./bridge');
-const { generateCode } = require('./codegen');
 const { listSkills, readSkill } = require('../server/skills/loader');
 const logger = require('../server/utils/logger');
 
@@ -97,7 +95,7 @@ async function planWorkbook(objective, context, options = {}) {
 async function generateWithPlan(objective, context, plan, options = {}) {
   const { callLLMFn = callLLM, modelOverride = null } = options;
 
-  const systemPrompt = loadPrompt('codegen-v2');
+  const systemPrompt = loadPrompt('codegen-v3');
   const planSummary = JSON.stringify(plan, null, 2);
   const contextStr = buildContextSummary(context);
 
@@ -114,11 +112,11 @@ async function generateWithPlan(objective, context, plan, options = {}) {
     '```',
     '',
     '## Instructions',
-    'Write Python code using excel_builder that implements this plan. Follow the formatting conventions specified in the plan.',
-    'CRITICAL: Every computed value MUST be a formula. Never hardcode Python calculations.',
+    'Generate JSON actions that implement this plan. Follow the formatting conventions specified in the plan.',
+    'CRITICAL: Every computed value MUST use "formula", never hardcoded "value".',
     'CRITICAL: Match the density specified in the plan. If plan says 60 months, generate ALL 60.',
     'CRITICAL: Apply formatting as specified per section (header style, input style, formula style).',
-    'Return ONLY {"code": "..."}',
+    'Return ONLY {"actions": [...]}',
   ].join('\n');
 
   resetUsageStats();
@@ -133,41 +131,48 @@ async function generateWithPlan(objective, context, plan, options = {}) {
       role: null,
       thinkingDisabled: true,
       jsonMode: true,
-      label: 'codefirst_codegen_v2',
+      label: 'codefirst_codegen_v3',
     });
 
+    let actions = null;
     let code = null;
+
     if (result && typeof result === 'object') {
-      if (result.code && typeof result.code === 'string') {
-        code = result.code;
-      } else {
-        const vals = Object.values(result).filter(v => typeof v === 'string');
-        if (vals.length === 1) code = vals[0];
+      if (Array.isArray(result.actions)) {
+        actions = result.actions;
+      } else if (Array.isArray(result)) {
+        actions = result;
       }
+      if (result.code && typeof result.code === 'string') code = result.code;
     }
 
-    if (code && code.includes('from excel_builder')) {
-      code = code.replace(/```python\s*/g, '').replace(/```\s*$/g, '').trim();
+    if (!actions && result && typeof result === 'string') {
+      try { const parsed = JSON.parse(result); actions = parsed.actions || parsed; } catch (_) {}
     }
 
     const usage = getUsageStats();
 
-    logger.info(`[Enhanced] CodeGen done (${Date.now() - start}ms): ${code ? code.length : 0} chars`);
+    logger.info(`[Enhanced] CodeGen done (${Date.now() - start}ms): ${actions ? actions.length : 0} actions`);
 
     return {
+      actions,
       code,
       codeTokens: usage,
       codeTimeMs: Date.now() - start,
     };
   } catch (error) {
     logger.error(`[Enhanced] CodeGen failed: ${error.message}`);
-    return { code: null, error: error.message };
+    return { actions: null, error: error.message };
   }
 }
 
-async function reviewCode(code, objective, plan, options = {}) {
+async function reviewCode(actionsOrCode, objective, plan, options = {}) {
   const { callLLMFn = callLLM, modelOverride = null } = options;
-  const systemPrompt = loadPrompt('critic');
+  const systemPrompt = loadPrompt('critic-v3');
+
+  const actionsJson = Array.isArray(actionsOrCode)
+    ? JSON.stringify(actionsOrCode).slice(0, 15000)
+    : String(actionsOrCode).slice(0, 15000);
 
   const userPrompt = [
     '## User Objective',
@@ -176,12 +181,12 @@ async function reviewCode(code, objective, plan, options = {}) {
     '## Code Plan',
     JSON.stringify(plan?.sections?.map(s => ({ sheet: s.sheet, title: s.title, key_formulas: s.key_formulas })) || {}, null, 2).slice(0, 3000),
     '',
-    '## Generated Python Code',
-    '```python',
-    code.slice(0, 15000),
+    '## Generated Actions',
+    '```json',
+    actionsJson,
     '```',
     '',
-    'Review this code. Report issues. Return JSON.',
+    'Review these actions. Report issues. Return JSON.',
   ].join('\n');
 
   resetUsageStats();
@@ -214,15 +219,19 @@ async function reviewCode(code, objective, plan, options = {}) {
   }
 }
 
-async function refineCode(code, objective, plan, criticIssues, options = {}) {
+async function refineCode(actionsOrCode, objective, plan, criticIssues, options = {}) {
   const { callLLMFn = callLLM, modelOverride = null } = options;
 
-  const systemPrompt = loadPrompt('codegen-v2');
+  const systemPrompt = loadPrompt('codegen-v3');
   const planSummary = JSON.stringify(plan, null, 2).slice(0, 4000);
   const issuesSummary = criticIssues
     .filter(i => i.severity === 'critical' || i.severity === 'high')
     .map(i => `[${i.severity}] ${i.location}: ${i.description}\n  FIX: ${i.fix}`)
     .join('\n');
+
+  const actionsJson = Array.isArray(actionsOrCode)
+    ? JSON.stringify(actionsOrCode).slice(0, 8000)
+    : String(actionsOrCode).slice(0, 8000);
 
   const userPrompt = [
     '## Original Objective',
@@ -231,15 +240,15 @@ async function refineCode(code, objective, plan, criticIssues, options = {}) {
     '## Code Plan',
     '```json', planSummary, '```',
     '',
-    '## Previous Code (needs fixes)',
-    '```python', code.slice(0, 8000), '```',
+    '## Previous Actions (needs fixes)',
+    '```json', actionsJson, '```',
     '',
     '## CRITIC ISSUES TO FIX',
     issuesSummary,
     '',
     '## Instructions',
     'Fix ALL the critical and high-severity issues listed above. Keep everything else the same.',
-    'Return ONLY {"code": "..."}',
+    'Return ONLY {"actions": [...]}',
   ].join('\n');
 
   resetUsageStats();
@@ -257,43 +266,32 @@ async function refineCode(code, objective, plan, criticIssues, options = {}) {
       label: 'codefirst_refiner',
     });
 
-    let code = null;
+    let actions = null;
     if (result && typeof result === 'object') {
-      if (result.code && typeof result.code === 'string') code = result.code;
-      else {
-        const vals = Object.values(result).filter(v => typeof v === 'string');
-        if (vals.length === 1) code = vals[0];
-      }
+      if (Array.isArray(result.actions)) actions = result.actions;
+      else if (Array.isArray(result)) actions = result;
     }
-    if (code && code.includes('from excel_builder')) {
-      code = code.replace(/```python\s*/g, '').replace(/```\s*$/g, '').trim();
+    if (!actions && result && typeof result === 'string') {
+      try { const parsed = JSON.parse(result); actions = parsed.actions || parsed; } catch (_) {}
     }
 
     const usage = getUsageStats();
-    logger.info(`[Enhanced] Refiner done (${Date.now() - start}ms): ${code ? code.length : 0} chars`);
+    logger.info(`[Enhanced] Refiner done (${Date.now() - start}ms): ${actions ? actions.length : 0} actions`);
 
-    return { code, refinerTokens: usage, refinerTimeMs: Date.now() - start };
+    return { actions, refinerTokens: usage, refinerTimeMs: Date.now() - start };
   } catch (error) {
     logger.warn(`[Enhanced] Refiner failed: ${error.message}`);
-    return { code: null };
+    return { actions: null };
   }
 }
 
-async function executeAndStream(code, options = {}) {
-  const { onProgress } = options;
-  const start = Date.now();
-
-  if (onProgress) onProgress('executing', { message: 'Running Python code...' });
-
-  const execResult = await executeCode(code, { timeoutMs: 60000 });
-
-  logger.info(`[Enhanced] Execution done (${Date.now() - start}ms): ${execResult.actions.length} batches, ${execResult.cellCount} cells`);
-
-  return {
-    actions: execResult.actions,
-    cellCount: execResult.cellCount,
-    executionMs: Date.now() - start,
-  };
+function actionsFromResult(actions) {
+  if (!actions || !Array.isArray(actions)) return { actions: [], cellCount: 0 };
+  const cellCount = actions.reduce((sum, a) => {
+    if (a.type === 'setCellRange' && a.cells) return sum + Object.keys(a.cells).length;
+    return sum;
+  }, 0);
+  return { actions, cellCount };
 }
 
 async function enhancedPipeline(objective, context = {}, options = {}) {
@@ -313,27 +311,28 @@ async function enhancedPipeline(objective, context = {}, options = {}) {
 
   if (!planResult.plan || !planResult.plan.sections) {
     logger.warn('[Enhanced] Plan failed or empty, falling back to direct codegen');
-    const directResult = await generateCode(objective, context, { recordTokenUsage: true, timeoutMs: 180000, modelOverride });
-    if (directResult.code) {
-      const exec = await executeAndStream(directResult.code, { onProgress });
-      return { ...exec, code: directResult.code, pipeline: 'direct', tokenUsage: directResult.tokenUsage };
+    const minimalPlan = { sections: [{ sheet: 'Sheet1', title: objective, key_formulas: [] }], global_conventions: {} };
+    const directResult = await generateWithPlan(objective, context, minimalPlan, { modelOverride });
+    if (directResult.actions && Array.isArray(directResult.actions)) {
+      const cellInfo = actionsFromResult(directResult.actions);
+      return { ...cellInfo, pipeline: 'direct', tokenUsage: directResult.codeTokens };
     }
     return { status: 'failed', error: 'Code generation failed' };
   }
 
-  // Phase 2: Code Generation with plan
+  // Phase 2: Code Generation with plan (JSON actions)
   if (onProgress) onProgress('generating', { message: `Building ${planResult.plan.sections.length} sections...` });
   const codeResult = await generateWithPlan(objective, context, planResult.plan, { modelOverride });
   pipeline.phases.codegen = codeResult;
 
-  if (!codeResult.code) {
+  if (!codeResult.actions || !Array.isArray(codeResult.actions)) {
     return { status: 'failed', error: codeResult.error || 'Code generation failed', pipeline };
   }
 
   // Phase 3: Critic + Refine (optional)
   if (!skipCritic) {
-    if (onProgress) onProgress('reviewing', { message: 'Reviewing code quality...' });
-    const reviewResult = await reviewCode(codeResult.code, objective, planResult.plan, { modelOverride });
+    if (onProgress) onProgress('reviewing', { message: 'Reviewing actions quality...' });
+    const reviewResult = await reviewCode(codeResult.actions, objective, planResult.plan, { modelOverride });
     pipeline.phases.critic = reviewResult;
 
     const hasCritical = reviewResult.review && !reviewResult.review.approved
@@ -343,21 +342,20 @@ async function enhancedPipeline(objective, context = {}, options = {}) {
       logger.warn(`[Enhanced] Critic found critical issues, refining...`);
       if (onProgress) onProgress('refining', { message: 'Fixing critical issues...' });
 
-      const refined = await refineCode(codeResult.code, objective, planResult.plan,
+      const refined = await refineCode(codeResult.actions, objective, planResult.plan,
         reviewResult.review.issues, { modelOverride });
       pipeline.phases.refiner = refined;
 
-      if (refined.code) {
-        pipeline.phases.codegen.code = refined.code;
-        logger.info(`[Enhanced] Refiner produced new code (${refined.code.length} chars)`);
+      if (refined.actions) {
+        codeResult.actions = refined.actions;
+        logger.info(`[Enhanced] Refiner produced new actions (${refined.actions.length} total)`);
       }
     }
   }
 
-  // Phase 4: Execute
-  if (onProgress) onProgress('executing', { message: 'Writing to Excel...' });
-  const execResult = await executeAndStream(codeResult.code, { onProgress });
-  pipeline.phases.execution = execResult;
+  // Phase 4: Actions are ready (no Python execution needed)
+  const cellInfo = actionsFromResult(codeResult.actions);
+  pipeline.phases.execution = { ...cellInfo, executionMs: 0 };
 
   const totalMs = Date.now() - totalStart;
   const totalTokens = {
@@ -366,14 +364,14 @@ async function enhancedPipeline(objective, context = {}, options = {}) {
     calls: (planResult.planTokens?.calls || 0) + (codeResult.codeTokens?.calls || 0) + (pipeline.phases.critic?.reviewTokens?.calls || 0),
   };
 
-  logger.info(`[Enhanced] Pipeline complete (${totalMs}ms): ${execResult.cellCount} cells, ${totalTokens.promptTokens + totalTokens.completionTokens} tokens, ${totalTokens.calls} LLM calls`);
+  logger.info(`[Enhanced] Pipeline complete (${totalMs}ms): ${cellInfo.cellCount} cells, ${totalTokens.promptTokens + totalTokens.completionTokens} tokens, ${totalTokens.calls} LLM calls`);
 
   return {
     status: 'ok',
-    code: codeResult.code,
-    codeLength: codeResult.code.length,
-    cellCount: execResult.cellCount,
-    actions: execResult.actions,
+    code: codeResult.code || null,
+    codeLength: codeResult.code ? codeResult.code.length : 0,
+    cellCount: cellInfo.cellCount,
+    actions: cellInfo.actions,
     plan: planResult.plan,
     review: pipeline.phases.critic?.review || null,
     pipeline,
