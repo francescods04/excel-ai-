@@ -6,8 +6,39 @@ const logger = require('../server/utils/logger');
 
 const PYTHON_TIMEOUT_MS = Number(process.env.CODEFIRST_PYTHON_TIMEOUT_MS) || 60000;
 const RUNTIME_DIR = path.join(__dirname, 'runtime');
+const IS_VERCEL = !!process.env.VERCEL;
+
+async function executeCodeVercel(code) {
+  const baseUrl = process.env.PUBLIC_URL
+    || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null)
+    || 'http://localhost:3000';
+  const url = `${baseUrl}/api/codefirst/execute`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code }),
+    signal: AbortSignal.timeout(PYTHON_TIMEOUT_MS),
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(`Vercel Python error: ${data.error || res.status}`);
+  }
+  return {
+    actions: data.actions || [],
+    cellCount: (data.actions || []).reduce((s, a) =>
+      s + (a.type === 'setCellRange' && a.cells ? Object.keys(a.cells).length : 0), 0),
+    stderr: null,
+    elapsedMs: 0,
+  };
+}
 
 async function executeCode(code, options = {}) {
+  if (IS_VERCEL) return executeCodeVercel(code);
+  return executeCodeLocal(code, options);
+}
+
+async function executeCodeLocal(code, options = {}) {
   const timeoutMs = options.timeoutMs || PYTHON_TIMEOUT_MS;
   const start = Date.now();
 

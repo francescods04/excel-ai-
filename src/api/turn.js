@@ -149,4 +149,16 @@ async function getErrorMessageFromResponse(response, fallbackMessage) {
   return fallback;
 }
 
-export { startTurn, approveTurnExecution, postTurnStep, postTurnResponse, postTurnResponseBatch, postTurnActionResult, postHealthReport, getTurn, steerTurn, getErrorMessageFromResponse, API_BASE };
+async function startCodeFirst(message, context, modelOverride) {
+  const res = await fetch(`${API_BASE}/api/codefirst/start`, {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ message, context, modelOverride })
+  });
+  if (!res.ok) {
+    throw new Error(await getErrorMessageFromResponse(res, 'Errore avvio CodeFirst'));
+  }
+  return res.json();
+}
+
+export { startTurn, startCodeFirst, approveTurnExecution, postTurnStep, postTurnResponse, postTurnResponseBatch, postTurnActionResult, postHealthReport, getTurn, steerTurn, getErrorMessageFromResponse, API_BASE };

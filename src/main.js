@@ -17,7 +17,7 @@ import { getExcelContext } from './excel/context.js';
 import { worksheetExists, readWorkbookSnapshot, readSheetSnapshot, readRangeSnapshot, readRangeAsCsv, readNamedRanges, readMultiRangeBatch, readFormatSummary } from './excel/readers.js';
 import { enqueueActions, executeActions as execActions, undoLastSnapshot, waitForActionQueueIdle, execRunJavaScript, isRunJavaScriptEnabled } from './excel/writers.js';
 import { startHealthScanner, stopHealthScanner } from './excel/healthScan.js';
-import { startTurn, approveTurnExecution, postTurnStep, postTurnResponse, postTurnResponseBatch, postTurnActionResult, postHealthReport, getTurn, steerTurn, getErrorMessageFromResponse } from './api/turn.js';
+import { startTurn, startCodeFirst, approveTurnExecution, postTurnStep, postTurnResponse, postTurnResponseBatch, postTurnActionResult, postHealthReport, getTurn, steerTurn, getErrorMessageFromResponse } from './api/turn.js';
 import { startAgent, resumeAgentWithResponse, postAgentClientResponse } from './api/agent.js';
 import { loadModelConfig, changeModel, warmupLLM } from './api/config.js';
 import { init as initAuth, getAccessToken, apiCall } from './auth/auth.js';
@@ -289,6 +289,15 @@ async function handleSend() {
   showTypingIndicator();
 
   try {
+    const isCodeFirst = text.startsWith('/cf ') || text.startsWith('/codefirst ');
+    if (isCodeFirst) {
+      const objective = text.replace(/^\/(cf|codefirst)\s+/, '');
+      if (!objective) { addMessage('Usa: /cf <descrizione> per generare con CodeFirst', 'bot'); return; }
+      addLog('CodeFirst mode: generazione codice Python → Excel', 'info');
+      await runCodeFirstMode(objective);
+      return;
+    }
+
     if (shouldUseAgentMode(text)) {
       if (!agentModeCheck.checked) {
         addMessage('Ho rilevato una richiesta complessa. Preparo un piano agentico con preview e approvazione prima delle modifiche.', 'bot');
@@ -678,6 +687,89 @@ async function resumeAgent(agentId, userResponse) {
     state.isProcessing = false;
     sendBtn.disabled = false;
   }
+}
+
+async function runCodeFirstMode(text) {
+  const context = await gatherContext('codefirst');
+  const planMsgId = addMessage('Generazione codice Python in corso...', 'bot');
+
+  try {
+    const startData = await startCodeFirst(text, context, modelSelect.value);
+    const turnId = startData.turnId;
+    addLog(`CodeFirst avviato: ${turnId} | ${startData.cellCount || '?'} celle previste | ${startData.tokenUsage ? ((startData.tokenUsage.promptTokens || 0) + (startData.tokenUsage.completionTokens || 0)).toLocaleString() + ' token' : ''}`);
+
+    if (startData.plan) {
+      addLog(`Piano: ${startData.plan.sections} sezioni, tipo ${startData.plan.model_type || '?'}`);
+    }
+
+    removeMessage(planMsgId);
+    addMessage(`CodeFirst pronto. ${startData.batchCount} batch da applicare. In attesa di streaming...`, 'bot');
+
+    openCodeFirstStream(turnId, planMsgId);
+  } catch (err) {
+    removeMessage(planMsgId);
+    addMessage('CodeFirst fallito: ' + err.message, 'error');
+    resetAgent();
+  }
+}
+
+function openCodeFirstStream(turnId, planMsgId) {
+  const token = getAccessToken();
+  const src = new EventSource(`${API_BASE}/api/codefirst/stream/${turnId}${token ? '?token=' + encodeURIComponent(token) : ''}`);
+
+  let receivedActions = false;
+
+  src.addEventListener('turnStarted', (e) => {
+    try { const d = JSON.parse(e.data); addLog(`CodeFirst stream iniziato: ${d.status}`); } catch (_) {}
+  });
+
+  src.addEventListener('codefirstReady', (e) => {
+    try {
+      const d = JSON.parse(e.data);
+      addLog(`CodeFirst: ${d.batchCount} batch, ${d.cellCount} celle${d.tokenUsage ? ', ' + ((d.tokenUsage.promptTokens||0)+(d.tokenUsage.completionTokens||0)).toLocaleString() + ' token' : ''}`);
+    } catch (_) {}
+  });
+
+  src.addEventListener('taskActions', (e) => {
+    receivedActions = true;
+    try {
+      const data = JSON.parse(e.data);
+      if (data.actions && data.actions.length > 0) {
+        addLog(`CodeFirst: applico ${data.actions.length} azioni su Excel`);
+        enqueueActions({ actions: data.actions, meta: { turnId: data.turnId, taskId: 'codefirst', itemId: data.itemId } },
+          state.excelActionQueue, showActionsPreview, hideActionsPreview,
+          (acts) => execActions(acts, updateStepsPanel), (result) => {});
+      }
+    } catch (_) {}
+  });
+
+  src.addEventListener('codefirstComplete', (e) => {
+    try {
+      const d = JSON.parse(e.data);
+      addLog(`CodeFirst completato: ${d.totalBatches} batch applicati`);
+    } catch (_) {}
+    addMessage('Fatto! Foglio generato con CodeFirst.', 'bot');
+    src.close();
+    resetAgent();
+  });
+
+  src.addEventListener('codefirstError', (e) => {
+    try {
+      const d = JSON.parse(e.data);
+      addMessage('CodeFirst errore: ' + (d.error || 'sconosciuto'), 'error');
+    } catch (_) {}
+    src.close();
+    resetAgent();
+  });
+
+  src.onerror = () => {
+    if (!receivedActions) {
+      addMessage('CodeFirst: impossibile connettersi al server', 'error');
+      resetAgent();
+    }
+  };
+
+  state.currentEventSource = src;
 }
 
 async function runTurnMode(text) {
