@@ -35,11 +35,11 @@ function chunkActions(actions, maxCellsPerBatch = 200) {
 }
 
 async function generateAndExecute(objective, context = {}, options = {}) {
-  const { turnId, modelOverride, timeoutMs = 240000 } = options;
+  const { turnId, modelOverride, timeoutMs = 240000, enableCritic = false } = options;
 
   const result = await enhancedPipeline(objective, context, {
     modelOverride,
-    skipCritic: false,
+    skipCritic: !enableCritic,
     onProgress: options.onProgress || null,
   });
 

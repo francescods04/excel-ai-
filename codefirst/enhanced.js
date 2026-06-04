@@ -93,7 +93,7 @@ async function planWorkbook(objective, context, options = {}) {
 }
 
 async function generateWithPlan(objective, context, plan, options = {}) {
-  const { callLLMFn = callLLM, modelOverride = null } = options;
+  const { callLLMFn = callLLM, modelOverride = null, sliceFocus = null, timeoutMs = 180000, label = 'codefirst_codegen_v3' } = options;
 
   const systemPrompt = loadPrompt('codegen-v3');
   const planSummary = JSON.stringify(plan, null, 2);
@@ -111,13 +111,15 @@ async function generateWithPlan(objective, context, plan, options = {}) {
     planSummary,
     '```',
     '',
+    sliceFocus ? `## FOCUS — Generate ONLY the "${sliceFocus}" sheet section. Other sheets exist or will be generated separately; reference them with cross-sheet refs as needed.` : '',
+    '',
     '## Instructions',
     'Generate JSON actions that implement this plan. Follow the formatting conventions specified in the plan.',
     'CRITICAL: Every computed value MUST use "formula", never hardcoded "value".',
     'CRITICAL: Match the density specified in the plan. If plan says 60 months, generate ALL 60.',
     'CRITICAL: Apply formatting as specified per section (header style, input style, formula style).',
     'Return ONLY {"actions": [...]}',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 
   resetUsageStats();
   const start = Date.now();
@@ -126,12 +128,12 @@ async function generateWithPlan(objective, context, plan, options = {}) {
     const result = await callLLMFn({
       system: systemPrompt,
       userText: userPrompt,
-      timeoutMs: 180000,
+      timeoutMs,
       modelOverride,
       role: null,
       thinkingDisabled: true,
       jsonMode: true,
-      label: 'codefirst_codegen_v3',
+      label,
     });
 
     let actions = null;
@@ -164,6 +166,131 @@ async function generateWithPlan(objective, context, plan, options = {}) {
     logger.error(`[Enhanced] CodeGen failed: ${error.message}`);
     return { actions: null, error: error.message };
   }
+}
+
+function planComplexity(plan) {
+  if (!plan?.sections) return { sections: 0, estCells: 0 };
+  const sections = plan.sections.length;
+  const estCells = Number(plan.estimated_cells) || sections * 30;
+  return { sections, estCells };
+}
+
+function buildSlices(plan) {
+  const sections = plan?.sections || [];
+  const slices = [];
+  for (let i = 0; i < sections.length; i++) {
+    const s = sections[i];
+    const sheet = s.sheet || 'Sheet1';
+    const estCells = Number(s.estimated_cells) || 0;
+    const sliceLabel = s.title ? `${sheet} — ${s.title}` : sheet;
+    slices.push({
+      id: `${sheet}_${i}`,
+      label: sliceLabel,
+      sheet,
+      section: s,
+      estCells: estCells || (s.is_time_series && s.periods ? Math.min(s.periods * 6, 360) : 60),
+    });
+  }
+  return slices;
+}
+
+async function generateStepwise(objective, context, plan, options = {}) {
+  const { modelOverride = null, onProgress = null, parallel = true, maxConcurrency = 5 } = options;
+  const slices = buildSlices(plan);
+  if (slices.length === 0) return { actions: [], codeTokens: { promptTokens: 0, completionTokens: 0, calls: 0 }, codeTimeMs: 0, sliceResults: [], stepwise: true };
+
+  const allSheets = [...new Set(slices.map(s => s.sheet))];
+  logger.info(`[Enhanced] Stepwise codegen: ${slices.length} slices across ${allSheets.length} sheets [${allSheets.join(', ')}]`);
+
+  const createActions = allSheets.map(s => ({ type: 'createSheet', sheet: s }));
+  const sheetCreated = new Set(allSheets);
+
+  const totals = { promptTokens: 0, completionTokens: 0, calls: 0 };
+  let totalMs = 0;
+
+  async function runSlice(slice, idx) {
+    if (onProgress) onProgress('generating', { message: `Building "${slice.label}" (${idx + 1}/${slices.length})...` });
+    const subPlan = {
+      sections: [slice.section],
+      global_conventions: plan.global_conventions || {},
+      model_type: plan.model_type,
+      cross_sheet_deps: plan.cross_sheet_deps,
+      estimated_cells: slice.estCells,
+    };
+    const baseTimeout = slice.estCells > 400 ? 240000 : (slice.estCells > 200 ? 180000 : 120000);
+    const focusLine = `the "${slice.label}" section in sheet "${slice.sheet}"${slice.section.row_range ? ` rows ${slice.section.row_range}` : ''}`;
+    const subResult = await generateWithPlan(objective, context, subPlan, {
+      modelOverride,
+      sliceFocus: focusLine,
+      timeoutMs: baseTimeout,
+      label: `cf_slice_${slice.id}`,
+    });
+    if (subResult.codeTokens) {
+      totals.promptTokens += subResult.codeTokens.promptTokens || 0;
+      totals.completionTokens += subResult.codeTokens.completionTokens || 0;
+      totals.calls += subResult.codeTokens.calls || 0;
+    }
+    totalMs += subResult.codeTimeMs || 0;
+    if (subResult.actions && subResult.actions.length > 0) {
+      return { slice, actions: subResult.actions, error: null };
+    }
+
+    logger.warn(`[Enhanced] Slice "${slice.label}" failed (${subResult.error}). Retrying with reduced density.`);
+    const retry = await generateWithPlan(
+      `${objective}\n\nNOTE: previous attempt timed out. For "${slice.label}" use only annual columns or split rows; keep output under 200 cells.`,
+      context, subPlan,
+      { modelOverride, sliceFocus: focusLine, timeoutMs: 180000, label: `cf_slice_${slice.id}_retry` }
+    );
+    if (retry.codeTokens) {
+      totals.promptTokens += retry.codeTokens.promptTokens || 0;
+      totals.completionTokens += retry.codeTokens.completionTokens || 0;
+      totals.calls += retry.codeTokens.calls || 0;
+    }
+    totalMs += retry.codeTimeMs || 0;
+    return { slice, actions: retry.actions || [], error: retry.error || subResult.error };
+  }
+
+  const sliceResults = [];
+  if (parallel) {
+    let cursor = 0;
+    async function worker() {
+      while (true) {
+        const idx = cursor++;
+        if (idx >= slices.length) return;
+        try {
+          sliceResults.push(await runSlice(slices[idx], idx));
+        } catch (e) {
+          sliceResults.push({ slice: slices[idx], actions: [], error: e.message });
+        }
+      }
+    }
+    const workers = Array.from({ length: Math.min(maxConcurrency, slices.length) }, () => worker());
+    await Promise.all(workers);
+  } else {
+    for (let i = 0; i < slices.length; i++) {
+      sliceResults.push(await runSlice(slices[i], i));
+    }
+  }
+
+  const allActions = [...createActions];
+  for (const r of sliceResults) {
+    for (const a of r.actions) {
+      if (a.type === 'createSheet' && sheetCreated.has(a.sheet)) continue;
+      if (a.type === 'createSheet') sheetCreated.add(a.sheet);
+      allActions.push(a);
+    }
+  }
+
+  const failedSlices = sliceResults.filter(r => !r.actions || r.actions.length === 0);
+  logger.info(`[Enhanced] Stepwise done: ${sliceResults.length - failedSlices.length}/${sliceResults.length} slices OK, ${allActions.length} actions, ${totals.calls} LLM calls`);
+
+  return {
+    actions: allActions,
+    codeTokens: totals,
+    codeTimeMs: totalMs,
+    sliceResults: sliceResults.map(r => ({ slice: r.slice.label, actionCount: r.actions.length, error: r.error })),
+    stepwise: true,
+  };
 }
 
 async function reviewCode(actionsOrCode, objective, plan, options = {}) {
@@ -297,9 +424,10 @@ function actionsFromResult(actions) {
 async function enhancedPipeline(objective, context = {}, options = {}) {
   const {
     modelOverride = null,
-    skipCritic = false,
+    skipCritic = true,
     onProgress = null,
   } = options;
+  const { sanitizeActions } = require('./actionSanitizer');
 
   const totalStart = Date.now();
   const pipeline = { phases: {} };
@@ -314,18 +442,46 @@ async function enhancedPipeline(objective, context = {}, options = {}) {
     const minimalPlan = { sections: [{ sheet: 'Sheet1', title: objective, key_formulas: [] }], global_conventions: {} };
     const directResult = await generateWithPlan(objective, context, minimalPlan, { modelOverride });
     if (directResult.actions && Array.isArray(directResult.actions)) {
-      const cellInfo = actionsFromResult(directResult.actions);
-      return { ...cellInfo, pipeline: 'direct', tokenUsage: directResult.codeTokens };
+      const sanitized = sanitizeActions(directResult.actions);
+      const cellInfo = actionsFromResult(sanitized.actions);
+      return {
+        status: 'ok',
+        actions: cellInfo.actions,
+        cellCount: cellInfo.cellCount,
+        plan: minimalPlan,
+        review: null,
+        pipeline: { phases: { plan: planResult, codegen: directResult }, mode: 'direct' },
+        totalTokens: directResult.codeTokens,
+        totalMs: Date.now() - totalStart,
+        skillNames: [],
+        sanitizerStats: sanitized.stats,
+      };
     }
     return { status: 'failed', error: 'Code generation failed' };
   }
 
-  // Phase 2: Code Generation with plan (JSON actions)
-  if (onProgress) onProgress('generating', { message: `Building ${planResult.plan.sections.length} sections...` });
-  const codeResult = await generateWithPlan(objective, context, planResult.plan, { modelOverride });
-  pipeline.phases.codegen = codeResult;
+  // Phase 2: Code Generation. Stepwise per-sheet for big plans, single-shot for small.
+  const cx = planComplexity(planResult.plan);
+  const stepwiseOverride = options.stepwise; // null | true | false
+  const useStepwise = stepwiseOverride === true
+    || (stepwiseOverride !== false && (cx.sections > 4 || cx.estCells > 250));
 
-  if (!codeResult.actions || !Array.isArray(codeResult.actions)) {
+  if (onProgress) onProgress('generating', { message: `Building ${cx.sections} sections${useStepwise ? ' (stepwise)' : ''}...` });
+
+  let codeResult;
+  if (useStepwise) {
+    codeResult = await generateStepwise(objective, context, planResult.plan, {
+      modelOverride,
+      onProgress,
+      parallel: options.parallelSlices !== false,
+    });
+  } else {
+    codeResult = await generateWithPlan(objective, context, planResult.plan, { modelOverride });
+  }
+  pipeline.phases.codegen = codeResult;
+  pipeline.codegenMode = useStepwise ? 'stepwise' : 'single-shot';
+
+  if (!codeResult.actions || !Array.isArray(codeResult.actions) || codeResult.actions.length === 0) {
     return { status: 'failed', error: codeResult.error || 'Code generation failed', pipeline };
   }
 
@@ -357,9 +513,15 @@ async function enhancedPipeline(objective, context = {}, options = {}) {
     }
   }
 
-  // Phase 4: Actions are ready (no Python execution needed)
+  // Phase 4: Sanitize actions (drop bad fillRange, bound whole-column targets, expand shorthand)
+  const sanitized = sanitizeActions(codeResult.actions);
+  if (sanitized.stats.dropped + sanitized.stats.expanded + sanitized.stats.bounded > 0) {
+    logger.info(`[Enhanced] Sanitizer: dropped=${sanitized.stats.dropped} expanded=${sanitized.stats.expanded} bounded=${sanitized.stats.bounded} kept=${sanitized.stats.kept}`);
+  }
+  codeResult.actions = sanitized.actions;
   const cellInfo = actionsFromResult(codeResult.actions);
   pipeline.phases.execution = { ...cellInfo, executionMs: 0 };
+  pipeline.sanitizer = sanitized.stats;
 
   const totalMs = Date.now() - totalStart;
   const totalTokens = {

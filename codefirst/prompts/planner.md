@@ -76,3 +76,11 @@ Return a JSON object:
 7. **For menus/catalogs: copy EVERY item verbatim from the objective.** Never summarize or truncate.
 
 8. **Include critical rules** that the code generator must follow — these override general formatting rules.
+
+9. **CAP SECTION SIZE AT ~250 CELLS.** If a sheet needs more (e.g. 60 monthly rows × 12 metrics = 720 cells), SPLIT it into multiple sections:
+   - Section "PnL Monthly Y1-Y2" rows 1-24
+   - Section "PnL Monthly Y3-Y5" rows 25-60
+   - Section "PnL Annual Rollup" rows 62-67
+   Each section becomes an independent parallel codegen call — smaller sections = faster generation. Always add `row_range` so sections don't collide.
+
+10. **For heavy sheets (>400 estimated_cells), specify a non-overlapping `row_range` per section.** Sections on the same sheet are generated in parallel; overlapping rows will conflict.

@@ -293,7 +293,7 @@ async function handleSend() {
     if (isCodeFirst) {
       const objective = text.replace(/^\/(cf|codefirst)\s+/, '');
       if (!objective) { addMessage('Usa: /cf <descrizione> per generare con CodeFirst', 'bot'); return; }
-      addLog('CodeFirst mode: generazione codice Python → Excel', 'info');
+      addLog('CodeFirst mode: pianifica → genera azioni → applica su Excel', 'info');
       await runCodeFirstMode(objective);
       return;
     }
@@ -691,7 +691,7 @@ async function resumeAgent(agentId, userResponse) {
 
 async function runCodeFirstMode(text) {
   const context = await getExcelContext();
-  const planMsgId = addMessage('Generazione codice Python in corso...', 'bot');
+  const planMsgId = addMessage('Pianificazione e generazione azioni in corso...', 'bot');
 
   try {
     const startData = await startCodeFirst(text, context, modelSelect.value);

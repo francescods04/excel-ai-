@@ -1711,13 +1711,30 @@ async function writeNotesFallback(context, notes) {
 }
 
 async function execFillRange(context, sheetCache, defaultSheet, action) {
-  const { sheet, target } = await resolveSheetAndTarget(context, sheetCache, defaultSheet, action);
+  // Accept new schema {start, end, formula|value} from codefirst, plus legacy {target, value}
+  const inferredTarget = action.target
+    || (action.start && action.end ? `${action.start}:${action.end}` : null);
+  const effective = { ...action, target: inferredTarget };
+  if (!inferredTarget) throw new Error('fillRange: missing target (need either target or start+end)');
+
+  const { sheet, target } = await resolveSheetAndTarget(context, sheetCache, defaultSheet, effective);
   const range = sheet.getRange(target);
+  range.load('rowCount,columnCount');
+  await context.sync();
+  const rows = range.rowCount;
+  const cols = range.columnCount;
+
+  if (action.formula && typeof action.formula === 'string') {
+    const matrix = Array.from({ length: rows }, () => Array(cols).fill(action.formula));
+    range.formulas = matrix;
+    return;
+  }
   if (Array.isArray(action.value)) {
     range.values = action.value;
-  } else {
-    range.values = [[action.value]];
+    return;
   }
+  const v = action.value !== undefined ? action.value : '';
+  range.values = Array.from({ length: rows }, () => Array(cols).fill(v));
 }
 
 async function execWriteRange(context, sheetCache, defaultSheet, action) {
