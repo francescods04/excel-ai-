@@ -11,8 +11,8 @@ const { deterministicRepair } = require('./deterministicRepair');
 const { integrationPass } = require('./integrationPass');
 const logger = require('../server/utils/logger');
 
-const MAX_AUTORESEARCH_ITERATIONS = 3;
-    const SCORE_APPROVAL_THRESHOLD = 90;
+const DEFAULT_MAX_ITERATIONS = 3;
+const DEFAULT_SCORE_THRESHOLD = 90;
 
 /* ---------- Time budgets (ms) ---------- */
 const TIME_BUDGET = {
@@ -20,7 +20,7 @@ const TIME_BUDGET = {
   plan: 30000,
   generate: 90000,
   critic: 60000,
-  repair: 45000,
+  repair: 60000,
 };
 
 /**
@@ -34,8 +34,9 @@ async function autoresearchPipeline(objective, context = {}, options = {}) {
     modelOverride = null,
     data = null, // optional pre-extracted data (e.g., AIDA JSON)
     onProgress = null,
-    maxIterations = MAX_AUTORESEARCH_ITERATIONS,
+    maxIterations = DEFAULT_MAX_ITERATIONS,
     skipResearch = false,
+    scoreThreshold = DEFAULT_SCORE_THRESHOLD,
   } = options;
 
   const totalStart = Date.now();
@@ -200,12 +201,15 @@ async function autoresearchPipeline(objective, context = {}, options = {}) {
     structuralScoreOnly = Math.max(0, 100 - structuralIssues.length * 2 - criticalStructural.length * 10);
     log('reviewing', `Structural critic: ${structuralIssues.length} issues, score=${structuralScoreOnly} (${structMs}ms)`);
 
+    // ADAPTIVE THRESHOLD: try 90 first, then 85, then 80
+    const adaptiveThreshold = iteration === 1 ? 90 : (iteration === 2 ? 85 : 80);
+
     // 2d. PRIMARY CONVERGENCE: structural score is stable and deterministic
-    // If structural score >= 90 with no critical issues, approve immediately.
+    // If structural score >= adaptiveThreshold with no critical issues, approve immediately.
     // Deep critic is advisory only — we run it for logging but do not block on it.
     const hasCritical = criticalVal.length > 0 || criticalStructural.length > 0;
-    if (structuralScoreOnly >= 90 && !hasCritical) {
-      log('converged', `Structural score ${structuralScoreOnly} >= 90, no critical issues. Approved.`);
+    if (structuralScoreOnly >= adaptiveThreshold && !hasCritical) {
+      log('converged', `Structural score ${structuralScoreOnly} >= ${adaptiveThreshold}, no critical issues. Approved.`);
       converged = true;
       lastScore = structuralScoreOnly;
       break;
@@ -237,11 +241,11 @@ async function autoresearchPipeline(objective, context = {}, options = {}) {
       log('reviewing', `Skipped deep critic (structural score ${structuralScoreOnly} < 55)`);
     }
 
-    // 2f. Convergence check (fallback if structural is not 80 but deep critic says OK)
+    // 2f. Convergence check (fallback if structural is not adaptiveThreshold but deep critic says OK)
     const effectiveScore = Math.max(structuralScoreOnly, criticResult.score);
 
-    if (effectiveScore >= SCORE_APPROVAL_THRESHOLD && !hasCritical) {
-      log('converged', `Score ${effectiveScore} >= threshold with no critical issues.`);
+    if (effectiveScore >= adaptiveThreshold && !hasCritical) {
+      log('converged', `Score ${effectiveScore} >= ${adaptiveThreshold} with no critical issues.`);
       converged = true;
       break;
     }
@@ -289,10 +293,10 @@ async function autoresearchPipeline(objective, context = {}, options = {}) {
       return pSheet === iSheet;
     }));
 
-    // Cap issues sent to repairer to top 20 by severity
+    // Cap issues sent to repairer to top 10 by severity (keep prompt small, avoid timeouts)
     const severityOrder = { critical: 0, high: 1, medium: 2, low: 3 };
     remainingAfterDet.sort((a, b) => (severityOrder[a.severity] || 99) - (severityOrder[b.severity] || 99));
-    const cappedIssues = remainingAfterDet.slice(0, 20);
+    const cappedIssues = remainingAfterDet.slice(0, 10);
 
     if (cappedIssues.length === 0) {
       if (detPatches.length > 0) {
@@ -351,5 +355,5 @@ async function autoresearchPipeline(objective, context = {}, options = {}) {
 
 module.exports = {
   autoresearchPipeline,
-  MAX_AUTORESEARCH_ITERATIONS,
+  MAX_AUTORESEARCH_ITERATIONS: DEFAULT_MAX_ITERATIONS,
 };

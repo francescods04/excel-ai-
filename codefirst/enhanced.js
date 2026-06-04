@@ -217,7 +217,7 @@ function detectSilentFailures(sliceResults, { threshold = 5 } = {}) {
 }
 
 async function generateStepwise(objective, context, plan, options = {}) {
-  const { modelOverride = null, onProgress = null, parallel = true, maxConcurrency = 8, validateSlice = null, researchContext = null } = options;
+  const { modelOverride = null, onProgress = null, parallel = true, maxConcurrency = 12, validateSlice = null, researchContext = null } = options;
   const slices = buildSlices(plan);
   if (slices.length === 0) return { actions: [], codeTokens: { promptTokens: 0, completionTokens: 0, calls: 0 }, codeTimeMs: 0, sliceResults: [], stepwise: true };
 

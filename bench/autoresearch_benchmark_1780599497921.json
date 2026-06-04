@@ -1,0 +1,167 @@
+{
+  "configs": [
+    {
+      "name": "baseline",
+      "objective": "Build a full DCF valuation model for ZUCCHETTI SPA using the provided AIDA financials. Include: historical data, revenue build, EBITDA build, WACC, UFCF, DCF valuation, sensitivity table, and sanity checks.",
+      "threshold": 90,
+      "maxIterations": 3
+    },
+    {
+      "name": "fast",
+      "objective": "Build a full DCF valuation model for ZUCCHETTI SPA using the provided AIDA financials. Include: historical data, revenue build, EBITDA build, WACC, UFCF, DCF valuation, sensitivity table, and sanity checks.",
+      "threshold": 85,
+      "maxIterations": 2
+    },
+    {
+      "name": "strict",
+      "objective": "Build a full DCF valuation model for ZUCCHETTI SPA using the provided AIDA financials. Include: historical data, revenue build, EBITDA build, WACC, UFCF, DCF valuation, sensitivity table, and sanity checks.",
+      "threshold": 95,
+      "maxIterations": 3
+    },
+    {
+      "name": "single_iter",
+      "objective": "Build a full DCF valuation model for ZUCCHETTI SPA using the provided AIDA financials. Include: historical data, revenue build, EBITDA build, WACC, UFCF, DCF valuation, sensitivity table, and sanity checks.",
+      "threshold": 90,
+      "maxIterations": 1
+    },
+    {
+      "name": "two_iter",
+      "objective": "Build a full DCF valuation model for ZUCCHETTI SPA using the provided AIDA financials. Include: historical data, revenue build, EBITDA build, WACC, UFCF, DCF valuation, sensitivity table, and sanity checks.",
+      "threshold": 90,
+      "maxIterations": 2
+    },
+    {
+      "name": "aggressive",
+      "objective": "Build a full DCF valuation model for ZUCCHETTI SPA using the provided AIDA financials. Include: historical data, revenue build, EBITDA build, WACC, UFCF, DCF valuation, sensitivity table, and sanity checks.",
+      "threshold": 90,
+      "maxIterations": 4
+    },
+    {
+      "name": "loose",
+      "objective": "Build a full DCF valuation model for ZUCCHETTI SPA using the provided AIDA financials. Include: historical data, revenue build, EBITDA build, WACC, UFCF, DCF valuation, sensitivity table, and sanity checks.",
+      "threshold": 80,
+      "maxIterations": 2
+    },
+    {
+      "name": "very_loose",
+      "objective": "Build a full DCF valuation model for ZUCCHETTI SPA using the provided AIDA financials. Include: historical data, revenue build, EBITDA build, WACC, UFCF, DCF valuation, sensitivity table, and sanity checks.",
+      "threshold": 75,
+      "maxIterations": 2
+    },
+    {
+      "name": "dense_model",
+      "objective": "Build a comprehensive, institutional-grade DCF valuation model for ZUCCHETTI SPA. Must include: detailed historical financials (2020-2024), revenue build with 5-year projections, EBITDA build with margin analysis, full WACC calculation with CAPM components, unlevered free cash flow build, DCF valuation with discount factors and terminal value, 2-way sensitivity table (WACC vs Terminal Growth), and comprehensive sanity checks. Use maximum detail — at least 800 cells total with proper formatting.",
+      "threshold": 90,
+      "maxIterations": 3
+    },
+    {
+      "name": "dense_fast",
+      "objective": "Build a comprehensive, institutional-grade DCF valuation model for ZUCCHETTI SPA. Must include: detailed historical financials (2020-2024), revenue build with 5-year projections, EBITDA build with margin analysis, full WACC calculation with CAPM components, unlevered free cash flow build, DCF valuation with discount factors and terminal value, 2-way sensitivity table (WACC vs Terminal Growth), and comprehensive sanity checks. Use maximum detail — at least 800 cells total with proper formatting.",
+      "threshold": 85,
+      "maxIterations": 2
+    }
+  ],
+  "results": [
+    {
+      "config": "baseline",
+      "status": "ok",
+      "score": 100,
+      "converged": true,
+      "iterations": 3,
+      "cellCount": 549,
+      "totalMs": 205558,
+      "elapsedMs": 205559
+    },
+    {
+      "config": "fast",
+      "status": "ok",
+      "score": 100,
+      "converged": true,
+      "iterations": 1,
+      "cellCount": 693,
+      "totalMs": 105156,
+      "elapsedMs": 105156
+    },
+    {
+      "config": "strict",
+      "status": "ok",
+      "score": 82,
+      "converged": false,
+      "iterations": 1,
+      "cellCount": 466,
+      "totalMs": 156534,
+      "elapsedMs": 156534
+    },
+    {
+      "config": "single_iter",
+      "status": "ok",
+      "score": 0,
+      "converged": false,
+      "iterations": 1,
+      "cellCount": 600,
+      "totalMs": 142404,
+      "elapsedMs": 142404
+    },
+    {
+      "config": "two_iter",
+      "status": "ok",
+      "score": 100,
+      "converged": true,
+      "iterations": 1,
+      "cellCount": 417,
+      "totalMs": 91629,
+      "elapsedMs": 91629
+    },
+    {
+      "config": "aggressive",
+      "status": "ok",
+      "score": 96,
+      "converged": true,
+      "iterations": 1,
+      "cellCount": 492,
+      "totalMs": 92073,
+      "elapsedMs": 92073
+    },
+    {
+      "config": "loose",
+      "status": "ok",
+      "score": 90,
+      "converged": true,
+      "iterations": 1,
+      "cellCount": 507,
+      "totalMs": 145474,
+      "elapsedMs": 145475
+    },
+    {
+      "config": "very_loose",
+      "status": "ok",
+      "score": 100,
+      "converged": true,
+      "iterations": 2,
+      "cellCount": 542,
+      "totalMs": 157654,
+      "elapsedMs": 157654
+    },
+    {
+      "config": "dense_model",
+      "status": "ok",
+      "score": 100,
+      "converged": true,
+      "iterations": 1,
+      "cellCount": 482,
+      "totalMs": 192488,
+      "elapsedMs": 192488
+    },
+    {
+      "config": "dense_fast",
+      "status": "ok",
+      "score": 100,
+      "converged": true,
+      "iterations": 2,
+      "cellCount": 449,
+      "totalMs": 208402,
+      "elapsedMs": 208402
+    }
+  ],
+  "timestamp": "2026-06-04T18:58:17.921Z"
+}
