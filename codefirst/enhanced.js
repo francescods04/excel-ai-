@@ -273,6 +273,54 @@ async function generateStepwise(objective, context, plan, options = {}) {
     }
   }
 
+  // Post-codegen quality gate: a slice that emitted only createSheet (0 data cells)
+  // counts as a silent failure. Retry once with explicit "this sheet must have N+ cells".
+  const SILENT_FAIL_THRESHOLD = 5;
+  const silentFails = [];
+  for (const r of sliceResults) {
+    const dataCells = r.actions.reduce((s, a) =>
+      s + (a.type === 'setCellRange' && a.cells ? Object.keys(a.cells).length : 0), 0);
+    if (dataCells < SILENT_FAIL_THRESHOLD && r.actions.length < 3) {
+      silentFails.push(r);
+    }
+  }
+  if (silentFails.length > 0) {
+    logger.warn(`[Enhanced] ${silentFails.length} slices produced < ${SILENT_FAIL_THRESHOLD} cells. Retrying with explicit density reminder.`);
+    await Promise.all(silentFails.map(async (r) => {
+      const slice = r.slice;
+      const subPlan = {
+        sections: [slice.section],
+        global_conventions: plan.global_conventions || {},
+        model_type: plan.model_type,
+        estimated_cells: slice.estCells,
+      };
+      const repair = await generateWithPlan(
+        `${objective}\n\nCRITICAL: previous attempt for "${slice.label}" produced an empty or near-empty sheet. You MUST emit at least 10 setCellRange cells with formulas/values for this section. Do not skip.`,
+        context, subPlan,
+        {
+          modelOverride,
+          sliceFocus: `the "${slice.label}" section in sheet "${slice.sheet}"`,
+          timeoutMs: 180000,
+          label: `cf_slice_${slice.id}_silent_repair`,
+        }
+      );
+      if (repair.codeTokens) {
+        totals.promptTokens += repair.codeTokens.promptTokens || 0;
+        totals.completionTokens += repair.codeTokens.completionTokens || 0;
+        totals.calls += repair.codeTokens.calls || 0;
+      }
+      totalMs += repair.codeTimeMs || 0;
+      if (repair.actions && repair.actions.length > 0) {
+        const repairCells = repair.actions.reduce((s, a) =>
+          s + (a.type === 'setCellRange' && a.cells ? Object.keys(a.cells).length : 0), 0);
+        if (repairCells >= SILENT_FAIL_THRESHOLD) {
+          r.actions = repair.actions;
+          r.repaired = true;
+        }
+      }
+    }));
+  }
+
   const allActions = [...createActions];
   for (const r of sliceResults) {
     for (const a of r.actions) {
@@ -283,7 +331,8 @@ async function generateStepwise(objective, context, plan, options = {}) {
   }
 
   const failedSlices = sliceResults.filter(r => !r.actions || r.actions.length === 0);
-  logger.info(`[Enhanced] Stepwise done: ${sliceResults.length - failedSlices.length}/${sliceResults.length} slices OK, ${allActions.length} actions, ${totals.calls} LLM calls`);
+  const repairedCount = sliceResults.filter(r => r.repaired).length;
+  logger.info(`[Enhanced] Stepwise done: ${sliceResults.length - failedSlices.length}/${sliceResults.length} slices OK${repairedCount ? `, ${repairedCount} repaired` : ''}, ${allActions.length} actions, ${totals.calls} LLM calls`);
 
   return {
     actions: allActions,
