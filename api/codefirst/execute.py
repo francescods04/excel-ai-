@@ -1,5 +1,5 @@
 """
-Vercel serverless function — esegue codice Python excel_builder e ritorna azioni JSON.
+Vercel serverless Python function — esegue codice excel_builder e ritorna azioni JSON.
 Endpoint: POST /api/codefirst/execute
 """
 import json
@@ -124,7 +124,6 @@ def _make_addr(col, row):
     return f'{s}{row}'
 
 
-# Color constants
 HEADER_FILL = '#1F4E79'; HEADER_FONT = '#FFFFFF'
 SECTION_FILL = '#D6E4F0'; NUMBER_FILL = '#F2F2F2'
 HDR_BG = '#1F4E79'; HDR_FG = '#FFFFFF'
@@ -133,43 +132,22 @@ SEC_BG = '#D6E4F0'; TOT_BG = '#E2EFDA'
 
 
 def _build_globals(out_list):
-    """Costruisce il dizionario globals per exec() con tutte le API excel_builder."""
-
     wb = Workbook(out_list)
 
-    def _create_sheet(name):
-        wb.create_sheet(name)
-
-    def _write(sheet_name, cells_dict):
-        wb.write(sheet_name, cells_dict)
-
-    def _write_range(sheet_name, start_addr, data_2d):
-        wb.write_range(sheet_name, start_addr, data_2d)
-
-    def _fill(sheet_name, start_addr, end_addr, formula=None, value=None):
-        wb.fill(sheet_name, start_addr, end_addr, formula=formula, value=value)
-
-    def _format(sheet_name, range_addr, format_dict):
-        wb.format(sheet_name, range_addr, format_dict)
-
-    def _finalize():
-        wb.finalize()
-
-    def _set_column_width(sheet_name, column_letter, width):
-        pass
-
-    def _set_row_height(sheet_name, row_number, height):
-        pass
+    def _create_sheet(name): wb.create_sheet(name)
+    def _write(sheet_name, cells_dict): wb.write(sheet_name, cells_dict)
+    def _write_range(sheet_name, start_addr, data_2d): wb.write_range(sheet_name, start_addr, data_2d)
+    def _fill(sheet_name, start_addr, end_addr, formula=None, value=None): wb.fill(sheet_name, start_addr, end_addr, formula=formula, value=value)
+    def _format(sheet_name, range_addr, format_dict): wb.format(sheet_name, range_addr, format_dict)
+    def _finalize(): wb.finalize()
+    def _set_column_width(sheet_name, column_letter, width): pass
+    def _set_row_height(sheet_name, row_number, height): pass
 
     return {
-        'create_sheet': _create_sheet,
-        'write': _write,
-        'write_range': _write_range,
-        'fill': _fill,
-        'format': _format,
-        'finalize': _finalize,
-        'set_column_width': _set_column_width,
-        'set_row_height': _set_row_height,
+        'create_sheet': _create_sheet, 'write': _write,
+        'write_range': _write_range, 'fill': _fill,
+        'format': _format, 'finalize': _finalize,
+        'set_column_width': _set_column_width, 'set_row_height': _set_row_height,
         'Workbook': Workbook,
         'HEADER_FILL': HEADER_FILL, 'HEADER_FONT': HEADER_FONT,
         'SECTION_FILL': SECTION_FILL, 'NUMBER_FILL': NUMBER_FILL,
@@ -177,7 +155,6 @@ def _build_globals(out_list):
         'INP_BG': INP_BG, 'FML_BG': FML_BG,
         'SEC_BG': SEC_BG, 'TOT_BG': TOT_BG,
         'math': _math,
-        # Builtins necessari
         'range': range, 'enumerate': enumerate,
         'int': int, 'float': float, 'str': str, 'bool': bool,
         'list': list, 'dict': dict, 'tuple': tuple, 'set': set,
@@ -197,55 +174,39 @@ def _build_globals(out_list):
 
 
 def execute_code(code):
-    """Esegue codice Python excel_builder e ritorna lista di azioni."""
     out = []
     globs = _build_globals(out)
     exec(code, globs)
     return out
 
 
-# ── Vercel WSGI handler ──
+# ── WSGI handler (Vercel @vercel/python standard) ──
 
-from urllib.parse import parse_qs
+def handler(environ, start_response):
+    method = environ.get('REQUEST_METHOD', 'GET')
 
-
-def handler(request):
-    """Vercel Python serverless handler (HTTP format)."""
-    if request.get('method') != 'POST':
-        return {
-            'statusCode': 405,
-            'body': json.dumps({'error': 'Only POST allowed'}),
-            'headers': {'Content-Type': 'application/json'}
-        }
+    if method != 'POST':
+        start_response('405 Method Not Allowed', [('Content-Type', 'application/json')])
+        return [json.dumps({'error': 'Only POST allowed'}).encode('utf-8')]
 
     try:
-        body = json.loads(request.get('body', '{}'))
+        content_length = int(environ.get('CONTENT_LENGTH', 0))
+        body_raw = environ.get('wsgi.input', sys.stdin).read(content_length) if content_length > 0 else b'{}'
+        body = json.loads(body_raw.decode('utf-8'))
         code = body.get('code', '')
 
         if not code:
-            return {
-                'statusCode': 400,
-                'body': json.dumps({'error': 'Missing "code" field'}),
-                'headers': {'Content-Type': 'application/json'}
-            }
+            start_response('400 Bad Request', [('Content-Type', 'application/json')])
+            return [json.dumps({'error': 'Missing "code" field'}).encode('utf-8')]
 
         if len(code) > 50000:
-            return {
-                'statusCode': 400,
-                'body': json.dumps({'error': 'Code too long (max 50000 chars)'}),
-                'headers': {'Content-Type': 'application/json'}
-            }
+            start_response('400 Bad Request', [('Content-Type', 'application/json')])
+            return [json.dumps({'error': 'Code too long (max 50000 chars)'}).encode('utf-8')]
 
         actions = execute_code(code)
-        return {
-            'statusCode': 200,
-            'body': json.dumps({'actions': actions, 'count': len(actions)}, ensure_ascii=False),
-            'headers': {'Content-Type': 'application/json'}
-        }
+        start_response('200 OK', [('Content-Type', 'application/json')])
+        return [json.dumps({'actions': actions, 'count': len(actions)}, ensure_ascii=False).encode('utf-8')]
 
     except Exception as e:
-        return {
-            'statusCode': 500,
-            'body': json.dumps({'error': str(e), 'type': type(e).__name__}),
-            'headers': {'Content-Type': 'application/json'}
-        }
+        start_response('500 Internal Server Error', [('Content-Type', 'application/json')])
+        return [json.dumps({'error': str(e), 'type': type(e).__name__}).encode('utf-8')]
