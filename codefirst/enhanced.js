@@ -194,6 +194,28 @@ function buildSlices(plan) {
   return slices;
 }
 
+function countSetCellRangeCells(actions) {
+  if (!Array.isArray(actions)) return 0;
+  return actions.reduce((sum, a) =>
+    sum + (a.type === 'setCellRange' && a.cells ? Object.keys(a.cells).length : 0), 0);
+}
+
+function detectSilentFailures(sliceResults, { threshold = 5 } = {}) {
+  if (!Array.isArray(sliceResults) || sliceResults.length === 0) return [];
+  const silentFails = [];
+  for (const r of sliceResults) {
+    if (!r || !Array.isArray(r.actions)) {
+      silentFails.push(r);
+      continue;
+    }
+    const dataCells = countSetCellRangeCells(r.actions);
+    if (dataCells < threshold && r.actions.length < 3) {
+      silentFails.push(r);
+    }
+  }
+  return silentFails;
+}
+
 async function generateStepwise(objective, context, plan, options = {}) {
   const { modelOverride = null, onProgress = null, parallel = true, maxConcurrency = 8 } = options;
   const slices = buildSlices(plan);
@@ -276,14 +298,7 @@ async function generateStepwise(objective, context, plan, options = {}) {
   // Post-codegen quality gate: a slice that emitted only createSheet (0 data cells)
   // counts as a silent failure. Retry once with explicit "this sheet must have N+ cells".
   const SILENT_FAIL_THRESHOLD = 5;
-  const silentFails = [];
-  for (const r of sliceResults) {
-    const dataCells = r.actions.reduce((s, a) =>
-      s + (a.type === 'setCellRange' && a.cells ? Object.keys(a.cells).length : 0), 0);
-    if (dataCells < SILENT_FAIL_THRESHOLD && r.actions.length < 3) {
-      silentFails.push(r);
-    }
-  }
+  const silentFails = detectSilentFailures(sliceResults, { threshold: SILENT_FAIL_THRESHOLD });
   if (silentFails.length > 0) {
     logger.warn(`[Enhanced] ${silentFails.length} slices produced < ${SILENT_FAIL_THRESHOLD} cells. Retrying with explicit density reminder.`);
     await Promise.all(silentFails.map(async (r) => {
@@ -749,4 +764,4 @@ function buildContextSummary(context) {
   return parts.join('\n');
 }
 
-module.exports = { enhancedPipeline, editPipeline, looksLikeEdit, planWorkbook, generateWithPlan, reviewCode, selectSkills };
+module.exports = { enhancedPipeline, editPipeline, looksLikeEdit, planWorkbook, generateWithPlan, reviewCode, selectSkills, detectSilentFailures, countSetCellRangeCells, buildSlices };
