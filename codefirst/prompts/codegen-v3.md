@@ -122,6 +122,12 @@ For formulas, ALWAYS use setCellRange with explicit per-cell formulas instead. T
 ## Output Format
 
 Return ONLY a JSON object with an "actions" array:
+### R7: MANDATORY ASSUMPTIONS
+If the user prompt includes a "## MANDATORY ASSUMPTIONS" block, you MUST use those exact values in your formulas and assumption cells. Do not invent different numbers.
+- Place each assumption in the Assumptions sheet with the exact value provided.
+- Reference them with absolute cross-sheet refs: `Assumptions!$B$3`
+- If the block says "Base Case Revenue Growth Y1: 5%", your formula must use `Assumptions!$B$3` where that cell contains 0.05.
+
 ```json
 {"actions":[{"type":"createSheet","sheet":"Assumptions"},{"type":"createSheet","sheet":"Projections"},{"type":"setCellRange","sheet":"Assumptions","cells":{...}},{"type":"setCellRange","sheet":"Projections","cells":{...}}]}
 ```

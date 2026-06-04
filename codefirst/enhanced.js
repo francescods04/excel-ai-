@@ -93,7 +93,7 @@ async function planWorkbook(objective, context, options = {}) {
 }
 
 async function generateWithPlan(objective, context, plan, options = {}) {
-  const { callLLMFn = callLLM, modelOverride = null, sliceFocus = null, timeoutMs = 180000, label = 'codefirst_codegen_v3' } = options;
+  const { callLLMFn = callLLM, modelOverride = null, sliceFocus = null, timeoutMs = 180000, label = 'codefirst_codegen_v3', researchContext = null } = options;
 
   const systemPrompt = loadPrompt('codegen-v3');
   const planSummary = JSON.stringify(plan, null, 2);
@@ -217,7 +217,7 @@ function detectSilentFailures(sliceResults, { threshold = 5 } = {}) {
 }
 
 async function generateStepwise(objective, context, plan, options = {}) {
-  const { modelOverride = null, onProgress = null, parallel = true, maxConcurrency = 8 } = options;
+  const { modelOverride = null, onProgress = null, parallel = true, maxConcurrency = 8, validateSlice = null, researchContext = null } = options;
   const slices = buildSlices(plan);
   if (slices.length === 0) return { actions: [], codeTokens: { promptTokens: 0, completionTokens: 0, calls: 0 }, codeTimeMs: 0, sliceResults: [], stepwise: true };
 
@@ -241,12 +241,15 @@ async function generateStepwise(objective, context, plan, options = {}) {
     };
     const isHeavyTimeSeries = slice.section.is_time_series && (slice.section.periods || 0) >= 24;
     const baseTimeout = slice.estCells > 400 || isHeavyTimeSeries ? 300000 : (slice.estCells > 200 ? 180000 : 120000);
-    const focusLine = `the "${slice.label}" section in sheet "${slice.sheet}"${slice.section.row_range ? ` rows ${slice.section.row_range}` : ''}`;
+    const exported = slice.section.exported_cells || [];
+    const exportedNote = exported.length > 0 ? ` CRITICAL: This sheet MUST expose these cells for other sheets: ${exported.join(', ')}.` : '';
+    const focusLine = `the "${slice.label}" section in sheet "${slice.sheet}"${slice.section.row_range ? ` rows ${slice.section.row_range}` : ''}. This section MUST contain at least ${slice.estCells} cells (formulas, values, and labels combined). Do not skip rows or summarize; emit every cell.${exportedNote}`;
     const subResult = await generateWithPlan(objective, context, subPlan, {
       modelOverride,
       sliceFocus: focusLine,
       timeoutMs: baseTimeout,
       label: `cf_slice_${slice.id}`,
+      researchContext,
     });
     if (subResult.codeTokens) {
       totals.promptTokens += subResult.codeTokens.promptTokens || 0;
@@ -254,8 +257,37 @@ async function generateStepwise(objective, context, plan, options = {}) {
       totals.calls += subResult.codeTokens.calls || 0;
     }
     totalMs += subResult.codeTimeMs || 0;
-    if (subResult.actions && subResult.actions.length > 0) {
-      return { slice, actions: subResult.actions, error: null };
+
+    // Inline validation: if caller provided validateSlice, check for critical formula errors early
+    let validatedActions = subResult.actions || [];
+    if (validateSlice && validatedActions.length > 0) {
+      try {
+        const v = validateSlice(validatedActions);
+        if (!v.valid) {
+          logger.warn(`[Enhanced] Slice "${slice.label}" has ${v.criticalCount} critical formula issues. Retrying with validation feedback.`);
+          const feedback = `CRITICAL FORMULA ERRORS detected in previous output for "${slice.label}": ${v.issues.map(i => `${i.location}: ${i.detail}`).join('; ')}. Fix these before emitting cells.`;
+          const retryVal = await generateWithPlan(
+            `${objective}\n\n${feedback}\n\nREMEMBER: This section MUST contain at least ${slice.estCells} cells.`,
+            context, subPlan,
+            { modelOverride, sliceFocus: focusLine, timeoutMs: baseTimeout, label: `cf_slice_${slice.id}_valfix`, researchContext }
+          );
+          if (retryVal.codeTokens) {
+            totals.promptTokens += retryVal.codeTokens.promptTokens || 0;
+            totals.completionTokens += retryVal.codeTokens.completionTokens || 0;
+            totals.calls += retryVal.codeTokens.calls || 0;
+          }
+          totalMs += retryVal.codeTimeMs || 0;
+          if (retryVal.actions && retryVal.actions.length > 0) {
+            validatedActions = retryVal.actions;
+          }
+        }
+      } catch (e) {
+        logger.warn(`[Enhanced] validateSlice callback error: ${e.message}`);
+      }
+    }
+
+    if (validatedActions.length > 0) {
+      return { slice, actions: validatedActions, error: null };
     }
 
     logger.warn(`[Enhanced] Slice "${slice.label}" failed (${subResult.error}). Retrying with reduced density.`);
@@ -295,13 +327,23 @@ async function generateStepwise(objective, context, plan, options = {}) {
     }
   }
 
-  // Post-codegen quality gate: a slice that emitted only createSheet (0 data cells)
-  // counts as a silent failure. Retry once with explicit "this sheet must have N+ cells".
+  // Post-codegen quality gate:
+  // 1. Silent failures: slice with <5 data cells
+  // 2. Low density: slice with <50% of estimated cells
   const SILENT_FAIL_THRESHOLD = 5;
-  const silentFails = detectSilentFailures(sliceResults, { threshold: SILENT_FAIL_THRESHOLD });
-  if (silentFails.length > 0) {
-    logger.warn(`[Enhanced] ${silentFails.length} slices produced < ${SILENT_FAIL_THRESHOLD} cells. Retrying with explicit density reminder.`);
-    await Promise.all(silentFails.map(async (r) => {
+  const LOW_DENSITY_RATIO = 0.5;
+  const slicesToRetry = [];
+  for (const r of sliceResults) {
+    const cells = countSetCellRangeCells(r.actions);
+    if (cells < SILENT_FAIL_THRESHOLD) {
+      slicesToRetry.push({ r, slice: r.slice, reason: `silent (${cells} cells)` });
+    } else if (r.slice.estCells > 20 && cells < r.slice.estCells * LOW_DENSITY_RATIO) {
+      slicesToRetry.push({ r, slice: r.slice, reason: `low density (${cells}/${r.slice.estCells})` });
+    }
+  }
+  if (slicesToRetry.length > 0) {
+    logger.warn(`[Enhanced] ${slicesToRetry.length} slices need retry: ${slicesToRetry.map(s => s.slice.label + ' ' + s.reason).join('; ')}`);
+    await Promise.all(slicesToRetry.map(async ({ r }) => {
       const slice = r.slice;
       const subPlan = {
         sections: [slice.section],
@@ -310,13 +352,14 @@ async function generateStepwise(objective, context, plan, options = {}) {
         estimated_cells: slice.estCells,
       };
       const repair = await generateWithPlan(
-        `${objective}\n\nCRITICAL: previous attempt for "${slice.label}" produced an empty or near-empty sheet. You MUST emit at least 10 setCellRange cells with formulas/values for this section. Do not skip.`,
+        `${objective}\n\nCRITICAL: previous attempt for "${slice.label}" produced too few cells (${countSetCellRangeCells(r.actions)} vs expected ${slice.estCells}). You MUST emit at least ${slice.estCells} setCellRange cells with formulas/values for this section. Do not skip rows, periods, or formulas.`,
         context, subPlan,
         {
           modelOverride,
-          sliceFocus: `the "${slice.label}" section in sheet "${slice.sheet}"`,
+          sliceFocus: `the "${slice.label}" section in sheet "${slice.sheet}". MUST contain at least ${slice.estCells} cells.`,
           timeoutMs: 180000,
-          label: `cf_slice_${slice.id}_silent_repair`,
+          label: `cf_slice_${slice.id}_density_repair`,
+          researchContext,
         }
       );
       if (repair.codeTokens) {
@@ -326,9 +369,8 @@ async function generateStepwise(objective, context, plan, options = {}) {
       }
       totalMs += repair.codeTimeMs || 0;
       if (repair.actions && repair.actions.length > 0) {
-        const repairCells = repair.actions.reduce((s, a) =>
-          s + (a.type === 'setCellRange' && a.cells ? Object.keys(a.cells).length : 0), 0);
-        if (repairCells >= SILENT_FAIL_THRESHOLD) {
+        const repairCells = countSetCellRangeCells(repair.actions);
+        if (repairCells >= slice.estCells * LOW_DENSITY_RATIO) {
           r.actions = repair.actions;
           r.repaired = true;
         }

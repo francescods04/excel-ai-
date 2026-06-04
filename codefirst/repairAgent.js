@@ -18,7 +18,7 @@ function loadPrompt(name) {
  * Design principle: NEVER rewrite the whole model. Only patch the broken cells.
  */
 async function repairActions(actions, issues, objective, plan, researchContext, options = {}) {
-  const { callLLMFn = callLLM, modelOverride = null } = options;
+  const { callLLMFn = callLLM, modelOverride = null, timeoutMs = 120000 } = options;
   const systemPrompt = loadPrompt('repairer');
 
   // Group issues by severity and deduplicate by location
@@ -33,43 +33,70 @@ async function repairActions(actions, issues, objective, plan, researchContext, 
   const severityOrder = { critical: 0, high: 1, medium: 2, low: 3 };
   uniqueIssues.sort((a, b) => (severityOrder[a.severity] || 99) - (severityOrder[b.severity] || 99));
 
-  // Extract the relevant subset of actions for each issue to minimize context
-  const affectedLocations = new Set();
+  // NEW: group issues by sheet for better repairer focus
+  const issuesBySheet = new Map();
   for (const issue of uniqueIssues) {
-    if (issue.location) affectedLocations.add(issue.location);
-    if (issue.sheet && issue.target) affectedLocations.add(`${issue.sheet}!${issue.target}`);
+    const sheet = (issue.location && issue.location.includes('!')) ? issue.location.split('!')[0] : (issue.sheet || 'unknown');
+    if (!issuesBySheet.has(sheet)) issuesBySheet.set(sheet, []);
+    issuesBySheet.get(sheet).push(issue);
   }
 
-  // Build a focused action snippet: include all createSheet + any setCellRange
-  // that touches an affected sheet, plus a summary of the rest
+  // Extract the relevant subset of actions for each issue to minimize context
+  // Extract specific cells mentioned in issues (e.g. "Sheet!B5" or "Sheet!B2:B10")
+  const affectedCells = new Map(); // sheet -> Set of cell addrs
   const affectedSheets = new Set();
-  for (const loc of affectedLocations) {
-    const sheet = loc.includes('!') ? loc.split('!')[0] : '';
-    if (sheet) affectedSheets.add(sheet);
+  for (const issue of uniqueIssues) {
+    const loc = issue.location || (issue.sheet && issue.target ? `${issue.sheet}!${issue.target}` : '');
+    if (!loc) continue;
+    if (loc.includes('!')) {
+      const [sh, addr] = loc.split('!');
+      affectedSheets.add(sh);
+      if (!affectedCells.has(sh)) affectedCells.set(sh, new Set());
+      // If addr looks like a range, expand it (simple: just add start and end)
+      if (addr && addr.includes(':')) {
+        affectedCells.get(sh).add(addr.split(':')[0].toUpperCase());
+        affectedCells.get(sh).add(addr.split(':')[1].toUpperCase());
+      } else if (addr) {
+        affectedCells.get(sh).add(addr.toUpperCase());
+      }
+    } else {
+      affectedSheets.add(loc);
+    }
   }
 
+  // Build focused snippet: only cells directly referenced by issues + a few neighbors
   const snippetActions = [];
-  const summary = { sheets: new Set(), cellCount: 0 };
   for (const a of actions) {
     if (a.type === 'createSheet') {
       snippetActions.push(a);
       continue;
     }
     const sh = a.sheet || a.sheetName;
-    summary.sheets.add(sh || 'active');
+    if (!affectedSheets.has(sh)) continue;
     if (a.type === 'setCellRange' && a.cells) {
-      summary.cellCount += Object.keys(a.cells).length;
-      if (affectedSheets.has(sh)) {
-        // Include the full action if it's on an affected sheet
-        snippetActions.push(a);
+      const wanted = affectedCells.get(sh);
+      if (!wanted || wanted.size === 0) {
+        // No specific cells known — include up to 30 cells from this sheet as context
+        const entries = Object.entries(a.cells).slice(0, 30);
+        if (entries.length > 0) {
+          snippetActions.push({ type: 'setCellRange', sheet: sh, cells: Object.fromEntries(entries) });
+        }
+      } else {
+        // Include only wanted cells
+        const filtered = {};
+        for (const [addr, spec] of Object.entries(a.cells)) {
+          const bare = addr.toUpperCase();
+          if (wanted.has(bare)) filtered[addr] = spec;
+        }
+        if (Object.keys(filtered).length > 0) {
+          snippetActions.push({ type: 'setCellRange', sheet: sh, cells: filtered });
+        }
       }
-    } else if (affectedSheets.has(sh)) {
-      snippetActions.push(a);
     }
   }
 
-  const actionsJson = JSON.stringify(snippetActions).slice(0, 15000);
-  const issuesJson = JSON.stringify(uniqueIssues.slice(0, 20)).slice(0, 8000);
+  const actionsJson = JSON.stringify(snippetActions).slice(0, 12000);
+  const issuesJson = JSON.stringify(uniqueIssues.slice(0, 10)).slice(0, 8000);
 
   const userPrompt = [
     '## User Objective',
@@ -81,7 +108,7 @@ async function repairActions(actions, issues, objective, plan, researchContext, 
     '## Plan Summary',
     JSON.stringify(plan?.sections?.map(s => ({ sheet: s.sheet, title: s.title })) || []).slice(0, 2000),
     '',
-    '## Issues to Fix (CRITICAL and HIGH only — medium/low are optional)',
+    '## Issues to Fix (prioritize CRITICAL, HIGH, and MEDIUM)',
     '```json',
     issuesJson,
     '```',
@@ -108,7 +135,7 @@ async function repairActions(actions, issues, objective, plan, researchContext, 
     const result = await callLLMFn({
       system: systemPrompt,
       userText: userPrompt,
-      timeoutMs: 120000,
+      timeoutMs,
       modelOverride,
       role: 'builder_hard',
       thinkingDisabled: false,

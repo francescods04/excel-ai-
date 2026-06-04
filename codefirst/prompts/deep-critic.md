@@ -54,10 +54,15 @@ Return ONLY a JSON object:
 - **Verify time-series logic.** Year n should reference Year n-1 or an assumption, never be a random hardcoded number.
 - **Check that sensitivity tables use Excel formulas**, not pre-computed Python values.
 - **If the model is a DCF**, verify the full waterfall: Revenue → EBITDA → D&A → EBIT → Tax → NOPAT → +D&A −CapEx −ΔNWC → FCF → PV → TV → EV → Net Debt → Equity.
-- **Score guide:**
-  - 90-100: Publishable quality
-  - 75-89: Good, minor fixes needed
-  - 50-74: Functional but has material errors
-  - <50: Needs major rewrite
+- **Score guide (be strict):**
+  - 95-100: Zero critical/high issues, all formulas correct, assumptions realistic, formatting complete
+  - 80-94: 1-2 minor issues (medium/low), no material errors
+  - 60-79: 1-2 high issues OR 3+ medium issues
+  - 40-59: 1 critical issue OR 3+ high issues
+  - <40: Multiple critical issues or fundamentally broken logic
+  - Start from 100 and subtract: critical=-15, high=-8, medium=-3, low=-1 per issue.
+
+- **Actionable fixes:** Every issue MUST include a concrete `fix` string that tells the repairer the exact cell(s) and the corrected formula/value. Vague descriptions are useless.
+- **Deduplicate:** If 5 cells have the same problem (e.g. all hardcoded revenue values), emit ONE issue covering the range, not 5 separate issues.
 
 No prose outside JSON.

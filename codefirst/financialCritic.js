@@ -13,6 +13,23 @@ function loadPrompt(name) {
 
 /* ---------- Domain-agnostic financial sanity checks ---------- */
 
+/* ---------- Helpers ---------- */
+
+function isInputCell(spec) {
+  if (!spec || typeof spec !== 'object') return false;
+  const fmt = spec.cellStyles || {};
+  // Known input styling
+  if (fmt.backgroundColor === '#FFF2CC' || fmt.backgroundColor === '#E6F2FF' || fmt.fontColor === '#0000FF') return true;
+  // No formula and no numberFormat (raw numbers are likely inputs in assumptions/drivers)
+  if (spec.formula === undefined && spec.value !== undefined && !fmt.numberFormat) return true;
+  return false;
+}
+
+function isAssumptionSheet(sheetName) {
+  if (!sheetName) return false;
+  return /assumptions?|drivers?|inputs?|params?|config/i.test(String(sheetName));
+}
+
 const FINANCIAL_SANITY_RULES = [
   {
     id: 'margin_bounds',
@@ -21,19 +38,16 @@ const FINANCIAL_SANITY_RULES = [
       const issues = [];
       for (const a of actions) {
         if (a.type !== 'setCellRange' || !a.cells) continue;
+        const sh = a.sheet || a.sheetName || '';
         for (const [addr, spec] of Object.entries(a.cells)) {
           const v = spec?.value;
           if (typeof v === 'number' && Math.abs(v) > 2) {
-            // Heuristic: if a cell looks like a percentage margin but is >200%
-            // and the label contains margin keywords
-            // We can't know the label here, so we flag suspiciously large numbers
-            // in cells that also have percent format
             const fmt = spec?.cellStyles?.numberFormat || '';
             if (/%/.test(fmt) && Math.abs(v) > 2) {
               issues.push({
                 severity: 'high',
                 kind: 'suspicious_margin',
-                location: `${a.sheet || ''}!${addr}`,
+                location: `${sh}!${addr}`,
                 detail: `numberFormat is percent but value ${v} is >2 (200%). Probably decimal vs percentage confusion.`,
               });
             }
@@ -48,24 +62,26 @@ const FINANCIAL_SANITY_RULES = [
     description: 'Computed financial metrics must use formula, not hardcoded value',
     check: (actions) => {
       const issues = [];
-      const computedLabels = /(ebitda|ebit|utile|profit|loss|cash flow|wacc|npv|irr|value|debt|equity|margin|return|yield|ratio|coverage|turnover)/i;
       for (const a of actions) {
         if (a.type !== 'setCellRange' || !a.cells) continue;
+        const sh = a.sheet || a.sheetName || '';
         for (const [addr, spec] of Object.entries(a.cells)) {
           if (spec?.value !== undefined && spec?.formula === undefined && typeof spec.value === 'number') {
-            // Try to infer if this is a computed cell from surrounding labels
-            // Since we don't have labels here, we'll flag ALL numeric values
-            // that aren't in a known input-style cell
-            const fmt = spec?.cellStyles || {};
-            const isInputStyle = fmt.backgroundColor === '#FFF2CC' || fmt.backgroundColor === '#E6F2FF' || fmt.fontColor === '#0000FF';
-            if (!isInputStyle) {
-              issues.push({
-                severity: 'medium',
-                kind: 'possible_hardcoded_computed',
-                location: `${a.sheet || ''}!${addr}`,
-                detail: `numeric value ${spec.value} without formula and without input styling. If computed, use formula.`,
-              });
-            }
+            // SKIP if this looks like an input cell (styled or on assumption sheet)
+            if (isInputCell(spec) || isAssumptionSheet(sh)) continue;
+            // SKIP if the cell is in a clear label row (e.g. A1, A2 label columns)
+            const col = addr.replace(/\d+/, '');
+            if (col === 'A' || col === 'B') continue; // likely labels
+            // SKIP if the value is clearly a year (1900-2100) — years are labels/headers, not computed metrics
+            if (Number.isInteger(spec.value) && spec.value >= 1900 && spec.value <= 2100) continue;
+            // SKIP if the value is a small integer 1-10 — these are almost always period numbers / headers
+            if (Number.isInteger(spec.value) && spec.value >= 1 && spec.value <= 10) continue;
+            issues.push({
+              severity: 'medium',
+              kind: 'possible_hardcoded_computed',
+              location: `${sh}!${addr}`,
+              detail: `numeric value ${spec.value} without formula and without input styling. If computed, use formula.`,
+            });
           }
         }
       }
@@ -203,10 +219,30 @@ function structuralValidation(actions) {
 /* ---------- LLM-based deep critic ---------- */
 
 async function deepCritic(actions, objective, plan, researchContext, options = {}) {
-  const { callLLMFn = callLLM, modelOverride = null } = options;
+  const { callLLMFn = callLLM, modelOverride = null, timeoutMs = 120000 } = options;
   const systemPrompt = loadPrompt('deep-critic');
 
-  const actionsJson = JSON.stringify(actions).slice(0, 12000);
+  // Build a focused action snippet: only include sheets that have structural issues
+  // (if we know them) to reduce context size and improve focus.
+  const structuralIssues = options.structuralIssues || [];
+  const problematicSheets = new Set();
+  for (const issue of structuralIssues) {
+    const loc = issue.location || '';
+    if (loc.includes('!')) problematicSheets.add(loc.split('!')[0]);
+  }
+
+  let actionsJson;
+  if (problematicSheets.size > 0 && problematicSheets.size < (plan?.sections?.length || 999)) {
+    // Focused: only problematic sheets + assumption sheets (for context)
+    const focused = actions.filter(a => {
+      const sh = a.sheet || a.sheetName || '';
+      return problematicSheets.has(sh) || isAssumptionSheet(sh) || a.type === 'createSheet';
+    });
+    actionsJson = JSON.stringify(focused).slice(0, 12000);
+  } else {
+    actionsJson = JSON.stringify(actions).slice(0, 12000);
+  }
+
   const planSummary = JSON.stringify(plan?.sections?.map(s => ({
     sheet: s.sheet, title: s.title, key_formulas: s.key_formulas,
   })) || []).slice(0, 3000);
@@ -221,7 +257,7 @@ async function deepCritic(actions, objective, plan, researchContext, options = {
     '## Plan Summary',
     planSummary,
     '',
-    '## Generated Actions (first 12K chars)',
+    '## Generated Actions (focused on problematic sheets)',
     '```json',
     actionsJson,
     '```',
@@ -236,7 +272,7 @@ async function deepCritic(actions, objective, plan, researchContext, options = {
     const result = await callLLMFn({
       system: systemPrompt,
       userText: userPrompt,
-      timeoutMs: 120000,
+      timeoutMs,
       modelOverride,
       role: 'auditor',
       thinkingDisabled: false,
@@ -261,8 +297,13 @@ async function deepCritic(actions, objective, plan, researchContext, options = {
 /* ---------- Orchestrator ---------- */
 
 async function runCritic(actions, objective, plan, researchContext, options = {}) {
-  // Layer 1: fast structural checks
-  const structuralIssues = structuralValidation(actions);
+  const { skipStructural = false, structuralIssues: providedStructural = null } = options;
+
+  // Layer 1: fast structural checks (skip if caller already ran them)
+  let structuralIssues = providedStructural;
+  if (!skipStructural || !structuralIssues) {
+    structuralIssues = structuralValidation(actions);
+  }
   if (structuralIssues.length > 0) {
     logger.info(`[Critic] Structural issues: ${structuralIssues.length}`);
   }
@@ -275,9 +316,25 @@ async function runCritic(actions, objective, plan, researchContext, options = {}
     ...(deep.review?.issues || []).map(i => ({ ...i, source: 'llm' })),
   ];
 
-  const score = deep.review?.score || (allIssues.length === 0 ? 85 : Math.max(0, 85 - allIssues.length * 5));
-  const approved = (deep.review?.approved && structuralIssues.filter(i => i.severity === 'critical').length === 0)
-    || (score >= 80 && structuralIssues.filter(i => i.severity === 'critical').length === 0);
+  // Weighted scoring: critical = -15, high = -8, medium = -3, low = -1
+  const severityWeight = { critical: 15, high: 8, medium: 3, low: 1 };
+  let penalty = 0;
+  for (const issue of allIssues) {
+    penalty += severityWeight[issue.severity] || 1;
+  }
+  // Base score from LLM if available, else compute from issues
+  let score = deep.review?.score;
+  if (score === undefined || score === null) {
+    score = Math.max(0, 100 - penalty);
+  } else {
+    // Blend LLM score with structural penalty (LLM may miss structural issues)
+    const structuralPenalty = structuralIssues.reduce((sum, i) => sum + (severityWeight[i.severity] || 1), 0);
+    score = Math.max(0, Math.min(100, score - structuralPenalty * 0.5));
+  }
+
+  const criticalCount = structuralIssues.filter(i => i.severity === 'critical').length +
+    (deep.review?.issues || []).filter(i => i.severity === 'critical').length;
+  const approved = (deep.review?.approved || score >= 80) && criticalCount === 0;
 
   return {
     approved,

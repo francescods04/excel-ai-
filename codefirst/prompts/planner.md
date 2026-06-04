@@ -34,6 +34,7 @@ Return a JSON object:
       "format": {"type": "data_table", "currency_columns": ["C","D"], "percent_columns": ["E"]},
       "density_note": "60 monthly rows, one per period",
       "cross_refs": ["Sources data from Assumptions!B3:B20"],
+      "exported_cells": ["B11 = Enterprise Value", "B12 = Equity Value"],
       "is_time_series": true,
       "periods": 60,
       "period_unit": "months"
