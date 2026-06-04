@@ -1,6 +1,6 @@
 'use strict';
 
-const { colToNum, numToCol, parseAddr } = require('./actionSanitizer');
+const { numToCol } = require('./actionSanitizer');
 
 // Validate that formulas in setCellRange actions reference cells/sheets that
 // actually exist in the workbook (or will exist after the actions execute).
@@ -52,11 +52,21 @@ function buildWorkbookIndex(actions, existingContext = null) {
     }
   }
 
+  // Also register sheets from context workbookSheets / allSheets
+  if (existingContext) {
+    const contextSheets = existingContext.workbookSheets
+      || existingContext.allSheets
+      || (existingContext.allSheetsData ? Object.keys(existingContext.allSheetsData) : null);
+    if (Array.isArray(contextSheets)) {
+      for (const s of contextSheets) sheets.add(String(s));
+    }
+  }
+
   for (const a of actions || []) {
     if (a.type === 'createSheet' && a.sheet) sheets.add(a.sheet);
-    if (a.sheet) sheets.add(a.sheet);
+    const sh = a.sheet || a.sheetName;
+    if (sh) sheets.add(sh);
     if (a.type === 'setCellRange' && a.cells) {
-      const sh = a.sheet || a.sheetName;
       if (!sh) continue;
       const cells = cellsBySheet.get(sh) || new Set();
       for (const addr of Object.keys(a.cells)) {
@@ -91,18 +101,33 @@ function validateFormulas(actions, existingContext = null) {
             });
             continue;
           }
-          // For single-cell xsheet refs, warn if the target cell is empty in plan & context.
-          if (!ref.col2 && !ref.row2) {
-            const sheetCells = cellsBySheet.get(ref.sheet);
-            const target = `${ref.col1}${ref.row1}`;
-            if (sheetCells && !sheetCells.has(target)) {
-              issues.push({
-                severity: 'medium',
-                kind: 'empty_xsheet_ref',
-                location: `${currentSheet}!${addr}`,
-                formula: spec.formula,
-                detail: `references ${ref.sheet}!${target} which has no value in plan or context (will read 0)`,
-              });
+          // Warn if target cell(s) are empty in plan & context, regardless of single-cell or range.
+          const sheetCells = cellsBySheet.get(ref.sheet);
+          if (sheetCells) {
+            if (!ref.col2 && !ref.row2) {
+              const target = `${ref.col1}${ref.row1}`;
+              if (!sheetCells.has(target)) {
+                issues.push({
+                  severity: 'medium',
+                  kind: 'empty_xsheet_ref',
+                  location: `${currentSheet}!${addr}`,
+                  formula: spec.formula,
+                  detail: `references ${ref.sheet}!${target} which has no value in plan or context (will read 0)`,
+                });
+              }
+            } else if (ref.col2 && ref.row2) {
+              // Range ref: check if ALL terminals are empty
+              const allEmpty = !sheetCells.has(`${ref.col1}${ref.row1}`)
+                && !sheetCells.has(`${ref.col2}${ref.row2}`);
+              if (allEmpty && sheetCells.size > 0) {
+                issues.push({
+                  severity: 'medium',
+                  kind: 'empty_xsheet_range_ref',
+                  location: `${currentSheet}!${addr}`,
+                  formula: spec.formula,
+                  detail: `references range ${ref.sheet}!${ref.col1}${ref.row1}:${ref.col2}${ref.row2} whose endpoints have no value in plan or context`,
+                });
+              }
             }
           }
         }
@@ -124,8 +149,25 @@ function validateFormulas(actions, existingContext = null) {
         }
       }
 
-      // Detect division by hardcoded 0.
-      if (/\/\s*0(?:[^.\d]|$)/.test(spec.formula)) {
+      // Detect cross-sheet self-references (e.g. Sheet1!A1 = Sheet1!A1 + 1)
+      const xsheetRefs = refs.filter(r => r.kind === 'xsheet');
+      for (const xr of xsheetRefs) {
+        if (!xr.col2 && !xr.row2 && xr.sheet === currentSheet) {
+          const target = `${xr.col1}${xr.row1}`;
+          if (target === bareAddr) {
+            issues.push({
+              severity: 'critical',
+              kind: 'self_reference_xsheet',
+              location: `${currentSheet}!${addr}`,
+              formula: spec.formula,
+              detail: `cross-sheet formula references its own cell via ${xr.sheet}!${target}`,
+            });
+          }
+        }
+      }
+
+      // Detect division by hardcoded 0, 0.0, .0 (handles /0, /0.0, /.0, /(0), / (0.0), etc.)
+      if (/\/\s*\(?\s*\.?0+(?:\.0+)?(?:\s*(?:\)|[^.\w]|$))/.test(spec.formula)) {
         issues.push({
           severity: 'high',
           kind: 'div_by_zero',
