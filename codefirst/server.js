@@ -172,31 +172,19 @@ router.post('/start', async (req, res) => {
 
   logger.info(`[CodeFirst] Starting turn ${turnId}: "${message.slice(0, 100)}..."`);
 
-  try {
-    const result = await generateAndExecute(message, context, {
-      turnId,
-      modelOverride,
-      timeoutMs: 180000,
-    });
+  // NON-BLOCKING: respond immediately, process in background
+  activeRuns.set(turnId, { status: 'processing', turnId });
+  res.json({ turnId, status: 'processing' });
 
-    const IS_VERCEL = !!process.env.VERCEL;
-
-    if (IS_VERCEL) {
-      res.json({
+  // Background execution
+  (async () => {
+    try {
+      const result = await generateAndExecute(message, context, {
         turnId,
-        status: 'ready',
-        actions: result.actions,
-        batches: result.batches,
-        cellCount: result.cellCount,
-        codeLength: result.codeLength,
-        plan: result.plan ? { sections: result.plan.sections?.length, model_type: result.plan.model_type, estimated_cells: result.plan.estimated_cells } : null,
-        review: result.review ? { approved: result.review.approved, score: result.review.score, issues: result.review.issues?.length } : null,
-        warnings: result.warnings,
-        tokenUsage: result.tokenUsage,
-        timings: result.timings,
-        skillNames: result.skillNames,
+        modelOverride,
+        timeoutMs: 180000,
       });
-    } else {
+
       activeRuns.set(turnId, {
         batches: result.batches,
         cellCount: result.cellCount,
@@ -211,25 +199,16 @@ router.post('/start', async (req, res) => {
         status: 'ready',
         batchCount: result.batches.length,
       });
-
-      res.json({
+      logger.info(`[CodeFirst] Turn ${turnId} completed: ${result.cellCount} cells, ${result.batches.length} batches`);
+    } catch (error) {
+      activeRuns.set(turnId, {
+        status: 'error',
+        error: error.message,
         turnId,
-        status: 'ready',
-        batchCount: result.batches.length,
-        cellCount: result.cellCount,
-        codeLength: result.codeLength,
-        plan: result.plan ? { sections: result.plan.sections?.length, model_type: result.plan.model_type, estimated_cells: result.plan.estimated_cells } : null,
-        review: result.review ? { approved: result.review.approved, score: result.review.score, issues: result.review.issues?.length } : null,
-        warnings: result.warnings,
-        tokenUsage: result.tokenUsage,
-        timings: result.timings,
-        skillNames: result.skillNames,
       });
+      logger.error(`[CodeFirst] Error for ${turnId}: ${error.message}`);
     }
-  } catch (error) {
-    logger.error(`[CodeFirst] Error for ${turnId}: ${error.message}`);
-    res.status(500).json({ error: error.message, turnId });
-  }
+  })();
 });
 
 router.post('/autoresearch/start', async (req, res) => {
@@ -305,7 +284,7 @@ router.post('/autoresearch/start', async (req, res) => {
 
 router.get('/stream/:turnId', (req, res) => {
   const { turnId } = req.params;
-  const state = activeRuns.get(turnId);
+  let state = activeRuns.get(turnId);
 
   if (!state) {
     return res.status(404).json({ error: 'Turn not found' });
@@ -318,26 +297,73 @@ router.get('/stream/:turnId', (req, res) => {
     'Access-Control-Allow-Origin': '*',
   });
 
-  res.write(`data: ${JSON.stringify({ eventType: 'turnStarted', turnId, status: state.status })}\n\n`);
+  const sendEvent = (eventType, data) => {
+    try {
+      res.write(`data: ${JSON.stringify({ ...data, eventType })}
+
+`);
+    } catch (_) {}
+  };
+
+  sendEvent('turnStarted', { turnId, status: state.status });
 
   if (state.status === 'ready') {
-    res.write(`data: ${JSON.stringify({ eventType: 'codefirstReady', turnId, batchCount: state.batchCount, cellCount: state.cellCount, warnings: state.warnings, tokenUsage: state.tokenUsage })}\n\n`);
+    sendEvent('codefirstReady', { turnId, batchCount: state.batchCount, cellCount: state.cellCount, warnings: state.warnings, tokenUsage: state.tokenUsage });
 
     const streaming = require('../server/agents/streaming');
     streamActionsWithThrottle(turnId, state.batches, {
       sendEvent: (id, eventType, data) => {
         try {
-          res.write(`data: ${JSON.stringify({ ...data, eventType })}\n\n`);
+          sendEvent(eventType, { ...data, turnId });
         } catch (_) {}
       }
     });
   } else if (state.status === 'error') {
-    res.write(`data: ${JSON.stringify({ eventType: 'codefirstError', turnId, error: state.error })}\n\n`);
+    sendEvent('codefirstError', { turnId, error: state.error });
     res.end();
+  } else if (state.status === 'processing') {
+    // Heartbeat while processing — keeps connection alive on Vercel
+    const heartbeatInterval = setInterval(() => {
+      state = activeRuns.get(turnId);
+      if (!state) {
+        clearInterval(heartbeatInterval);
+        sendEvent('codefirstError', { turnId, error: 'Turn state lost' });
+        res.end();
+        return;
+      }
+
+      if (state.status === 'processing') {
+        sendEvent('heartbeat', { turnId, status: 'processing' });
+      } else if (state.status === 'ready') {
+        clearInterval(heartbeatInterval);
+        sendEvent('codefirstReady', { turnId, batchCount: state.batchCount, cellCount: state.cellCount, warnings: state.warnings, tokenUsage: state.tokenUsage });
+        const streaming = require('../server/agents/streaming');
+        streamActionsWithThrottle(turnId, state.batches, {
+          sendEvent: (id, eventType, data) => {
+            try {
+              sendEvent(eventType, { ...data, turnId });
+            } catch (_) {}
+          }
+        });
+      } else if (state.status === 'error') {
+        clearInterval(heartbeatInterval);
+        sendEvent('codefirstError', { turnId, error: state.error });
+        res.end();
+      }
+    }, 3000);
+
+    req.on('close', () => {
+      clearInterval(heartbeatInterval);
+      const finalState = activeRuns.get(turnId);
+      if (finalState && finalState.status === 'ready') {
+        setTimeout(() => activeRuns.delete(turnId), 300000);
+      }
+    });
   }
 
   req.on('close', () => {
-    if (state.status === 'ready') {
+    const finalState = activeRuns.get(turnId);
+    if (finalState && finalState.status === 'ready') {
       setTimeout(() => activeRuns.delete(turnId), 300000);
     }
   });

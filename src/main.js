@@ -696,7 +696,7 @@ async function runCodeFirstMode(text) {
   try {
     const startData = await startCodeFirst(text, context, modelSelect.value);
     const turnId = startData.turnId;
-    addLog(`CodeFirst avviato: ${turnId} | ${startData.cellCount || '?'} celle previste | ${startData.tokenUsage ? ((startData.tokenUsage.promptTokens || 0) + (startData.tokenUsage.completionTokens || 0)).toLocaleString() + ' token' : ''}`);
+    addLog(`CodeFirst avviato: ${turnId}`);
 
     if (startData.plan) {
       addLog(`Piano: ${startData.plan.sections} sezioni, tipo ${startData.plan.model_type || '?'}`);
@@ -704,12 +704,12 @@ async function runCodeFirstMode(text) {
 
     removeMessage(planMsgId);
 
-    if (startData.actions && startData.actions.length > 0) {
+    if (startData.status === 'processing' || startData.batchCount > 0) {
+      addMessage(`CodeFirst in elaborazione. Connessione streaming...`, 'bot');
+      openCodeFirstStream(turnId, planMsgId);
+    } else if (startData.actions && startData.actions.length > 0) {
       addMessage(`CodeFirst: ${startData.cellCount} celle generate. Applicazione su Excel...`, 'bot');
       applyCodeFirstActions(startData.actions, turnId);
-    } else if (startData.batchCount > 0) {
-      addMessage(`CodeFirst pronto. ${startData.batchCount} batch da applicare. In attesa di streaming...`, 'bot');
-      openCodeFirstStream(turnId, planMsgId);
     } else {
       addMessage('CodeFirst completato ma nessuna azione generata.', 'error');
       resetAgent();
@@ -747,6 +747,10 @@ function openCodeFirstStream(turnId, planMsgId) {
 
   src.addEventListener('turnStarted', (e) => {
     try { const d = JSON.parse(e.data); addLog(`CodeFirst stream iniziato: ${d.status}`); } catch (_) {}
+  });
+
+  src.addEventListener('heartbeat', (e) => {
+    try { const d = JSON.parse(e.data); addLog(`CodeFirst elaborazione in corso... (${d.status})`); } catch (_) {}
   });
 
   src.addEventListener('codefirstReady', (e) => {
