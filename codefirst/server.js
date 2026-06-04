@@ -170,45 +170,74 @@ router.post('/start', async (req, res) => {
     return res.status(400).json({ error: 'message is required' });
   }
 
-  logger.info(`[CodeFirst] Starting turn ${turnId}: "${message.slice(0, 100)}..."`);
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
 
-  // NON-BLOCKING: respond immediately, process in background
-  activeRuns.set(turnId, { status: 'processing', turnId });
-  res.json({ turnId, status: 'processing' });
-
-  // Background execution
-  (async () => {
+  const sendEvent = (eventType, data) => {
     try {
-      const result = await generateAndExecute(message, context, {
-        turnId,
-        modelOverride,
-        timeoutMs: 180000,
-      });
+      res.write(`event: ${eventType}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    } catch (_) {}
+  };
 
-      activeRuns.set(turnId, {
-        batches: result.batches,
-        cellCount: result.cellCount,
-        codeLength: result.codeLength,
-        plan: result.plan,
-        review: result.review,
-        warnings: result.warnings,
-        tokenUsage: result.tokenUsage,
-        timings: result.timings,
-        skillNames: result.skillNames,
-        code: result.code,
-        status: 'ready',
-        batchCount: result.batches.length,
-      });
-      logger.info(`[CodeFirst] Turn ${turnId} completed: ${result.cellCount} cells, ${result.batches.length} batches`);
-    } catch (error) {
-      activeRuns.set(turnId, {
-        status: 'error',
-        error: error.message,
-        turnId,
-      });
-      logger.error(`[CodeFirst] Error for ${turnId}: ${error.message}`);
+  sendEvent('turnStarted', { turnId, status: 'processing' });
+
+  const heartbeatInterval = setInterval(() => {
+    sendEvent('heartbeat', { turnId, status: 'processing' });
+  }, 3000);
+
+  try {
+    logger.info(`[CodeFirst] Starting turn ${turnId}: "${message.slice(0, 100)}..."`);
+    const result = await generateAndExecute(message, context, {
+      turnId,
+      modelOverride,
+      timeoutMs: 180000,
+    });
+
+    clearInterval(heartbeatInterval);
+
+    if (result.error) {
+      sendEvent('codefirstError', { turnId, error: result.error });
+      res.end();
+      return;
     }
-  })();
+
+    sendEvent('codefirstReady', {
+      turnId,
+      batchCount: result.batches.length,
+      cellCount: result.cellCount,
+      warnings: result.warnings,
+      tokenUsage: result.tokenUsage,
+    });
+
+    const BATCH_INTERVAL_MS = 80;
+    const MAX_BATCHES_PER_TICK = 3;
+    for (let batchIdx = 0; batchIdx < result.batches.length; ) {
+      const batchesThisTick = Math.min(MAX_BATCHES_PER_TICK, result.batches.length - batchIdx);
+      for (let i = 0; i < batchesThisTick; i++) {
+        const batch = result.batches[batchIdx];
+        sendEvent('taskActions', {
+          turnId,
+          taskId: 'codefirst',
+          itemId: `batch_${batchIdx}`,
+          actions: batch,
+        });
+        batchIdx++;
+      }
+      if (batchIdx < result.batches.length) {
+        await new Promise(resolve => setTimeout(resolve, BATCH_INTERVAL_MS));
+      }
+    }
+
+    sendEvent('codefirstComplete', { turnId, totalBatches: result.batches.length });
+    res.end();
+  } catch (error) {
+    clearInterval(heartbeatInterval);
+    logger.error(`[CodeFirst] Error for ${turnId}: ${error.message}`);
+    sendEvent('codefirstError', { turnId, error: error.message });
+    res.end();
+  }
 });
 
 router.post('/autoresearch/start', async (req, res) => {

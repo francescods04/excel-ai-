@@ -689,28 +689,88 @@ async function resumeAgent(agentId, userResponse) {
   }
 }
 
+async function readSSEStream(response, onEvent) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+
+    const messages = buffer.split('\n\n');
+    buffer = messages.pop();
+
+    for (const msg of messages) {
+      const lines = msg.split('\n');
+      let eventType = '';
+      let dataStr = '';
+
+      for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          eventType = line.slice(7);
+        } else if (line.startsWith('data: ')) {
+          dataStr = line.slice(6);
+        }
+      }
+
+      if (dataStr) {
+        try {
+          const data = JSON.parse(dataStr);
+          onEvent(eventType, data);
+        } catch (_) {}
+      }
+    }
+  }
+}
+
 async function runCodeFirstMode(text) {
   const context = await getExcelContext();
   const planMsgId = addMessage('Pianificazione e generazione azioni in corso...', 'bot');
 
   try {
-    const startData = await startCodeFirst(text, context, modelSelect.value);
-    const turnId = startData.turnId;
-    addLog(`CodeFirst avviato: ${turnId}`);
-
-    if (startData.plan) {
-      addLog(`Piano: ${startData.plan.sections} sezioni, tipo ${startData.plan.model_type || '?'}`);
+    const response = await startCodeFirst(text, context, modelSelect.value);
+    if (!response.ok) {
+      throw new Error(await getErrorMessageFromResponse(response, 'Errore avvio CodeFirst'));
     }
 
-    removeMessage(planMsgId);
+    let receivedActions = false;
 
-    if (startData.status === 'processing' || startData.batchCount > 0) {
-      addMessage(`CodeFirst in elaborazione. Connessione streaming...`, 'bot');
-      openCodeFirstStream(turnId, planMsgId);
-    } else if (startData.actions && startData.actions.length > 0) {
-      addMessage(`CodeFirst: ${startData.cellCount} celle generate. Applicazione su Excel...`, 'bot');
-      applyCodeFirstActions(startData.actions, turnId);
-    } else {
+    await readSSEStream(response, (eventType, data) => {
+      switch (eventType) {
+        case 'turnStarted':
+          addLog(`CodeFirst stream iniziato: ${data.status}`);
+          break;
+        case 'heartbeat':
+          addLog(`CodeFirst elaborazione in corso... (${data.status})`);
+          break;
+        case 'codefirstReady':
+          addLog(`CodeFirst: ${data.batchCount} batch, ${data.cellCount} celle`);
+          break;
+        case 'taskActions':
+          receivedActions = true;
+          if (data.actions && data.actions.length > 0) {
+            addLog(`CodeFirst: applico ${data.actions.length} azioni su Excel`);
+            enqueueActions({ actions: data.actions, meta: { turnId: data.turnId, taskId: 'codefirst', itemId: data.itemId } },
+              state.excelActionQueue, showActionsPreview, hideActionsPreview,
+              (acts) => execActions(acts, updateStepsPanel), (result) => {});
+          }
+          break;
+        case 'codefirstComplete':
+          addLog(`CodeFirst completato: ${data.totalBatches} batch applicati`);
+          addMessage('Fatto! Foglio generato con CodeFirst.', 'bot');
+          resetAgent();
+          break;
+        case 'codefirstError':
+          addMessage('CodeFirst errore: ' + (data.error || 'sconosciuto'), 'error');
+          resetAgent();
+          break;
+      }
+    });
+
+    if (!receivedActions) {
       addMessage('CodeFirst completato ma nessuna azione generata.', 'error');
       resetAgent();
     }

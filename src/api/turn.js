@@ -158,7 +158,7 @@ async function startCodeFirst(message, context, modelOverride) {
   if (!res.ok) {
     throw new Error(await getErrorMessageFromResponse(res, 'Errore avvio CodeFirst'));
   }
-  return res.json();
+  return res;
 }
 
 export { startTurn, startCodeFirst, approveTurnExecution, postTurnStep, postTurnResponse, postTurnResponseBatch, postTurnActionResult, postHealthReport, getTurn, steerTurn, getErrorMessageFromResponse, API_BASE };
