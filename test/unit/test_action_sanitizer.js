@@ -104,4 +104,33 @@ ok('sanitizeActions: drops whole-column setCellRange cells', () => {
   assert.deepStrictEqual(Object.keys(actions[0].cells), ['A1']);
 });
 
+ok('sanitizeActions: absolutifies cross-sheet single-cell refs', () => {
+  const { actions, stats } = sanitizeActions([
+    { type: 'setCellRange', sheet: 'P', cells: {
+      A1: { formula: '=Assumptions!B3+Assumptions!$C$5' },
+      A2: { formula: '=SUM(Assumptions!B3:B10)' },
+    }},
+  ]);
+  assert.strictEqual(actions[0].cells.A1.formula, '=Assumptions!$B$3+Assumptions!$C$5');
+  assert.strictEqual(actions[0].cells.A2.formula, '=SUM(Assumptions!B3:B10)');
+  assert.ok(stats.absolutified >= 1);
+});
+
+ok('sanitizeActions: dedupes overlapping addresses, last write wins, merges styles', () => {
+  const { actions, stats } = sanitizeActions([
+    { type: 'setCellRange', sheet: 'S', cells: {
+      A1: { value: 1, cellStyles: { bold: true } },
+      B1: { value: 2 },
+    }},
+    { type: 'setCellRange', sheet: 'S', cells: {
+      A1: { value: 99, cellStyles: { numberFormat: '0.00' } },
+    }},
+  ]);
+  assert.strictEqual(stats.deduped, 1);
+  const a1 = actions.find(a => a.cells && a.cells.A1)?.cells.A1;
+  assert.strictEqual(a1.value, 99);
+  assert.strictEqual(a1.cellStyles.bold, true);
+  assert.strictEqual(a1.cellStyles.numberFormat, '0.00');
+});
+
 console.log(process.exitCode ? 'FAILED' : 'PASSED');

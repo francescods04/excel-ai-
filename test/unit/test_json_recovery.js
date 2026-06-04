@@ -11,34 +11,13 @@ async function test(name, fn) {
   }
 }
 
-// Pull recovery function via a lightweight require — agentLoop is heavy, so
-// we load only the module and access internals through a property access.
-// agentLoop.js doesn't export the helper; mirror it here for isolated testing.
-// To keep this test honest, we re-extract it via runInThisContext.
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
-
-const src = fs.readFileSync(path.join(__dirname, '..', '..', 'server', 'agents', 'agentLoop.js'), 'utf8');
-
-function extractFn(name) {
-  const re = new RegExp(`(function ${name}\\([\\s\\S]*?\\n\\})\\n`);
-  const m = src.match(re);
-  if (!m) throw new Error(`fn ${name} not found in agentLoop.js`);
-  return m[1];
-}
-
-const sandbox = { module: {}, exports: {} };
-vm.createContext(sandbox);
-const code = `
-${extractFn('escapeControlCharsInStrings')}
-${extractFn('tryRecoverExcessClosers')}
-${extractFn('tryRecoverMissingCommas')}
-${extractFn('tryRecoverTruncatedAgentJson')}
-module.exports = { tryRecoverTruncatedAgentJson, tryRecoverMissingCommas, tryRecoverExcessClosers };
-`;
-vm.runInContext(code, sandbox);
-const { tryRecoverTruncatedAgentJson, tryRecoverMissingCommas, tryRecoverExcessClosers } = sandbox.module.exports;
+// Recovery helpers now live in their own module (server/agents/jsonRecovery.js)
+// so they can be required directly instead of regex-extracted from agentLoop.js.
+const {
+  tryRecoverTruncatedAgentJson,
+  tryRecoverMissingCommas,
+  tryRecoverExcessClosers
+} = require('../../server/agents/jsonRecovery');
 
 async function main() {
   await test('recovers truncated JSON (open brace)', () => {

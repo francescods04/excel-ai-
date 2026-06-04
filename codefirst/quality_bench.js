@@ -45,6 +45,30 @@ const SCENARIOS = {
       mustHaveFormulas: [/Assumptions!/, /IRR/i],
     },
   },
+
+  // GENERALIZATION CHECKS — distinct finance models not in original bench.
+  // These verify the pipeline works on common finance tasks the user will
+  // actually run, not just the 4 scenarios above.
+  lbo: {
+    domain: 'finance',
+    objective: 'Crea un LBO model semplice. Fogli: (1) Assumptions: Entry EV 500m, Entry EBITDA 50m (10x multiple), Exit Multiple 9x dopo 5 anni, Debt/EBITDA 5x all\'entrata, Interest rate 6%, Tax 25%, Revenue growth 8%/anno, EBITDA margin steady 18%, D&A 4% of revenue, CapEx 5% of revenue, NWC change 1% of revenue change. (2) Sources_Uses: Sources (Debt + Sponsor Equity), Uses (Entry EV + Fees 2%). (3) Projections Year 0-5: Revenue, EBITDA, D&A, EBIT, Interest, EBT, Tax, Net Income, FCF, Debt Schedule (beginning balance, mandatory repayment 5%, sweep, ending balance). (4) Returns: Exit EV, Exit Equity Value (= Exit EV - Final Debt), IRR, MOIC. SOLO FORMULE — niente valori hardcoded per item calcolati.',
+    expect: {
+      sheets: ['Assumptions', 'Sources_Uses', 'Projections', 'Returns'],
+      minCells: 60,
+      minFormulas: 25,
+      mustHaveFormulas: [/IRR|MOIC/i, /Assumptions!/],
+    },
+  },
+  three_statement: {
+    domain: 'finance',
+    objective: 'Crea un mini 3-statement model (Income Statement + Balance Sheet + Cash Flow) per una azienda manifatturiera. Fogli: (1) Assumptions: Revenue 100m anno 0, Growth 7%/anno per 4 anni, COGS 60% revenue, OpEx 22% revenue, Tax 25%, D&A 4% revenue, CapEx 6% revenue, DSO 45 giorni, DPO 30 giorni, DIO 60 giorni. (2) IncomeStatement Y0-Y4: Revenue, COGS, Gross Profit, OpEx, EBITDA, D&A, EBIT, Tax, Net Income. (3) BalanceSheet Y0-Y4: Cash (plug), AR (=Revenue×DSO/365), Inventory (=COGS×DIO/365), Total CA, PP&E (=prev+CapEx-D&A), Total Assets, AP (=COGS×DPO/365), Debt steady 20m, Equity (=prev+NI), Total L+E. Verifica TA = TL+E. (4) CashFlow Y1-Y4: NI, +D&A, -ΔAR, -ΔInventory, +ΔAP, Operating CF, -CapEx, Investing CF, Financing CF (0), Net Change Cash, Beginning Cash, Ending Cash. SOLO FORMULE.',
+    expect: {
+      sheets: ['Assumptions', 'IncomeStatement', 'BalanceSheet', 'CashFlow'],
+      minCells: 100,
+      minFormulas: 50,
+      mustHaveFormulas: [/Assumptions!/, /IncomeStatement!|BalanceSheet!/],
+    },
+  },
 };
 
 function summarizeActions(actions) {
@@ -61,6 +85,8 @@ function summarizeActions(actions) {
   const allFormulaStrings = [];
   const allLabelStrings = [];
   const cellsBySheet = {};
+  const addressTouchCount = new Map();
+  const refsWithoutDollar = [];
 
   for (const a of actions || []) {
     if (a.sheet) sheets.add(a.sheet);
@@ -73,6 +99,8 @@ function summarizeActions(actions) {
       for (const [addr, spec] of Object.entries(a.cells)) {
         totalCells++;
         cellsBySheet[sh]++;
+        const fullKey = `${sh}!${addr}`;
+        addressTouchCount.set(fullKey, (addressTouchCount.get(fullKey) || 0) + 1);
         if (isWholeColumnOrRow(addr)) wholeColumn++;
         if (!spec || typeof spec !== 'object') {
           if (typeof spec === 'number') { hardcoded++; unformattedNumeric++; }
@@ -88,6 +116,13 @@ function summarizeActions(actions) {
           allFormulaStrings.push(spec.formula);
           const refMatches = spec.formula.match(/([A-Za-z_][A-Za-z0-9_]*)!/g);
           if (refMatches) refMatches.forEach(s => refs.add(s.replace('!', '')));
+          // Detect cross-sheet refs without absolute $ — they break when copied across periods.
+          const crossSheetNoDollar = spec.formula.match(/[A-Za-z_]\w*![A-Z]+\d+(?![:])/g);
+          if (crossSheetNoDollar) {
+            for (const r of crossSheetNoDollar) {
+              if (!r.includes('$')) refsWithoutDollar.push(`${fullKey}: ${r}`);
+            }
+          }
         } else if (isNumeric) {
           hardcoded++;
           if (hasNumFmt) formattedNumeric++; else unformattedNumeric++;
@@ -97,6 +132,7 @@ function summarizeActions(actions) {
   }
 
   const missingSheetRefs = [...refs].filter(r => !sheets.has(r));
+  const duplicateAddresses = [...addressTouchCount.entries()].filter(([, n]) => n > 1).map(([k]) => k);
 
   return {
     sheets: [...sheets],
@@ -104,6 +140,8 @@ function summarizeActions(actions) {
     formattedNumeric, unformattedNumeric,
     fillRangeCount, wholeColumn,
     missingSheetRefs,
+    duplicateAddresses,
+    refsWithoutDollar: refsWithoutDollar.slice(0, 10),
     cellsBySheet,
     allFormulaStrings,
     allLabelStrings,
@@ -138,6 +176,12 @@ function scoreScenario(key, scenario, actions, summary) {
   }
   if (summary.missingSheetRefs.length > 0) {
     issues.push({ severity: 'critical', kind: 'broken_refs', msg: `formulas reference non-existent sheets: ${summary.missingSheetRefs.join(', ')}` });
+  }
+  if (summary.duplicateAddresses.length > 0) {
+    issues.push({ severity: 'high', kind: 'duplicate_addresses', msg: `${summary.duplicateAddresses.length} cells written twice (slice collision): ${summary.duplicateAddresses.slice(0, 3).join(', ')}` });
+  }
+  if (summary.refsWithoutDollar.length > 5) {
+    issues.push({ severity: 'medium', kind: 'cross_sheet_no_dollar', msg: `${summary.refsWithoutDollar.length}+ cross-sheet refs without $ (will break on copy)` });
   }
   if (summary.hardcoded > summary.formulas && summary.formulas > 0) {
     issues.push({ severity: 'medium', kind: 'too_many_hardcoded', msg: `${summary.hardcoded} hardcoded numerics vs ${summary.formulas} formulas` });

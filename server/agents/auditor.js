@@ -74,6 +74,15 @@ function refRowsInFormula(formula) {
   return rows;
 }
 
+// Mirror of refRowsInFormula for the column axis: extract every column token
+// from cell refs. Used to detect a legitimate horizontal fill (each cell's
+// relative ref tracks its own column) vs a templated clone on a fixed column.
+function refColsInFormula(formula) {
+  const cols = [];
+  for (const m of String(formula || '').matchAll(/\$?([A-Z]{1,3})\$?\d+/g)) cols.push(colToIndex(m[1]));
+  return cols;
+}
+
 // For a group of cells sharing the same shape+literals, decide whether it
 // represents a legitimate column-fill (each cell's relative ref matches its own
 // row) or a templated clone (all cells reference the SAME absolute row,
@@ -88,6 +97,23 @@ function isLegitimateColumnFill(group) {
     if (refRows.includes(myPos.row)) matched += 1;
   }
   // ≥80% of cells reference their own row → real fill, not a clone.
+  return matched / group.cells.length >= 0.8;
+}
+
+// Horizontal twin of isLegitimateColumnFill: a forecast laid out across columns
+// (e.g. a 60-month P&L, B5=...*B4, C5=...*C4, D5=...*D4) is a real fill, not a
+// clone — each cell's relative ref tracks its OWN column. The original detector
+// only knew the vertical case, so it false-flagged the MEAT CREW fastfood_bp
+// horizontal forecast (2026-06-04) as 20 frozen clones. Returns true if row-fill.
+function isLegitimateRowFill(group) {
+  if (!group.cells || group.cells.length < 3) return false;
+  let matched = 0;
+  for (const { addr, formula } of group.cells) {
+    const myPos = parseAddr(addr);
+    if (!myPos) continue;
+    const refCols = refColsInFormula(formula);
+    if (refCols.includes(myPos.col)) matched += 1;
+  }
   return matched / group.cells.length >= 0.8;
 }
 
@@ -124,6 +150,9 @@ function detectTemplatedClones(sheetCells, opts = {}) {
       // the LLM did the right thing (just used relative refs that happen to
       // share a shape). Don't flag.
       if (rowSet.size >= 2 && isLegitimateColumnFill(g)) continue;
+      // Symmetric horizontal-fill filter: cells span columns and each ref tracks
+      // its own column → a real left-to-right forecast fill, not a clone.
+      if (colSet.size >= 2 && isLegitimateRowFill(g)) continue;
       // Severity ramps with count. ≥50 cells = fail (will block done and
       // trigger repair). Below that = warn-only signal. The old threshold of
       // 500 was too tolerant — fastfood_bp P&L "=IF(B4,B6/B4,0)" ×298 (a real

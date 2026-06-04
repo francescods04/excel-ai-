@@ -74,6 +74,36 @@ t('does not flag varying cell refs across rows', () => {
     assert.strictEqual(issues[0].severity, 'warn', 'legit column-fill should be warn not fail');
   }
 });
+t('does NOT flag legitimate horizontal forecast fill (MEAT CREW fastfood_bp)', () => {
+  // 60-month forecast laid out across columns: B5=...*B4, C5=...*C4, D5=...*D4.
+  // Each cell's relative ref tracks its OWN column. Real fill, not a clone.
+  const cells = {};
+  const colLetter = (i) => {
+    let s = ''; i += 1;
+    while (i > 0) { const r = (i - 1) % 26; s = String.fromCharCode(65 + r) + s; i = Math.floor((i - 1) / 26); }
+    return s;
+  };
+  for (let i = 1; i <= 60; i++) {
+    const col = colLetter(i); // B, C, D, ...
+    cells[`${col}5`] = { f: `=ROUND(Assumptions!$B$5*${col}4,0)` };
+  }
+  const issues = detectTemplatedClones({ PnL: cells }, { minClones: 30 });
+  assert.strictEqual(issues.length, 0, 'horizontal fill must not be flagged as clones');
+});
+t('still flags a frozen horizontal clone (ref does NOT track own column)', () => {
+  // Same shape across columns but every ref pinned to column B → a real clone.
+  const cells = {};
+  const colLetter = (i) => {
+    let s = ''; i += 1;
+    while (i > 0) { const r = (i - 1) % 26; s = String.fromCharCode(65 + r) + s; i = Math.floor((i - 1) / 26); }
+    return s;
+  };
+  for (let i = 1; i <= 60; i++) {
+    cells[`${colLetter(i)}5`] = { f: `=ROUND(Assumptions!$B$5*B4,0)` };
+  }
+  const issues = detectTemplatedClones({ PnL: cells }, { minClones: 30 });
+  assert.ok(issues.length === 1 && issues[0].severity === 'fail', 'frozen horizontal clone should still fail');
+});
 
 console.log('[Auditor] constant-guard detector');
 t('flags IF(literal=literal,...) clones', () => {

@@ -181,14 +181,14 @@ function buildSlices(plan) {
   for (let i = 0; i < sections.length; i++) {
     const s = sections[i];
     const sheet = s.sheet || 'Sheet1';
-    const estCells = Number(s.estimated_cells) || 0;
-    const sliceLabel = s.title ? `${sheet} — ${s.title}` : sheet;
+    const rawEst = Number(s.estimated_cells) || 0;
+    const est = rawEst || (s.is_time_series && s.periods ? Math.min(s.periods * 8, 480) : 60);
     slices.push({
       id: `${sheet}_${i}`,
-      label: sliceLabel,
+      label: s.title ? `${sheet} — ${s.title}` : sheet,
       sheet,
       section: s,
-      estCells: estCells || (s.is_time_series && s.periods ? Math.min(s.periods * 6, 360) : 60),
+      estCells: est,
     });
   }
   return slices;
@@ -217,7 +217,8 @@ async function generateStepwise(objective, context, plan, options = {}) {
       cross_sheet_deps: plan.cross_sheet_deps,
       estimated_cells: slice.estCells,
     };
-    const baseTimeout = slice.estCells > 400 ? 240000 : (slice.estCells > 200 ? 180000 : 120000);
+    const isHeavyTimeSeries = slice.section.is_time_series && (slice.section.periods || 0) >= 24;
+    const baseTimeout = slice.estCells > 400 || isHeavyTimeSeries ? 300000 : (slice.estCells > 200 ? 180000 : 120000);
     const focusLine = `the "${slice.label}" section in sheet "${slice.sheet}"${slice.section.row_range ? ` rows ${slice.section.row_range}` : ''}`;
     const subResult = await generateWithPlan(objective, context, subPlan, {
       modelOverride,

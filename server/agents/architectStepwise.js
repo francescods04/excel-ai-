@@ -291,6 +291,106 @@ function cascadeSkips(state, onEvent = () => {}) {
   return changed;
 }
 
+// Harvest slices stuck in a limbo state: sliceStates[id] === 'running' but the
+// underlying worker is already terminal (agent.status === 'completed' /
+// 'aborted') or the agent object is gone entirely. This happens on Vercel when
+// a multi-instance lost-update race on the Supabase rehydrate (stepArchitectWave
+// reloads turn state at the top of every /step) persists the worker's
+// completed agent object WITHOUT the matching ingest mutation that flips the
+// slice to 'succeeded'. Symptom (MEAT CREW fastfood_bp 2026-06-03): the `menu`
+// worker finished (iter 5, 52 writes, status='completed') but sliceStates.menu
+// stayed 'running'. advanceRunningSlices skips it (needs status==='running'),
+// no await/paused batch exists, isComplete() never trips because menu isn't
+// terminal → every step returns 'continue' forever → harness kills at 80
+// zero-progress polls and the whole downstream 9-wave chain (cost_of_goods →
+// revenue → P&L → cash flow → valuation) never runs.
+//
+// Run this BEFORE launching/awaiting any work so a stuck slice is resolved and
+// its dependents can proceed in the same step. Mirrors ingestSliceStep's done
+// branch (write-gated success) and aborted branch.
+function reconcileStuckSlices(state, onEvent = () => {}) {
+  let changed = false;
+  for (const slice of state.blueprint.slices || []) {
+    const sliceId = slice.id;
+    if (state.sliceStates[sliceId] !== 'running') continue;
+    const agent = state.sliceAgents[sliceId];
+
+    // Agent still actively running (or waiting on the client) — leave it.
+    if (agent && agent.status === 'running') continue;
+    if (agent && agent.pending) continue;
+
+    const writes = state.sliceWriteCounts[sliceId] || 0;
+    const cells = state.sliceWriteCells[sliceId] || 0;
+    const canBeReadOnly = (!slice.scope || (
+      (!slice.scope.sheets_owned || slice.scope.sheets_owned.length === 0) &&
+      (!slice.scope.ranges_owned || slice.scope.ranges_owned.length === 0)
+    ));
+
+    // Completed worker that was never harvested → succeed it (write-gated, same
+    // confabulation guard as ingestSliceStep: a content slice must have written
+    // something; a verify/format slice may legitimately have zero writes).
+    if (agent && agent.status === 'completed' && (writes > 0 || canBeReadOnly)) {
+      const degraded = !!agent.degraded;
+      state.sliceStates[sliceId] = 'succeeded';
+      state.sliceResults[sliceId] = {
+        ok: true,
+        status: degraded ? 'completed_degraded' : 'completed',
+        summary: agent.summary || `${slice.title || sliceId} completed (reconciled)`,
+        iteration: agent.iteration || 0,
+        writes,
+        cells,
+        degraded,
+        reconciled: true
+      };
+      delete state.sliceAgents[sliceId];
+      onEvent('sliceCompleted', { sliceId, status: state.sliceResults[sliceId].status, summary: state.sliceResults[sliceId].summary, iteration: state.sliceResults[sliceId].iteration, reconciled: true, elapsedMs: null });
+      changed = true;
+      continue;
+    }
+
+    // Terminal-but-failed worker, or the agent object is gone and we have no
+    // record of it succeeding. If it managed material writes, count it as a
+    // partial success so dependents can build on real data; otherwise fail so
+    // cascadeSkips can prune the subtree instead of hanging on 'running'.
+    if (writes > 0) {
+      state.sliceStates[sliceId] = 'succeeded';
+      state.sliceResults[sliceId] = {
+        ok: true,
+        status: 'completed_degraded',
+        summary: `${slice.title || sliceId} reconciled from limbo with ${writes} write(s) covering ~${cells} cells.`,
+        iteration: (agent && agent.iteration) || 0,
+        writes,
+        cells,
+        degraded: true,
+        reconciled: true
+      };
+    } else {
+      state.sliceStates[sliceId] = 'failed';
+      state.sliceResults[sliceId] = {
+        ok: false,
+        status: 'failed_reconciled',
+        error: agent
+          ? `worker terminal (status=${agent.status || 'unknown'}) with no writes; reconciled from limbo`
+          : 'worker agent missing with no writes; reconciled from limbo',
+        iteration: (agent && agent.iteration) || 0,
+        reconciled: true
+      };
+    }
+    if (state.sliceAgents[sliceId]) delete state.sliceAgents[sliceId];
+    onEvent(state.sliceResults[sliceId].ok ? 'sliceCompleted' : 'sliceFailed', {
+      sliceId,
+      status: state.sliceResults[sliceId].status,
+      summary: state.sliceResults[sliceId].summary,
+      error: state.sliceResults[sliceId].error,
+      iteration: state.sliceResults[sliceId].iteration,
+      reconciled: true,
+      elapsedMs: null
+    });
+    changed = true;
+  }
+  return changed;
+}
+
 function normalizeClientResults(clientResult) {
   if (!clientResult) return [];
   const arr = Array.isArray(clientResult)
@@ -836,6 +936,13 @@ async function advanceArchitectRun(state, {
     state.startedAt = state.startedAt || Date.now();
   }
 
+  // Resolve any limbo slices left by a cross-instance rehydrate race before we
+  // decide what to launch/await — otherwise a stuck 'running' slice blocks its
+  // dependents and starves the run into infinite 'continue' polls.
+  if (reconcileStuckSlices(state, onEvent)) {
+    while (cascadeSkips(state, onEvent)) {}
+  }
+
   if (state.pendingBatch && clientResult) {
     const resumed = await resumePendingBatch(state, clientResult, { runAgentStepFn, onEvent });
     while (cascadeSkips(state, onEvent)) {}
@@ -862,6 +969,7 @@ async function advanceArchitectRun(state, {
 
   initReadySlices(state, { context, maxParallel, initAgentRunFn, onEvent });
   const stepped = await advanceRunningSlices(state, { maxParallel, runAgentStepFn, context, onEvent });
+  if (reconcileStuckSlices(state, onEvent)) {}
   while (cascadeSkips(state, onEvent)) {}
 
   const action = actionControl(state, stepped.actions);
@@ -890,5 +998,6 @@ module.exports = {
   computeArchitectSummary,
   collectAwaitingClientBatch,
   collectPausedBatch,
+  reconcileStuckSlices,
   DEFAULT_MAX_PARALLEL
 };

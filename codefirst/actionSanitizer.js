@@ -107,10 +107,18 @@ function expandFillRangeToCells(action) {
   };
 }
 
+function absolutifyCrossSheetRefs(formula) {
+  if (!formula || typeof formula !== 'string') return formula;
+  // Match: SheetName!A1 or SheetName!$A1 or SheetName!A$1 — single-cell cross-sheet refs without full $.
+  // Skip: ranges (A1:B2), already-$$ refs, and refs without the ! qualifier.
+  return formula.replace(/([A-Za-z_][A-Za-z0-9_]*)!(\$?)([A-Z]+)(\$?)(\d+)(?![:\d])/g,
+    (m, sheet, ca, col, ra, row) => `${sheet}!$${col}$${row}`);
+}
+
 function sanitizeActions(actions, opts = {}) {
   const { maxRows = 200, maxCols = 50 } = opts;
   const out = [];
-  const stats = { dropped: 0, expanded: 0, bounded: 0, kept: 0 };
+  const stats = { dropped: 0, expanded: 0, bounded: 0, kept: 0, absolutified: 0, deduped: 0 };
 
   for (const a of actions || []) {
     if (!a || typeof a !== 'object' || !a.type) {
@@ -172,12 +180,19 @@ function sanitizeActions(actions, opts = {}) {
           logger.warn(`[Sanitizer] setCellRange whole-column cell skipped: ${addr}`);
           continue;
         }
-        if (spec && typeof spec === 'object' && typeof spec.value === 'string' && spec.value.startsWith('=') && !spec.formula) {
-          cleanCells[addr] = { ...spec, formula: spec.value };
-          delete cleanCells[addr].value;
-        } else {
-          cleanCells[addr] = spec;
+        let cellSpec = spec;
+        if (cellSpec && typeof cellSpec === 'object' && typeof cellSpec.value === 'string' && cellSpec.value.startsWith('=') && !cellSpec.formula) {
+          cellSpec = { ...cellSpec, formula: cellSpec.value };
+          delete cellSpec.value;
         }
+        if (cellSpec && typeof cellSpec === 'object' && typeof cellSpec.formula === 'string') {
+          const fixed = absolutifyCrossSheetRefs(cellSpec.formula);
+          if (fixed !== cellSpec.formula) {
+            cellSpec = { ...cellSpec, formula: fixed };
+            stats.absolutified++;
+          }
+        }
+        cleanCells[addr] = cellSpec;
       }
       if (Object.keys(cleanCells).length === 0) {
         stats.dropped++;
@@ -193,7 +208,38 @@ function sanitizeActions(actions, opts = {}) {
     stats.kept++;
   }
 
-  return { actions: out, stats };
+  // Deduplicate cell writes across all setCellRange actions in the SAME sheet.
+  // When stepwise slicing emits overlapping row ranges, two sections write to the
+  // same address — keep the LAST one (later sections typically refine earlier ones)
+  // and merge cellStyles non-destructively.
+  const sheetCellSeen = new Map(); // key="sheet!addr" → {actionIdx, addr, lastSpec}
+  for (let i = 0; i < out.length; i++) {
+    const a = out[i];
+    if (a.type !== 'setCellRange' || !a.cells) continue;
+    const sh = a.sheet || a.sheetName || 'Sheet1';
+    for (const addr of Object.keys(a.cells)) {
+      const k = `${sh}!${addr}`;
+      const prev = sheetCellSeen.get(k);
+      if (prev) {
+        const prevSpec = out[prev.actionIdx].cells[prev.addr];
+        const curSpec = a.cells[addr];
+        if (prevSpec && curSpec && typeof prevSpec === 'object' && typeof curSpec === 'object') {
+          curSpec.cellStyles = { ...(prevSpec.cellStyles || {}), ...(curSpec.cellStyles || {}) };
+        }
+        delete out[prev.actionIdx].cells[prev.addr];
+        stats.deduped++;
+      }
+      sheetCellSeen.set(k, { actionIdx: i, addr });
+    }
+  }
+
+  // Drop now-empty setCellRange actions
+  const final = out.filter(a => {
+    if (a.type !== 'setCellRange' || !a.cells) return true;
+    return Object.keys(a.cells).length > 0;
+  });
+
+  return { actions: final, stats };
 }
 
 function validateActionsStrict(actions) {

@@ -6,6 +6,31 @@ const { executeTool, registry } = require('../tools/registry');
 const SHARED_SCHEMAS = require('../tools/schemas');
 const { validateTaskOutput, validateFormula } = require('./critic');
 const { auditStatic: auditWorkbook, buildRepairInstruction } = require('./auditor');
+// Streaming-JSON repair helpers (extracted to ./jsonRecovery for readability +
+// isolated unit testing). The agent loop's streamed tool-call parser calls
+// tryRecoverTruncatedAgentJson before falling back to a re-prompt round-trip.
+const {
+  escapeControlCharsInStrings,
+  tryRecoverTruncatedAgentJson,
+  tryRecoverExcessClosers,
+  tryRecoverMissingCommas
+} = require('./jsonRecovery');
+// Loop / stagnation detectors (extracted to ./loopDetectors for readability +
+// isolated unit testing). Both run loops (legacy runAgentLoop + stepwise
+// runAgentStep) consume these; the constants/helpers not listed here are
+// detector-internal and live entirely in that module.
+const {
+  STAGNATION_MAX_TRAIL,
+  buildToolStagnationSignature,
+  extractSheetHint,
+  detectToolStagnation,
+  detectSemanticErrorLoop,
+  buildSemanticLoopReplanMessage,
+  detectSameToolRejectLoop,
+  detectNoProgress,
+  hasRecentBulkRejections,
+  formatToolStagnationReason
+} = require('./loopDetectors');
 const streaming = require('./streaming');
 const { initializeTools } = require('../utils/toolSearch');
 const { detectSkills } = require('../utils/skillSuggest');
@@ -101,40 +126,13 @@ const AGENT_FORCE_THINKING_AFTER_ERROR = process.env.AGENT_FORCE_THINKING_AFTER_
 const AGENT_USE_STREAMING = process.env.AGENT_USE_STREAMING !== 'false';
 const AGENT_LOOP_FAST_MODEL = process.env.AGENT_LOOP_FAST_MODEL || process.env.DEEPSEEK_FALLBACK_MODEL || 'deepseek-v4-flash';
 const AGENT_LOOP_DEFAULT_MODEL = process.env.AGENT_LOOP_MODEL || process.env.DEEPSEEK_FALLBACK_MODEL || 'deepseek-v4-flash';
-const STAGNATION_WATCH_TOOLS = new Set([
-  'read_workbook',
-  'read_sheet',
-  'get_range_as_csv',
-  'get_cell_ranges',
-  'build_workbook_graph',
-  'execute_office_js',
-  'read_format_summary',
-  'delete_sheet',
-  'create_sheet',
-  'bulk_create_sheets'
-]);
-const STAGNATION_MAX_REPEAT = Math.max(3, Number(process.env.AGENT_STAGNATION_MAX_REPEAT) || 4);
-const STAGNATION_ALT_CYCLES = Math.max(2, Number(process.env.AGENT_STAGNATION_ALT_CYCLES) || 3);
-const STAGNATION_MAX_TRAIL = Math.max(8, (STAGNATION_ALT_CYCLES * 2) + 2);
-// Read-thrash: when the agent runs N consecutive read-only tool calls without
-// any mutation in between, it's stuck in a "verify → re-verify → re-verify"
-// loop. Triggered repeatedly after the formula_not_landing confusion that
-// killed the LBO run on 2026-05-30: 8+ reads on the same area while convinced
-// writes weren't taking effect. We treat any stretch of READS_WITHOUT_WRITE
-// pure reads as terminal stagnation — bigger than the per-signature repeat
-// limit because read params often differ slightly between iterations.
-// Bumped from 5 → 8 (2026-05-30 fast-food run): slice workers got the new
-// READ-BEFORE-YOU-WRITE directive plus had to inspect multiple upstream sheets
-// (Assumptions, Revenue, Capex). opex_and_ebitda legitimately needed 5 reads
-// just to sample Assumptions sections + the Revenue total row before writing,
-// and was killed before its first write. 8 allows the inspection phase without
-// re-allowing the LBO-style "verify → re-verify" loop we originally guarded.
-// Lowered 8 → 6: cap "verify → re-verify" loops sooner. 6 still allows
-// inspection of 2-3 upstream sheets (Assumptions + 1-2 others) plus one
-// targeted re-read of a structure that came back truncated. 5 was too
-// tight — complex slices like multi-upstream cash_flow hit the cap during
-// legitimate inspection. Tunable via AGENT_READS_WITHOUT_WRITE_LIMIT.
-const READS_WITHOUT_WRITE_LIMIT = Math.max(4, Number(process.env.AGENT_READS_WITHOUT_WRITE_LIMIT) || 6);
+// Fix B — deterministic payload de-escalation. When bulk_set_cell_ranges is
+// stuck in a reject loop, strike 2 no longer aborts: it BLOCKS bulk for this
+// many iterations, forcing the agent onto small set_cell_range writes (which
+// flash emits reliably). Only if it still can't progress after the window does
+// the run abort. Pairs with Fix C (which lets those small writes through).
+const DEESCALATE_BULK_WINDOW = Math.max(2, Number(process.env.AGENT_DEESCALATE_BULK_WINDOW) || 6);
+// Stagnation/loop constants + detectors moved to ./loopDetectors (imported above).
 // Layer B — sheet-name canonicalization guard. Workers occasionally rename a
 // scaffolded sheet on the fly (e.g. "Cost Breakdown" → "CostBreakdown") which
 // splits content across parallel sheets and leaves the canonical one empty.
@@ -206,15 +204,6 @@ function sheetExistsInWorkbookContext(context, name) {
   if (!name || typeof name !== 'string') return false;
   return buildExistingSheetMap(context).has(normalizeSheetName(name));
 }
-
-const READ_ONLY_TOOLS_FOR_STAGNATION = new Set([
-  'read_workbook',
-  'read_sheet',
-  'get_range_as_csv',
-  'get_cell_ranges',
-  'build_workbook_graph',
-  'read_format_summary'
-]);
 
 // Layer D — intra-batch numeric outlier detector. Catches the class of bug
 // where one cell in a column is several orders of magnitude larger than its
@@ -2643,638 +2632,6 @@ function normalizeQuestionResponsePayload(response) {
   return response;
 }
 
-function normalizeStagnationValue(value, depth = 0) {
-  if (value == null) return value;
-  if (depth >= 4) return '[depth-limit]';
-  if (typeof value === 'string') {
-    return value.length > 160 ? `${value.slice(0, 160)}…` : value;
-  }
-  if (typeof value === 'number' || typeof value === 'boolean') return value;
-  if (Array.isArray(value)) {
-    return value.slice(0, 8).map(item => normalizeStagnationValue(item, depth + 1));
-  }
-  if (typeof value === 'object') {
-    return Object.keys(value).sort().reduce((acc, key) => {
-      acc[key] = normalizeStagnationValue(value[key], depth + 1);
-      return acc;
-    }, {});
-  }
-  return String(value);
-}
-
-function buildToolStagnationSignature(toolName, params = {}) {
-  return `${toolName}:${JSON.stringify(normalizeStagnationValue(params))}`;
-}
-
-// Pull the "target" of a read call out of a stagnation signature so the
-// tight_read_thrash detector can compare re-reads of the same range. The
-// signature is "toolName:{json}" — we extract the most likely range/sheet
-// keys and join them.
-function extractReadTargetKey(signature) {
-  if (typeof signature !== 'string') return null;
-  const colon = signature.indexOf(':');
-  if (colon < 0) return null;
-  let body;
-  try { body = JSON.parse(signature.slice(colon + 1)); } catch { return null; }
-  if (!body || typeof body !== 'object') return null;
-  // Sheet first
-  const sheet = body.sheet || body.sheetName || (Array.isArray(body.ranges) && body.ranges[0] && body.ranges[0].sheet) || null;
-  // Then a stable target descriptor
-  const target = body.target || body.range || body.addr || body.address
-    || (Array.isArray(body.ranges) && body.ranges[0] && (body.ranges[0].target || body.ranges[0].range))
-    || null;
-  if (!sheet && !target) return null;
-  return `${sheet || '?'}::${target || '?'}`;
-}
-
-// Best-effort sheet name pulled from a tool-call params object, used by the
-// read-thrash detector to distinguish "5 reads on the same sheet" (real loop)
-// from "5 reads each on a different sheet" (legitimate multi-sheet exploration).
-function extractSheetHint(params) {
-  if (!params || typeof params !== 'object') return null;
-  if (typeof params.sheet === 'string' && params.sheet) return params.sheet;
-  if (typeof params.sheetName === 'string' && params.sheetName) return params.sheetName;
-  if (typeof params.name === 'string' && params.name) return params.name;
-  if (Array.isArray(params.names) && params.names.length > 0) return String(params.names[0]);
-  if (typeof params.target === 'string' && params.target.includes('!')) {
-    return params.target.split('!')[0].replace(/'/g, '');
-  }
-  if (Array.isArray(params.ranges)) {
-    const first = params.ranges.find(r => typeof r === 'string' && r.includes('!'));
-    if (first) return first.split('!')[0].replace(/'/g, '');
-  }
-  if (Array.isArray(params.calls)) {
-    const sheets = params.calls.map(c => c && extractSheetHint(c.params || c)).filter(Boolean);
-    if (sheets.length > 0) return sheets.join(',');
-  }
-  if (Array.isArray(params.ranges)) {
-    const first = params.ranges.find(r => typeof r === 'string' && r.includes('!'));
-    if (first) return first.split('!')[0].replace(/'/g, '');
-  }
-  if (Array.isArray(params.calls)) {
-    const sheets = params.calls.map(c => c && extractSheetHint(c.params || c)).filter(Boolean);
-    if (sheets.length > 0) return sheets.join(','); // multi-sheet parallel batch
-  }
-  return null;
-}
-
-function detectToolStagnation(trail, maxRepeat = STAGNATION_MAX_REPEAT, altCycles = STAGNATION_ALT_CYCLES) {
-  if (!Array.isArray(trail) || trail.length === 0) return null;
-  const last = trail[trail.length - 1];
-  if (!last || !STAGNATION_WATCH_TOOLS.has(last.toolName)) return null;
-
-  // Read-thrash: last N reads with no write between them AND high overlap on
-  // target sheet. "Different sheets each iteration" is legitimate multi-sheet
-  // exploration (e.g. read 9 sheets to plan a formatting pass) — NOT thrash.
-  // We only trip the guard when the agent keeps hammering the SAME area while
-  // being confused that writes didn't land.
-  if (trail.length >= READS_WITHOUT_WRITE_LIMIT) {
-    const tail = trail.slice(-READS_WITHOUT_WRITE_LIMIT);
-    if (tail.every(entry => READ_ONLY_TOOLS_FOR_STAGNATION.has(entry.toolName))) {
-      // Count how many entries share the most common sheet hint. If the agent
-      // is exploring distinct sheets, distinct hints will dominate and we
-      // bail. Entries with no hint count toward the "unknown" bucket — if
-      // ALL entries are unknown that's also fine (probably workbook-wide
-      // reads like build_workbook_graph).
-      const sheetCounts = new Map();
-      for (const e of tail) {
-        const key = e.sheetHint || '__unknown__';
-        sheetCounts.set(key, (sheetCounts.get(key) || 0) + 1);
-      }
-      // Pick the most frequent NAMED sheet (ignore __unknown__).
-      let topNamedSheet = null;
-      let topNamedCount = 0;
-      for (const [key, count] of sheetCounts) {
-        if (key !== '__unknown__' && count > topNamedCount) {
-          topNamedSheet = key;
-          topNamedCount = count;
-        }
-      }
-      const distinctNamedSheets = [...sheetCounts.keys()].filter(k => k !== '__unknown__').length;
-      // Thrash only when a NAMED sheet captures ≥80% of the reads AND we have
-      // ≤2 distinct named sheets. All-unknown trails get a separate guard: if
-      // every signature is also identical we already catch that as `repeat`,
-      // otherwise we let the agent explore.
-      if (topNamedSheet && (topNamedCount / tail.length) >= 0.8 && distinctNamedSheets <= 2) {
-        return {
-          pattern: 'read_thrash',
-          entries: tail
-        };
-      }
-    }
-  }
-
-  if (trail.length >= maxRepeat) {
-    const repeated = trail.slice(-maxRepeat);
-    if (repeated.every(entry => entry.signature === last.signature)) {
-      return {
-        pattern: 'repeat',
-        entries: repeated
-      };
-    }
-  }
-
-  // Tight read-thrash: 5+ reads on the SAME sheet+target with DIFFERENT
-  // signatures (so they're not just identical repeats) and no write in
-  // between. Catches "agent writes ok, then re-reads the same range 4-5
-  // times with slightly different target strings because the result is
-  // empty/confusing" — the case the wide READS_WITHOUT_WRITE_LIMIT=8
-  // misses but burns 4-5 iters. Threshold is 5 (not 3) so a worker that
-  // legitimately needs 3-4 reads to scout a sheet (e.g. inspecting
-  // Assumptions to find the right rows for downstream formulas) isn't
-  // killed off; 5 identical reads IS a real loop.
-  if (trail.length >= 3) {
-    const tightWindow = trail.slice(-7);
-    const readsOnly = tightWindow.every(e => READ_ONLY_TOOLS_FOR_STAGNATION.has(e.toolName));
-    const distinctSignatures = new Set(tightWindow.map(e => e.signature)).size;
-    if (readsOnly && distinctSignatures >= 2) {
-      // Group by sheet+target to see if any one pair repeats ≥5x in the window.
-      const pairCounts = new Map();
-      for (const e of tightWindow) {
-        const sheetKey = e.sheetHint || '__unknown__';
-        const targetKey = extractReadTargetKey(e.signature) || '__no_target__';
-        const key = `${sheetKey}::${targetKey}`;
-        pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
-      }
-      for (const [key, count] of pairCounts) {
-        if (count >= 5) {
-          const [sheet, target] = key.split('::');
-          if (sheet === '__unknown__' && target === '__no_target__') continue;
-          return {
-            pattern: 'tight_read_thrash',
-            entries: tightWindow,
-            sheet: sheet === '__unknown__' ? null : sheet,
-            target: target === '__no_target__' ? null : target
-          };
-        }
-      }
-    }
-  }
-
-  const alternatingWindow = altCycles * 2;
-  if (trail.length >= alternatingWindow) {
-    const alternating = trail.slice(-alternatingWindow);
-    const first = alternating[0];
-    const second = alternating[1];
-    if (
-      first &&
-      second &&
-      first.signature !== second.signature &&
-      STAGNATION_WATCH_TOOLS.has(first.toolName) &&
-      STAGNATION_WATCH_TOOLS.has(second.toolName) &&
-      alternating.every((entry, index) => (
-        index % 2 === 0
-          ? entry.signature === first.signature
-          : entry.signature === second.signature
-      ))
-    ) {
-      return {
-        pattern: 'alternating',
-        entries: alternating
-      };
-    }
-  }
-
-  // Destructive loop: delete_sheet → create_sheet/bulk_create_sheets for the
-  // same sheet, repeated ≥2 times. Indicates the agent is stuck in a
-  // "delete and start over" cycle instead of fixing the data in place.
-  const destructiveWindow = 8;
-  if (trail.length >= destructiveWindow) {
-    const window = trail.slice(-destructiveWindow);
-    const deleteOps = window.filter(e => e.toolName === 'delete_sheet');
-    if (deleteOps.length >= 2) {
-      const deletedSheets = new Set(deleteOps.map(e => e.sheetHint).filter(Boolean));
-      const createdSheets = new Set(
-        window.filter(e => e.toolName === 'create_sheet' || e.toolName === 'bulk_create_sheets')
-          .map(e => e.sheetHint).filter(Boolean)
-      );
-      const overlapping = [...deletedSheets].filter(s => createdSheets.has(s));
-      if (overlapping.length >= 1) {
-        return {
-          pattern: 'destructive_loop',
-          entries: window,
-          sheet: overlapping[0]
-        };
-      }
-    }
-  }
-  return null;
-}
-
-// Semantic-error loop detector. Watches the healthSeen array (rolling list
-// of workbook errors caught by the health scanner with their rootCause
-// classification) and trips when the SAME (sheet, rootCause) pair recurs
-// repeatedly across iterations — even when the agent VARIES the tool it
-// uses between writes and reads. The original detectToolStagnation only
-// catches same-signature loops, so a "write #VALUE! → read → re-write
-// same wrong way → #VALUE! → read …" cycle slips through.
-//
-// Returns null, or `{ pattern: 'semantic_error_loop', rootCause, sheet,
-//   count, severity }`. Severity is:
-//   - 'soft' for count in [softThreshold, hardThreshold)  → inject replan
-//     hint, keep the run going
-//   - 'hard' for count >= hardThreshold                    → abort
-//
-// Defaults: soft = 3, hard = 5. Tunable via AGENT_SEMANTIC_LOOP_SOFT /
-// AGENT_SEMANTIC_LOOP_HARD env vars. Returns null when fewer than
-// softThreshold matching entries are present, so single transient errors
-// never trigger.
-const SEMANTIC_LOOP_SOFT = Math.max(2, Number(process.env.AGENT_SEMANTIC_LOOP_SOFT) || 3);
-const SEMANTIC_LOOP_HARD = Math.max(SEMANTIC_LOOP_SOFT + 1, Number(process.env.AGENT_SEMANTIC_LOOP_HARD) || 5);
-const SEMANTIC_LOOP_WINDOW = Math.max(SEMANTIC_LOOP_HARD * 2, Number(process.env.AGENT_SEMANTIC_LOOP_WINDOW) || 12);
-
-function detectSemanticErrorLoop(healthSeen, {
-  softThreshold = SEMANTIC_LOOP_SOFT,
-  hardThreshold = SEMANTIC_LOOP_HARD,
-  windowSize = SEMANTIC_LOOP_WINDOW
-} = {}) {
-  if (!Array.isArray(healthSeen) || healthSeen.length === 0) return null;
-  const window = healthSeen.slice(-windowSize);
-  // Bucket by (sheet, rootCause). Ignore entries without a classified
-  // rootCause (the legacy ones predate the classifier).
-  const buckets = new Map();
-  for (const e of window) {
-    if (!e || typeof e !== 'object') continue;
-    const sheet = e.sheet || '?';
-    const rc = e.rootCause;
-    if (!rc || rc === 'unknown') continue;
-    const key = `${sheet}::${rc}`;
-    if (!buckets.has(key)) buckets.set(key, { sheet, rootCause: rc, count: 0, samples: [] });
-    const b = buckets.get(key);
-    b.count += 1;
-    if (b.samples.length < 3) b.samples.push(`${e.sheet || '?'}!${e.addr || '?'}`);
-  }
-  let worst = null;
-  for (const b of buckets.values()) {
-    if (b.count < softThreshold) continue;
-    if (!worst || b.count > worst.count) worst = b;
-  }
-  if (!worst) return null;
-  const severity = worst.count >= hardThreshold ? 'hard' : 'soft';
-  return {
-    pattern: 'semantic_error_loop',
-    rootCause: worst.rootCause,
-    sheet: worst.sheet,
-    count: worst.count,
-    severity,
-    samples: worst.samples
-  };
-}
-
-function buildSemanticLoopReplanMessage(sig) {
-  if (!sig) return '';
-  const samples = (sig.samples || []).slice(0, 3).join(', ');
-  return `STOP TACTICAL FIXES — the same root cause "${sig.rootCause}" has been re-emerging in sheet "${sig.sheet}" for ${sig.count} consecutive workbook scans (e.g. ${samples}). Patching individual cells is not converging. STEP BACK and address the underlying structure: identify the ONE upstream cell whose contents are driving the cascade (likely a misplaced label, an empty driver, or a wrong reference), fix THAT cell with a correct value/formula, and only then revisit the dependent cells. If the section cannot be repaired in 2-3 writes, abandon it and call done with a summary of what is blocking you.`;
-}
-
-// No-progress detector: scan recent tool results and abort if the agent has
-// not produced any successful mutation (write / format / create) within a
-// long stretch. This is the user's preferred safety net — no hard iter cap,
-// but if the agent is wasting iterations on reads/think/plan with no actual
-// change to the workbook, we cut it off. Tunable via AGENT_NO_PROGRESS_LIMIT
-// (default 12 iters of no successful write → abort).
-const NO_PROGRESS_LIMIT = Math.max(4, Number(process.env.AGENT_NO_PROGRESS_LIMIT) || 12);
-const PRODUCTIVE_TOOLS = new Set([
-  'set_cell_range',
-  'bulk_set_cell_ranges',
-  'create_sheet',
-  'bulk_create_sheets',
-  'rename_sheet',
-  'delete_sheet',
-  'duplicate_sheet',
-  'set_format',
-  'bulk_set_format',
-  'format_workbook',
-  'copy_range',
-  'create_named_range',
-  'bulk_create_named_ranges',
-  'execute_excel_formula',
-  'execute_office_js',
-  'execute_python',
-  'add_chart',
-  'bulk_set_notes',
-  'set_notes',
-  'add_conditional_format',
-  'plan_format',
-  'apply_format_plan',
-  'build_dcf_section'
-]);
-// Best-effort recovery for a JSON tool call that came back truncated (e.g.
-// the LLM hit its max output cap mid-string and the model server returned
-// the prefix only). We close any open string + array + object so the
-// result becomes parseable, then sanity-check the shape. If the recovery
-// yields a recognisable {thought, tool, params} we hand it back; otherwise
-// we return null and the caller treats the call as a normal parse failure.
-// Escape bare control chars (\n, \t, etc.) inside string literals — common
-// streaming-LLM artifact ("Bad control character in string literal"). State
-// machine tracks string scope so structural newlines outside strings remain.
-function escapeControlCharsInStrings(s) {
-  let out = '';
-  let inStr = false, escape = false;
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (inStr) {
-      if (escape) { out += c; escape = false; continue; }
-      if (c === '\\') { out += c; escape = true; continue; }
-      if (c === '"') { out += c; inStr = false; continue; }
-      const code = c.charCodeAt(0);
-      if (code < 0x20) {
-        if (c === '\n') out += '\\n';
-        else if (c === '\r') out += '\\r';
-        else if (c === '\t') out += '\\t';
-        else if (c === '\b') out += '\\b';
-        else if (c === '\f') out += '\\f';
-        else out += '\\u' + code.toString(16).padStart(4, '0');
-        continue;
-      }
-      out += c;
-    } else {
-      if (c === '"') { out += c; inStr = true; continue; }
-      out += c;
-    }
-  }
-  return out;
-}
-
-function tryRecoverTruncatedAgentJson(raw) {
-  if (typeof raw !== 'string' || raw.length < 10) return null;
-  let trimmed = raw.trim();
-  if (!trimmed.startsWith('{')) return null;
-  // First fast path: escape any raw control chars inside string literals. This
-  // is cheap, idempotent, and clears the most common streaming bug ("Bad
-  // control character in string literal" — observed on 2026-06-02 Vairano
-  // iter 3 ×2). If the repaired string parses, return immediately.
-  if (/[\x00-\x08\x0B\x0C\x0E-\x1F]/.test(trimmed) || /\n|\r|\t/.test(trimmed)) {
-    const escaped = escapeControlCharsInStrings(trimmed);
-    if (escaped !== trimmed) {
-      try {
-        const parsed = JSON.parse(escaped);
-        if (parsed && typeof parsed === 'object'
-          && (typeof parsed.tool === 'string' || parsed.params)) return parsed;
-      } catch (_) { trimmed = escaped; /* keep going with escaped form */ }
-    }
-  }
-  const stack = [];
-  let inString = false;
-  let escape = false;
-  // Track excess closers: when we pop with empty stack, the closer is unmatched.
-  // LLM streaming occasionally appends trailing }] beyond the actual JSON object
-  // (observed on DCF E2E iter 7: "...0.0\"}}}}}]}}" with one extra `}`).
-  let excessClosers = 0;
-  for (let i = 0; i < trimmed.length; i++) {
-    const ch = trimmed[i];
-    if (escape) { escape = false; continue; }
-    if (ch === '\\' && inString) { escape = true; continue; }
-    if (ch === '"') { inString = !inString; continue; }
-    if (inString) continue;
-    if (ch === '{' || ch === '[') stack.push(ch);
-    else if (ch === '}' || ch === ']') {
-      if (stack.length === 0) excessClosers++;
-      else stack.pop();
-    }
-  }
-  if (stack.length === 0) {
-    if (excessClosers > 0) {
-      // Strip trailing closers greedily until parse succeeds.
-      const recovered = tryRecoverExcessClosers(trimmed, excessClosers);
-      if (recovered) return recovered;
-    }
-    // Brackets balanced but JSON.parse still failed → likely a missing-comma
-    // syntax error inside the body. Try to repair adjacent }{ / ]{ / ]" etc.
-    return tryRecoverMissingCommas(trimmed);
-  }
-  // Build the suffix to close. Walk the stack from outermost to innermost
-  // and emit the matching closers in reverse. If the LAST open was a string
-  // (i.e. the truncation happened inside a string literal), also emit a
-  // closing quote so the trailing key/value stays valid.
-  const openAtEnd = stack[stack.length - 1];
-  let suffix = '';
-  if (openAtEnd === '"' || (inString && stack.length > 0)) {
-    suffix = '"';
-  }
-  for (let i = stack.length - 1; i >= 0; i--) {
-    suffix += stack[i] === '{' ? '}' : ']';
-  }
-  const candidate = trimmed + suffix;
-  try {
-    const parsed = JSON.parse(candidate);
-    if (!parsed || typeof parsed !== 'object') return null;
-    // Recognise the agent tool-call shape. If neither tool nor params is
-    // present it's not actionable, so fall back to the normal parse-fail path.
-    if (typeof parsed.tool !== 'string' && !parsed.params) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-// Strip excess `}` / `]` characters that have no matching opener. The extras
-// can sit at the tail OR in the middle of the JSON — observed on DCF E2E
-// iter 7: "...0.0\"}}}}}]}}" had one extra `}` BEFORE the `]`, leaving the
-// trailing 6 closers themselves balanced. Strategy:
-//   1) try trailing strip (cheap, handles append-extras)
-//   2) if parse still fails, use the error position to locate the offending
-//      closer and surgically remove it; retry up to `maxStrip` rounds.
-function tryRecoverExcessClosers(raw, maxStrip) {
-  const cap = Math.min(maxStrip || 0, 16);
-  // Strategy 1 — strip trailing closers/whitespace.
-  let candidate = raw;
-  for (let strips = 0; strips < cap; strips++) {
-    const tailMatch = candidate.match(/[\s\}\]]+$/);
-    if (!tailMatch) break;
-    candidate = candidate.slice(0, candidate.length - 1);
-    try {
-      const parsed = JSON.parse(candidate);
-      if (parsed && typeof parsed === 'object'
-        && (typeof parsed.tool === 'string' || parsed.params)) {
-        return parsed;
-      }
-    } catch { /* keep stripping */ }
-  }
-  // Strategy 2 — surgical removal at the parse-error position.
-  candidate = raw;
-  for (let strips = 0; strips < cap; strips++) {
-    let pos = null;
-    try {
-      JSON.parse(candidate);
-      // Already parses (shouldn't happen since caller saw a failure, but safe).
-      break;
-    } catch (e) {
-      const m = String(e.message).match(/at position (\d+)/);
-      if (!m) break;
-      pos = Number(m[1]);
-    }
-    if (pos == null || pos >= candidate.length) break;
-    const ch = candidate[pos];
-    if (ch !== '}' && ch !== ']') break;
-    // Drop the offending closer and retry parse.
-    candidate = candidate.slice(0, pos) + candidate.slice(pos + 1);
-    try {
-      const parsed = JSON.parse(candidate);
-      if (parsed && typeof parsed === 'object'
-        && (typeof parsed.tool === 'string' || parsed.params)) {
-        return parsed;
-      }
-    } catch { /* keep cycling */ }
-  }
-  return null;
-}
-
-// LLMs occasionally emit "{...} {...}" or "...] [..." inside arrays, dropping
-// the comma. Inject a comma between any close-bracket/brace followed (modulo
-// whitespace) by an opening brace/bracket/quote. Skip work inside string
-// literals. Cheap, idempotent, and safe to attempt as a last-resort repair
-// before giving up and forcing the LLM to retry.
-function tryRecoverMissingCommas(raw) {
-  let out = '';
-  let inString = false;
-  let escape = false;
-  for (let i = 0; i < raw.length; i++) {
-    const ch = raw[i];
-    out += ch;
-    if (escape) { escape = false; continue; }
-    if (ch === '\\' && inString) { escape = true; continue; }
-    let justClosedString = false;
-    if (ch === '"') {
-      if (inString) justClosedString = true;
-      inString = !inString;
-    }
-    if (inString) continue;
-    if (ch === '}' || ch === ']' || justClosedString) {
-      let j = i + 1;
-      while (j < raw.length && (raw[j] === ' ' || raw[j] === '\n' || raw[j] === '\r' || raw[j] === '\t')) j++;
-      if (j < raw.length && (raw[j] === '{' || raw[j] === '[' || raw[j] === '"')) {
-        out += ',';
-      }
-    }
-  }
-  try {
-    const parsed = JSON.parse(out);
-    if (!parsed || typeof parsed !== 'object') return null;
-    if (typeof parsed.tool !== 'string' && !parsed.params) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-// Fast-fail: same WRITE tool consecutively rejected with an error N times in
-// a row. Catches the "LLM emits broken bulk → server rejects → LLM emits
-// the same broken bulk again" loop before the broader NO_PROGRESS_LIMIT (12)
-// kicks in. Specifically targeted at the schema-validation-rejection failure
-// mode observed 2026-06-03 turn ia3yjxxm loops 13-22: 10 consecutive
-// bulk_set_cell_ranges calls all rejected for missing `cells` field.
-const SAME_TOOL_REJECT_LIMIT = Math.max(3, Number(process.env.AGENT_SAME_TOOL_REJECT_LIMIT) || 5);
-const WRITE_TOOLS_FOR_REJECT_GUARD = new Set([
-  'set_cell_range',
-  'bulk_set_cell_ranges',
-  'set_format',
-  'bulk_set_format',
-  'execute_excel_formula'
-]);
-function detectSameToolRejectLoop(results, options = {}) {
-  const limit = options.limit || SAME_TOOL_REJECT_LIMIT;
-  if (!Array.isArray(results) || results.length < limit) return null;
-  // Walk backwards: collect the last `limit` tool-type entries. If ALL are
-  // the SAME write tool AND ALL have errors AND none produced actions → loop.
-  const tail = [];
-  for (let i = results.length - 1; i >= 0 && tail.length < limit; i--) {
-    const r = results[i];
-    if (!r || r.type !== 'tool') continue;
-    tail.push(r);
-  }
-  if (tail.length < limit) return null;
-  const firstTool = tail[0].tool;
-  if (!WRITE_TOOLS_FOR_REJECT_GUARD.has(firstTool)) return null;
-  for (const r of tail) {
-    if (r.tool !== firstTool) return null;
-    const res = r.result;
-    if (!res || typeof res !== 'object') return null;
-    const hasErr = (typeof res.error === 'string' && res.error.length > 0) ||
-                   (Array.isArray(res.errors) && res.errors.length > 0);
-    if (!hasErr) return null;
-    if (Array.isArray(res.actions) && res.actions.length > 0) return null;
-  }
-  // Extract a sample of the rejection reason for the abort message.
-  const sampleErr = tail[0].result?.error || (tail[0].result?.errors?.[0]?.reason) || 'unknown';
-  return {
-    pattern: 'same_tool_reject_loop',
-    tool: firstTool,
-    count: tail.length,
-    sampleReason: String(sampleErr).slice(0, 200)
-  };
-}
-
-function detectNoProgress(results, options = {}) {
-  const limit = options.limit || NO_PROGRESS_LIMIT;
-  if (!Array.isArray(results) || results.length === 0) return null;
-  // Walk backwards. We need `limit` consecutive iters with NO productive
-  // tool result. Productive = tool in PRODUCTIVE_TOOLS whose result has no
-  // `error` field and isn't in our blocked/stagnation results.
-  let unproductiveRun = 0;
-  let firstUnproductive = null;
-  for (let i = results.length - 1; i >= 0; i--) {
-    const r = results[i];
-    if (!r) continue;
-    // Treat blocked/stagnation as unproductive (they are pushes that didn't
-    // produce a real action).
-    if (r.type === 'error' || r.type === 'done' || r.type === 'ask_user' || r.type === 'todo_write') {
-      // Pause the run counter but don't break — a done can be followed by a
-      // gate that re-issues, so we keep walking.
-      continue;
-    }
-    if (r.type !== 'tool') {
-      continue;
-    }
-    const toolName = r.tool;
-    const result = r.result;
-    const hasError = result && typeof result === 'object' && (
-      (typeof result.error === 'string' && result.error.length > 0) ||
-      (Array.isArray(result.errors) && result.errors.length > 0)
-    );
-    if (PRODUCTIVE_TOOLS.has(toolName) && !hasError) {
-      // Productive tool result found — agent IS making progress.
-      return null;
-    }
-    unproductiveRun += 1;
-    if (firstUnproductive === null) firstUnproductive = i;
-    if (unproductiveRun >= limit) {
-      return {
-        pattern: 'no_progress',
-        startIndex: firstUnproductive,
-        unproductiveRun,
-        lastTool: toolName
-      };
-    }
-  }
-  return null;
-}
-
-function formatToolStagnationReason(stagnation) {
-  if (!stagnation || !Array.isArray(stagnation.entries) || stagnation.entries.length === 0) {
-    return 'stagnation_detected';
-  }
-  if (stagnation.pattern === 'repeat') {
-    return `stagnation_repeat:${stagnation.entries[0].toolName}:x${stagnation.entries.length}`;
-  }
-  if (stagnation.pattern === 'alternating' && stagnation.entries.length >= 2) {
-    const first = stagnation.entries[0].toolName;
-    const second = stagnation.entries[1].toolName;
-    return `stagnation_cycle:${first}->${second}:x${Math.floor(stagnation.entries.length / 2)}`;
-  }
-  if (stagnation.pattern === 'read_thrash') {
-    const tools = stagnation.entries.map(e => e.toolName).join(',');
-    return `stagnation_read_thrash:${stagnation.entries.length}_reads_no_write:[${tools}]`;
-  }
-  if (stagnation.pattern === 'tight_read_thrash') {
-    return `stagnation_tight_read_thrash:${stagnation.sheet || '?'}::${stagnation.target || '?'}`;
-  }
-  if (stagnation.pattern === 'destructive_loop') {
-    return `stagnation_destructive_loop:${stagnation.sheet || 'unknown_sheet'}`;
-  }
-  return `stagnation_${stagnation.pattern}`;
-}
-
 /* ---------- Post-write critic ---------- */
 
 // Summarize emitted Excel actions into a compact string the critic LLM can scan.
@@ -3994,6 +3351,20 @@ async function runAgentLoop(objective, context, options = {}) {
         }
       }
 
+      // Fix B — de-escalation gate. After a bulk reject loop tripped strike 2,
+      // bulk_set_cell_ranges is disabled for DEESCALATE_BULK_WINDOW iterations.
+      // Reject any bulk attempt during the window and redirect to set_cell_range.
+      if (toolName === 'bulk_set_cell_ranges'
+          && Number((context && context._forceSmallWritesUntilIter) || 0) > iteration) {
+        const remaining = Number(context._forceSmallWritesUntilIter) - iteration;
+        const blockMsg = `bulk_set_cell_ranges is temporarily DISABLED (de-escalation after a reject loop) for ${remaining} more iteration(s). Write with a single set_cell_range: one sheet + a small cells map (≤8 cells), e.g. {"sheet":"X","cells":{"A1":{"value":"Label"},"B1":{"value":10}}}. Small valid writes land reliably; continue section by section.`;
+        logger.warn(`[AgentLoop] bulk_set_cell_ranges blocked by de-escalation gate (${remaining} iters left)`);
+        messages.push(makeUserMessage(blockMsg));
+        results.push({ type: 'error', error: blockMsg, blocked: true, tool: toolName });
+        onEvent('iterationError', { iteration, error: 'bulk_deescalated_block', stagnation: false, pattern: 'bulk_deescalated' });
+        continue;
+      }
+
       // Hard bulk enforcement: 3 consecutive set_cell_range / set_format /
       // create_sheet / create_named_range → reject and force the bulk variant.
       // Mirrors the stepwise guard at line 5354. The legacy soft hint at line
@@ -4006,7 +3377,11 @@ async function runAgentLoop(objective, context, options = {}) {
         set_cell_range: 'bulk_set_cell_ranges'
       };
       const legacyBulkAlt = LEGACY_SEQUENTIAL_FORCE_BULK[toolName];
-      if (legacyBulkAlt) {
+      // Fix C — don't force bulk_set_cell_ranges when recent bulk calls are
+      // being rejected; that just feeds the failing tool (see loopDetectors).
+      const legacyBulkFailing = legacyBulkAlt === 'bulk_set_cell_ranges'
+        && hasRecentBulkRejections(results);
+      if (legacyBulkAlt && !legacyBulkFailing) {
         const recentLegacy = recentToolTrail.slice(-2).map(e => e.toolName);
         if (recentLegacy.length === 2 && recentLegacy.every(n => n === toolName)) {
           const forceMsg = `STAGNATION GUARD: "${toolName}" was called 3 times in a row. Your NEXT call MUST be "${legacyBulkAlt}" with ALL remaining items in one payload. Sequential one-at-a-time calls exhaust the iteration budget without making proportionate progress. This call is rejected; retry as ${legacyBulkAlt}.`;
@@ -4258,6 +3633,19 @@ async function runAgentLoop(objective, context, options = {}) {
           messages.push(makeUserMessage(corrective));
           logger.warn(`[AgentLoop] same_tool_reject_loop strike 1: ${sameToolReject.tool} x${sameToolReject.count}`);
           onEvent('iterationError', { iteration, error: `same_tool_reject_loop:${sameToolReject.tool}:x${sameToolReject.count}`, stagnation: false, pattern: 'same_tool_reject_loop_soft' });
+        } else if (sameToolStrikes === 1 && sameToolReject.tool === 'bulk_set_cell_ranges') {
+          // Fix B — strike 2 on bulk: de-escalate instead of aborting. Disable
+          // bulk for DEESCALATE_BULK_WINDOW iterations, forcing small
+          // set_cell_range writes (reliable on flash). The dispatch gate below
+          // enforces the block; strike 3 / no-progress still abort if stuck.
+          if (context && typeof context === 'object') {
+            context._sameToolRejectStrikes = 2;
+            context._forceSmallWritesUntilIter = iteration + DEESCALATE_BULK_WINDOW;
+          }
+          const deescalateMsg = `DE-ESCALATION (forced): bulk_set_cell_ranges has been rejected ${sameToolReject.count}× in a row ("${sameToolReject.sampleReason}"). bulk_set_cell_ranges is now DISABLED for the next ${DEESCALATE_BULK_WINDOW} iterations. Write your remaining cells with single set_cell_range calls — ONE sheet + a small cells map ({"A1":{"value":"x"},"B1":{"formula":"=A1*2"}}) per call, ≤8 cells each. Small valid writes always land; keep going section by section. Do NOT attempt bulk again until told.`;
+          messages.push(makeUserMessage(deescalateMsg));
+          logger.warn(`[AgentLoop] same_tool_reject_loop strike 2: de-escalating bulk → set_cell_range for ${DEESCALATE_BULK_WINDOW} iters`);
+          onEvent('iterationError', { iteration, error: `same_tool_reject_deescalate:${sameToolReject.tool}`, stagnation: false, pattern: 'same_tool_reject_loop_deescalate' });
         } else {
           aborted = true;
           abortReason = `stagnation_same_tool_reject:${sameToolReject.tool}:x${sameToolReject.count}`;
@@ -6299,6 +5687,18 @@ async function finishToolExecution(state, toolName, params, thought, toolResult,
       state.messages.push(makeUserMessage(corrective));
       state.forceThinkingNext = true;
       onProgress('iterationError', { iteration: state.iteration, error: `same_tool_reject_loop:${sameToolRejectStep.tool}:x${sameToolRejectStep.count}`, stagnation: false, pattern: 'same_tool_reject_loop_soft' });
+    } else if (state._sameToolRejectStrikes === 2 && sameToolRejectStep.tool === 'bulk_set_cell_ranges') {
+      // Fix B — strike 2 on bulk: de-escalate instead of aborting. Block bulk
+      // for DEESCALATE_BULK_WINDOW iterations so the agent is forced onto the
+      // small set_cell_range path (reliable on flash). The dispatch gate in
+      // runAgentStep enforces the block; if no progress still follows, the
+      // no-progress / strike-3 paths abort.
+      state._forceSmallWritesUntilIter = (state.iteration || 0) + DEESCALATE_BULK_WINDOW;
+      const deescalateMsg = `DE-ESCALATION (forced): bulk_set_cell_ranges has been rejected ${sameToolRejectStep.count}× in a row ("${sameToolRejectStep.sampleReason}"). bulk_set_cell_ranges is now DISABLED for the next ${DEESCALATE_BULK_WINDOW} iterations. Write your remaining cells with single set_cell_range calls — ONE sheet + a small cells map ({"A1":{"value":"x"},"B1":{"formula":"=A1*2"}}) per call, ≤8 cells each. Small valid writes always land; keep going section by section. Do NOT attempt bulk again until told.`;
+      state.messages.push(makeUserMessage(deescalateMsg));
+      state.forceThinkingNext = true;
+      logger.warn(`[AgentStep] same_tool_reject_loop strike 2: de-escalating bulk → set_cell_range for ${DEESCALATE_BULK_WINDOW} iters`);
+      onProgress('iterationError', { iteration: state.iteration, error: `same_tool_reject_deescalate:${sameToolRejectStep.tool}`, stagnation: false, pattern: 'same_tool_reject_loop_deescalate' });
     } else {
       state.status = 'aborted';
       state.abortReason = `stagnation_same_tool_reject:${sameToolRejectStep.tool}:x${sameToolRejectStep.count}`;
@@ -6473,6 +5873,20 @@ async function runAgentStep(state, clientResult, deps = {}) {
       return { state, control: 'continue', payload: { thought } };
     }
 
+    // Fix B — de-escalation gate. After a bulk reject loop tripped strike 2,
+    // bulk_set_cell_ranges is disabled for DEESCALATE_BULK_WINDOW iterations.
+    // Reject any bulk attempt during the window and redirect to set_cell_range.
+    if (toolName === 'bulk_set_cell_ranges'
+        && Number(state._forceSmallWritesUntilIter || 0) > (state.iteration || 0)) {
+      const remaining = Number(state._forceSmallWritesUntilIter) - (state.iteration || 0);
+      const blockMsg = `bulk_set_cell_ranges is temporarily DISABLED (de-escalation after a reject loop) for ${remaining} more iteration(s). Write with a single set_cell_range: one sheet + a small cells map (≤8 cells), e.g. {"sheet":"X","cells":{"A1":{"value":"Label"},"B1":{"value":10}}}. Small valid writes land reliably; continue section by section.`;
+      state.messages.push(makeUserMessage(blockMsg));
+      state.results.push({ type: 'error', error: blockMsg, blocked: true, tool: toolName });
+      onProgress('iterationError', { iteration: state.iteration, error: 'bulk_deescalated_block', stagnation: false, pattern: 'bulk_deescalated' });
+      state.iteration = Math.max(0, state.iteration - 1);
+      return { state, control: 'continue', payload: { thought } };
+    }
+
     // Hard-block sequential one-at-a-time tools after 2 attempts. The soft
     // BATCH HINT nudge was ignored 17 times in the 2026-05-30 run, burning
     // the whole iter budget on create_named_range one-by-one. Once the LLM
@@ -6489,7 +5903,14 @@ async function runAgentStep(state, clientResult, deps = {}) {
     // (i.e. only fired inside architect+slice mode), so the standalone agent_loop
     // path got no enforcement. Drop the slice gate; the guard is safe for any
     // mode because the redirect always has a valid bulk alternative.
-    if (bulkReplacement) {
+    // Fix C — break the dueling-guards deadlock. If we'd push toward
+    // bulk_set_cell_ranges but recent bulk calls have been rejected (flash lost
+    // JSON coherence / dropped `cells`), forcing bulk again just feeds the
+    // failing tool until detectSameToolRejectLoop aborts. Stand down and let the
+    // smaller, succeeding set_cell_range writes land.
+    const bulkIsFailing = bulkReplacement === 'bulk_set_cell_ranges'
+      && hasRecentBulkRejections(state.results);
+    if (bulkReplacement && !bulkIsFailing) {
       const recent = state.recentToolTrail.slice(-2).map(e => e.toolName);
       if (recent.length === 2 && recent.every(n => n === toolName)) {
         const forceMsg = `STAGNATION GUARD: "${toolName}" was called 3 times in a row. Your NEXT call MUST be "${bulkReplacement}" with ALL remaining items in one payload. Sequential one-at-a-time calls exhaust the iteration budget without proportionate progress; one bulk call of 30 entries does the work of 30 sequential calls in a single iter. This call is rejected; retry as ${bulkReplacement}.`;
@@ -6519,7 +5940,9 @@ async function runAgentStep(state, clientResult, deps = {}) {
         params.cells &&
         typeof params.cells === 'object' &&
         Object.keys(params.cells).length < 12;
-      if (currentSmallWrite && priorSmallWrites >= 2) {
+      // Fix C — same deadlock guard: don't force bulk when bulk is the tool
+      // that's currently being rejected. Let the small write through instead.
+      if (currentSmallWrite && priorSmallWrites >= 2 && !hasRecentBulkRejections(state.results)) {
         const forceMsg = `MICRO-WRITE GUARD: ${priorSmallWrites} prior small set_cell_range calls (<12 cells each). Retry as bulk_set_cell_ranges with the remaining sections in one payload (32 entries × 32 cells = 1024 cells per call). If finished, call done instead of writing another tiny batch.`;
         state.messages.push(makeUserMessage(forceMsg));
         state.results.push({ type: 'error', error: forceMsg, blocked: true, tool: toolName });
@@ -6740,5 +6163,6 @@ module.exports = {
   recordRuntimeSheet,
   detectNumericOutliers,
   buildOutlierError,
-  detectPaddingRows
+  detectPaddingRows,
+  collectSheetCellsFromResults
 };

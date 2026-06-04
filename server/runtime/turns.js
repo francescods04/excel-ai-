@@ -3,7 +3,8 @@ const path = require('path');
 
 const logger = require('../utils/logger');
 const planner = require('../agents/planner');
-const { runAgentLoop, initAgentRun, runAgentStep } = require('../agents/agentLoop');
+const { runAgentLoop, initAgentRun, runAgentStep, collectSheetCellsFromResults } = require('../agents/agentLoop');
+const { auditStatic, summarizeIssues } = require('../agents/auditor');
 const streaming = require('../agents/streaming');
 const conversationMemory = require('./conversationMemory');
 const { executeTool, registry } = require('../tools/registry');
@@ -1411,6 +1412,47 @@ async function failTurn(turnId, errorMessage, itemPatch) {
   return updated;
 }
 
+// Fix D — run the static workbook auditor when a stepwise turn ABORTS
+// (stagnation, reject loop, no-progress). Previously the auditor ran only on a
+// clean `done`, so an aborted run shipped its partial / incoherent cross-sheet
+// numbers to the user with no warning (MEAT CREW 2026-06-02: abort fired before
+// done, so detectCrossSheetCoherence never ran and bad AOV/Revenue figures went
+// out silently). We rebuild a virtual workbook from the agent's recorded writes,
+// run the static rules (incl. cross-sheet coherence + duplicate row labels), log
+// any fail-class findings, and emit them to the UI. Returns a short note to
+// append to the abort message, or '' when clean / not applicable.
+function auditAbortedTurn(turnId, state) {
+  try {
+    const results = (state && Array.isArray(state.results)) ? state.results : [];
+    if (results.length === 0) return '';
+    const sheetCells = collectSheetCellsFromResults(results);
+    if (!sheetCells || Object.keys(sheetCells).length === 0) return '';
+    const audit = auditStatic(sheetCells);
+    if (!audit || audit.ok || !Array.isArray(audit.fails) || audit.fails.length === 0) return '';
+    const byType = {};
+    for (const f of audit.fails) byType[f.type] = (byType[f.type] || 0) + 1;
+    const summary = Object.entries(byType).map(([t, n]) => `${t}×${n}`).join(', ');
+    appendLog(
+      turnId,
+      `Audit su run interrotto: ${audit.fails.length} problema/i bloccante/i nei dati scritti (${summary}). I numeri potrebbero essere incoerenti tra i fogli — verifica prima di usarli.`,
+      'warn',
+      { auditFails: audit.fails.slice(0, 8) }
+    );
+    try {
+      streaming.sendEvent(turnId, 'auditFindings', {
+        turnId,
+        ok: false,
+        context: 'aborted_run',
+        fails: audit.fails.slice(0, 20)
+      });
+    } catch (_) { /* SSE best-effort */ }
+    return ` (audit: ${audit.fails.length} problema/i di coerenza nei dati — ${summary})`;
+  } catch (err) {
+    logger.warn(`[Turns] abort audit failed: ${err.message}`);
+    return '';
+  }
+}
+
 function isSafeTask(task) {
   return isPrefetchSafeTask(task, registry);
 }
@@ -1699,7 +1741,7 @@ async function planTurn(turnId) {
           modelOverride: plannerModelOverride
         });
       } catch (err) {
-        appendLog(turnId, `Architect fallita (${err.message}). Fallback su agent loop stepwise.`, 'warn');
+        appendLog(turnId, `Architect fallita (${err.message}). Fallback su agent loop stepwise (tier pro).`, 'warn');
         const failedArchitectTriage = strategy.triage || null;
         strategy = chooseTurnStrategy(turn.objective, turn.context, turn.parentTurnId);
         strategy.mode = 'agent_loop';
@@ -1712,6 +1754,14 @@ async function planTurn(turnId) {
         );
         strategy.allowEscalation = false;
         strategy.triage = failedArchitectTriage;
+        // Architect failure on a multi-sheet build drops the whole job into one
+        // monolithic loop. On the default flash worker that loop loses JSON
+        // coherence on the large multi-sheet payload (MEAT CREW 2026-06-02 →
+        // schema-reject deadlock, run aborted). Pin the fallback loop to the pro
+        // model: deeper JSON robustness on big payloads, and combined with the
+        // bulk de-escalation guard (Fix B) it degrades to reliable small writes
+        // instead of feeding the failing tool. Deterministic — no extra LLM call.
+        strategy.workerModelOverride = process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro';
       }
 
       if (blueprint) {
@@ -2272,7 +2322,7 @@ async function executeAgentLoopTurn(turnId) {
     const agentResult = await runAgentLoop(turn.objective, context, {
       turnId,
       agentId: turnId,
-      modelOverride: turn.llm?.modelOverride || undefined,
+      modelOverride: strategy.workerModelOverride || turn.llm?.modelOverride || undefined,
       promptVariant: strategy.promptVariant || 'fast',
       // When the strategy / triage didn't ask for a cap, pass through
       // undefined so agentLoop applies its own unbounded default (relies on
@@ -2881,7 +2931,7 @@ function initStepwiseAgentLoop(turnId, strategy) {
   const isArchitectFallback = typeof strategy.reason === 'string' && strategy.reason.startsWith('architect_failed');
   turn.agentState = initAgentRun(turn.objective, context, {
     promptVariant: strategy.promptVariant || 'fast',
-    modelOverride: turn.llm?.modelOverride || undefined,
+    modelOverride: strategy.workerModelOverride || turn.llm?.modelOverride || undefined,
     maxIterations: strategy.maxIterations || undefined,
     forceThinkingDisabled: speedModeFlags.thinkingDisabled === true ? true : undefined,
     postWriteCriticEnabled: speedModeFlags.postWriteCritic !== false,
@@ -3321,10 +3371,11 @@ async function stepTurn(turnId, clientResult, clientSeq) {
     return { control: 'done', payload: { summary: state.summary }, stepSeq: turn.agentStepSeq };
   }
   if (control === 'aborted') {
-    await failTurn(turnId, `Errore esecuzione loop AI: ${state.abortReason || 'aborted'}`, {
+    const auditNote = auditAbortedTurn(turnId, state);
+    await failTurn(turnId, `Errore esecuzione loop AI: ${state.abortReason || 'aborted'}${auditNote}`, {
       id: itemId, type: 'taskExecution', taskId: task.id, agent: task.agent, tool: task.tool, description: task.description
     });
-    return { control: 'aborted', payload: { reason: state.abortReason }, stepSeq: turn.agentStepSeq };
+    return { control: 'aborted', payload: { reason: state.abortReason, auditNote: auditNote || undefined }, stepSeq: turn.agentStepSeq };
   }
 
   // Durable: commit before responding so the next step (possibly on another
