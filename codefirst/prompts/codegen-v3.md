@@ -11,19 +11,19 @@ EVERY number that depends on another cell MUST use "formula", not "value".
 ### R2: DENSITY — Match the plan exactly
 If the plan says 60 monthly rows, emit ALL 60 cells. If 5 years, all 5. Never summarize or skip periods.
 
-### R3: ONE setCellRange PER SECTION — explicit cells per period
-For time series (Y1..Y5 or M1..M60), emit ONE setCellRange per metric-row containing EVERY period cell with its OWN explicit formula (relative refs work correctly when you emit each cell individually). Example for Revenue Y1..Y5 starting at B2:
+### R3: TIME SERIES — explicit formulas with copyToRange for long runs
+For short time series (≤5 periods), emit explicit per-cell formulas in ONE setCellRange.
+For long time series (>5 periods), write the FIRST period cell with the formula, then use `copyToRange` to fill the rest. Example for Revenue Y1..Y10 starting at B2:
 ```json
 {"type":"setCellRange","sheet":"Projections","cells":{
   "A2":{"value":"Revenue","cellStyles":{"bold":true}},
   "B2":{"formula":"=Assumptions!$B$2","cellStyles":{"numberFormat":"€#,##0"}},
-  "C2":{"formula":"=B2*(1+Assumptions!$B$3)","cellStyles":{"numberFormat":"€#,##0"}},
-  "D2":{"formula":"=C2*(1+Assumptions!$B$3)","cellStyles":{"numberFormat":"€#,##0"}},
-  "E2":{"formula":"=D2*(1+Assumptions!$B$3)","cellStyles":{"numberFormat":"€#,##0"}},
-  "F2":{"formula":"=E2*(1+Assumptions!$B$3)","cellStyles":{"numberFormat":"€#,##0"}}
-}}
+  "C2":{"formula":"=B2*(1+Assumptions!$B$3)","cellStyles":{"numberFormat":"€#,##0"}}
+},
+"copyToRange":"C2:K2"}
 ```
-NEVER use a single `fillRange` with one formula expecting Excel to shift it — emit explicit cells. The sanitizer will reject silent fillRange.
+`copyToRange` copies the pattern from the FIRST written cell inside the destination (C2) and auto-shifts relative references. This is the ONLY efficient way to build 60-month or 1000-row schedules.
+NEVER use `fillRange` expecting Excel to shift a formula — it does not work across the JSON bridge. Use `copyToRange` instead.
 
 ### R4: NO WHOLE-COLUMN / WHOLE-ROW REFERENCES
 Targets MUST be bounded ranges. Examples:

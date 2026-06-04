@@ -274,6 +274,7 @@ function validateActionsStrict(actions) {
 }
 
 module.exports = {
+  absolutifyCrossSheetRefs,
   sanitizeActions,
   validateActionsStrict,
   shiftFormula,

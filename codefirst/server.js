@@ -2,6 +2,7 @@
 
 const express = require('express');
 const { enhancedPipeline } = require('./enhanced');
+const { autoresearchPipeline } = require('./autoresearch');
 const { executeCodeAndStream } = require('./bridge');
 const logger = require('../server/utils/logger');
 
@@ -71,6 +72,59 @@ async function generateAndExecute(objective, context = {}, options = {}) {
       totalMs: result.totalMs,
     },
     skillNames: result.skillNames,
+  };
+}
+
+async function generateAndExecuteAutoresearch(objective, context = {}, options = {}) {
+  const { turnId, modelOverride, data = null } = options;
+
+  const result = await autoresearchPipeline(objective, context, {
+    modelOverride,
+    data,
+    onProgress: options.onProgress || null,
+    maxIterations: options.maxIterations || 3,
+    skipResearch: options.skipResearch || false,
+  });
+
+  if (result.status !== 'ok') {
+    throw new Error(result.error || 'Autoresearch pipeline failed');
+  }
+
+  const chunkedBatches = chunkActions(result.actions, 200);
+
+  return {
+    code: null,
+    codeLength: 0,
+    warnings: [],
+    actions: result.actions,
+    batches: chunkedBatches,
+    cellCount: result.cellCount,
+    plan: result.plan,
+    review: {
+      approved: result.converged,
+      score: result.lastScore,
+      issues: result.timeline?.filter(t => t.phase === 'reviewing') || [],
+    },
+    mode: 'autoresearch',
+    explanation: `Autoresearch completed in ${result.iterations} iterations. Last score: ${result.lastScore}. Converged: ${result.converged}.`,
+    validation: null,
+    sanitizer: null,
+    tokenUsage: { promptTokens: 0, completionTokens: 0, calls: 0 },
+    timings: {
+      planMs: 0,
+      codegenMs: 0,
+      criticMs: 0,
+      executionMs: 0,
+      totalMs: result.totalMs,
+    },
+    skillNames: result.researchContext ? [result.researchContext.domain] : [],
+    autoresearchMeta: {
+      iterations: result.iterations,
+      converged: result.converged,
+      lastScore: result.lastScore,
+      timeline: result.timeline,
+      researchContext: result.researchContext,
+    },
   };
 }
 
@@ -178,6 +232,77 @@ router.post('/start', async (req, res) => {
   }
 });
 
+router.post('/autoresearch/start', async (req, res) => {
+  const { message, context = {}, modelOverride, data = null } = req.body;
+  const turnId = `cf_ar_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  if (!message) {
+    return res.status(400).json({ error: 'message is required' });
+  }
+
+  logger.info(`[CodeFirst/AR] Starting autoresearch turn ${turnId}: "${message.slice(0, 100)}..."`);
+
+  try {
+    const result = await generateAndExecuteAutoresearch(message, context, {
+      turnId,
+      modelOverride,
+      data,
+      timeoutMs: 300000,
+    });
+
+    const IS_VERCEL = !!process.env.VERCEL;
+
+    if (IS_VERCEL) {
+      res.json({
+        turnId,
+        status: 'ready',
+        actions: result.actions,
+        batches: result.batches,
+        cellCount: result.cellCount,
+        plan: result.plan ? { sections: result.plan.sections?.length, model_type: result.plan.model_type, estimated_cells: result.plan.estimated_cells } : null,
+        review: result.review ? { approved: result.review.approved, score: result.review.score, issues: result.review.issues?.length } : null,
+        mode: result.mode,
+        explanation: result.explanation,
+        timings: result.timings,
+        skillNames: result.skillNames,
+        autoresearchMeta: result.autoresearchMeta,
+      });
+    } else {
+      activeRuns.set(turnId, {
+        batches: result.batches,
+        cellCount: result.cellCount,
+        plan: result.plan,
+        review: result.review,
+        mode: result.mode,
+        explanation: result.explanation,
+        timings: result.timings,
+        skillNames: result.skillNames,
+        autoresearchMeta: result.autoresearchMeta,
+        status: 'ready',
+        batchCount: result.batches.length,
+      });
+
+      res.json({
+        turnId,
+        status: 'ready',
+        batchCount: result.batches.length,
+        cellCount: result.cellCount,
+        actions: result.actions,
+        plan: result.plan ? { sections: result.plan.sections?.length, model_type: result.plan.model_type, estimated_cells: result.plan.estimated_cells } : null,
+        review: result.review ? { approved: result.review.approved, score: result.review.score, issues: result.review.issues?.length } : null,
+        mode: result.mode,
+        explanation: result.explanation,
+        timings: result.timings,
+        skillNames: result.skillNames,
+        autoresearchMeta: result.autoresearchMeta,
+      });
+    }
+  } catch (error) {
+    logger.error(`[CodeFirst/AR] Error for ${turnId}: ${error.message}`);
+    res.status(500).json({ error: error.message, turnId });
+  }
+});
+
 router.get('/stream/:turnId', (req, res) => {
   const { turnId } = req.params;
   const state = activeRuns.get(turnId);
@@ -255,4 +380,4 @@ router.get('/result/:turnId', (req, res) => {
   });
 });
 
-module.exports = { router, generateAndExecute };
+module.exports = { router, generateAndExecute, generateAndExecuteAutoresearch };

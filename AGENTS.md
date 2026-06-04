@@ -107,7 +107,7 @@ Tutti i tool sono registrati in `server/tools/registry.js`. Un tool ha:
 ### Struttura
 
 ```
-test/unit/test_*.js     # 22 file, uno per modulo
+test/unit/test_*.js     # 23 file, uno per modulo
 test-backend.js         # Test integrazione backend
 test-e2e-mock-client.js # Test E2E con client mock
 test-llm-fallback.js    # Test fallback LLM
@@ -126,6 +126,40 @@ test-llm-fallback.js    # Test fallback LLM
 1. Crea `test/unit/test_<nome>.js`
 2. Segui il pattern: `require`, test functions, `process.exit(0)` a fine file
 3. Aggiungi a `npm test` in `package.json`
+
+## CodeFirst Autoresearch Loop (iterative quality)
+
+`codefirst/autoresearch.js` implementa un loop stile Karpathy/autoresearch che itera:
+**Research → Plan → Generate → Validate → Critic → Repair → repeat**
+
+### Per attivarlo
+
+Chiamare l'endpoint `POST /api/codefirst/autoresearch/start` con:
+- `message`: obiettivo utente
+- `context`: stato workbook
+- `data`: (opzionale) dati grezzi estratti (e.g., JSON da AIDA)
+
+### Architettura agentica
+
+1. **Researcher** (`codefirst/researcher.js`) — analizza i dati grezzi, calcola metriche storiche (CAGR, margini medi), deriva assumptions base-case con rationale e confidence.
+2. **Planner** (`codefirst/enhanced.js`) — produce blueprint di sezioni. Se il Researcher ha trovato assumptions, aggiunge in automatico una sezione `Assumptions`.
+3. **Codegen** — stepwise per plan complessi, single-shot per quelli piccoli. Supporta `copyToRange` per serie temporali lunghe (→ non più 5000 celle esplicite).
+4. **Structural Validator** (`codefirst/formulaValidator.js`) + **Sanitizer** (`codefirst/actionSanitizer.js`) — controlli veloci su refs, sheet mancanti, division-by-zero.
+5. **Financial Critic** (`codefirst/financialCritic.js`) — due layer:
+   - *Strutturale* (deterministico): margini anomali, valori hardcoded in serie temporali, ref a sheet inesistenti.
+   - *Deep* (LLM-based): coerenza concettuale con il research context, check del waterfall DCF, realisticità assumptions.
+6. **Repair Agent** (`codefirst/repairAgent.js`) — chirurgico: riceve le issue del critic e emette SOLO patch actions (setCellRange/setCellFormat) per le celle rotte. Non riscrive mai il modello intero.
+7. **Convergence check** — stop se score ≥80 e nessun issue critical, o se lo score si stagnifica (Δ<3 per 2 iterazioni).
+
+### Prompts dedicati
+
+- `codefirst/prompts/researcher.md` — come analizzare dati e produrre assumptions
+- `codefirst/prompts/deep-critic.md` — checklist di validazione finanziaria
+- `codefirst/prompts/repairer.md` — istruzioni per patch chirurgiche
+
+### Test
+
+`test/unit/test_autoresearch.js` — test deterministici su structural critic e applyPatches.
 
 ## Modifiche comuni
 

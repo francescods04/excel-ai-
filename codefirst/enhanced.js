@@ -761,7 +761,10 @@ function buildContextSummary(context) {
       }
     }
   }
+  if (context._researchContext) {
+    parts.push('\n=== RESEARCH CONTEXT ===\n' + String(context._researchContext).slice(0, 6000));
+  }
   return parts.join('\n');
 }
 
-module.exports = { enhancedPipeline, editPipeline, looksLikeEdit, planWorkbook, generateWithPlan, reviewCode, selectSkills, detectSilentFailures, countSetCellRangeCells, buildSlices };
+module.exports = { enhancedPipeline, editPipeline, looksLikeEdit, planWorkbook, generateWithPlan, generateStepwise, reviewCode, selectSkills, detectSilentFailures, countSetCellRangeCells, buildSlices, buildContextSummary, actionsFromResult };
