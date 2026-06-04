@@ -746,6 +746,9 @@ async function runCodeFirstMode(text) {
         case 'heartbeat':
           addLog(`CodeFirst elaborazione in corso... (${data.status})`);
           break;
+        case 'progress':
+          addLog(`CodeFirst: ${data.message || data.phase}`);
+          break;
         case 'codefirstReady':
           addLog(`CodeFirst: ${data.batchCount} batch, ${data.cellCount} celle`);
           break;

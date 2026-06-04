@@ -36,12 +36,12 @@ function chunkActions(actions, maxCellsPerBatch = 200) {
 }
 
 async function generateAndExecute(objective, context = {}, options = {}) {
-  const { turnId, modelOverride, timeoutMs = 240000, enableCritic = false } = options;
+  const { turnId, modelOverride, timeoutMs = 240000, enableCritic = false, onProgress = null } = options;
 
   const result = await enhancedPipeline(objective, context, {
     modelOverride,
     skipCritic: !enableCritic,
-    onProgress: options.onProgress || null,
+    onProgress,
   });
 
   if (result.status !== 'ok') {
@@ -193,6 +193,11 @@ router.post('/start', async (req, res) => {
       turnId,
       modelOverride,
       timeoutMs: 180000,
+      onProgress: (phase, info) => {
+        try {
+          sendEvent('progress', { turnId, phase, ...info });
+        } catch (_) {}
+      },
     });
 
     clearInterval(heartbeatInterval);

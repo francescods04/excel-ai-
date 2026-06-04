@@ -177,9 +177,14 @@ function planComplexity(plan) {
 
 function buildSlices(plan) {
   const sections = plan?.sections || [];
+  const MAX_SLICES = 10;
+  const limited = sections.slice(0, MAX_SLICES);
+  if (sections.length > MAX_SLICES) {
+    logger.warn(`[Enhanced] Plan has ${sections.length} sections; limiting to ${MAX_SLICES} to keep generation fast.`);
+  }
   const slices = [];
-  for (let i = 0; i < sections.length; i++) {
-    const s = sections[i];
+  for (let i = 0; i < limited.length; i++) {
+    const s = limited[i];
     const sheet = s.sheet || 'Sheet1';
     const rawEst = Number(s.estimated_cells) || 0;
     const est = rawEst || (s.is_time_series && s.periods ? Math.min(s.periods * 8, 480) : 60);
