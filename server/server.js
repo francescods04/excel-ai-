@@ -365,6 +365,14 @@ app.get('/api/health', (req, res) => {
 
 app.get('/health', (req, res) => res.redirect('/api/health'));
 
+/* ---------- CodeFirst (LLM→Python→Excel pipeline) ---------- */
+try {
+  const { router: codefirstRouter } = require('../codefirst/server');
+  app.use('/api/codefirst', codefirstRouter);
+} catch (_) {
+  // codefirst/ not available — safe to ignore (e.g. Vercel deploy without the module)
+}
+
 /* ---------- Admin Dashboard (modular routes) ---------- */
 const adminRouter = require('./routes/admin');
 app.use('/api/admin', authenticate, adminRouter);
