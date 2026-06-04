@@ -69,6 +69,19 @@ const SCENARIOS = {
       mustHaveFormulas: [/Assumptions!/, /IncomeStatement!|BalanceSheet!/],
     },
   },
+
+  // STRESS TEST — Complex M&A merger model. 12+ sheets, accretion/dilution,
+  // synergies, debt schedule, sensitivity. Pushes pipeline to its limits.
+  ma_merger: {
+    domain: 'finance',
+    objective: 'Crea un M&A merger model completo. Acquirer "AlphaCo" compra "BetaCo". Fogli: (1) Assumptions: Acquirer share price 50, shares outstanding 100m, P/E 15x, EBITDA 200m. Target market cap 1500m, EBITDA 100m, premium offered 30%, deal structure 60% stock / 40% cash. Synergies revenue +50m/anno, cost -30m/anno realizzate linearmente in 3 anni. Tax 25%, financing rate 5%, transaction fees 1.5% del deal value. (2) DealStructure: Offer Price/share, Equity Purchase Price (= target_mcap × 1+premium), Enterprise Value, Cash Consideration, Stock Consideration, New Shares Issued (=stock_consid/acquirer_share). (3) Sources_Uses: Sources (New Debt, New Equity, Cash on hand), Uses (Purchase Equity, Refinance Debt, Fees). (4) AcquirerStandalone Y1-Y5: Revenue, EBITDA, D&A, EBIT, Interest, EBT, Tax, NI. (5) TargetStandalone Y1-Y5 stessa struttura. (6) Synergies Y1-Y5: Revenue synergies (ramp 33/66/100/100/100% of 50m), Cost synergies (ramp), Integration costs (-15m Y1, -10m Y2), Net Synergy. (7) ProForma Y1-Y5: Combined Revenue (=Acquirer+Target+Syn), Combined EBITDA, D&A, EBIT, Interest (on new debt+existing), EBT, Tax, NI. (8) Accretion_Dilution Y1-Y5: Acquirer Standalone EPS, ProForma EPS (=ProForma NI / (acquirer_shares + new_shares)), Accretion/Dilution %, GAAP/Cash EPS distinction. (9) DebtSchedule Y0-Y5: Beginning Debt, Mandatory Amort 5%, Cash Sweep, Ending Debt, Interest Expense. (10) Returns: IRR sponsor, MOIC, NPV synergies. (11) Sensitivity_AccrDil: matrice 5×5 Premium vs Synergies Realization su Y1 Accretion. (12) Sensitivity_IRR: matrice 5×5 Exit Multiple vs Hold Period su IRR. Cross-sheet refs sempre con $.',
+    expect: {
+      sheets: ['Assumptions', 'DealStructure', 'Sources_Uses', 'AcquirerStandalone', 'TargetStandalone', 'Synergies', 'ProForma', 'Accretion_Dilution', 'DebtSchedule', 'Returns', 'Sensitivity_AccrDil', 'Sensitivity_IRR'],
+      minCells: 250,
+      minFormulas: 150,
+      mustHaveFormulas: [/Assumptions!/, /Synergies|Synerg/i, /Accretion|Dilution|EPS/i],
+    },
+  },
 };
 
 function summarizeActions(actions) {

@@ -422,13 +422,136 @@ function actionsFromResult(actions) {
   return { actions, cellCount };
 }
 
+function looksLikeEdit(objective, context) {
+  if (!context) return false;
+  const sheets = context.workbookSheets || context.allSheets || (context.allSheetsData ? Object.keys(context.allSheetsData) : []);
+  if (!sheets || sheets.length === 0) return false;
+  if (!objective || typeof objective !== 'string') return false;
+  const lo = objective.toLowerCase();
+  // Skip if it looks like a "create from scratch" request even with context present.
+  const createSignals = ['crea ', 'create ', 'genera ', 'build ', 'da zero', 'from scratch', 'nuovo foglio', 'new sheet'];
+  if (createSignals.some(s => lo.includes(s))) return false;
+  const editSignals = [
+    'cambia', 'modifica', 'aggiorna', 'imposta', 'metti', 'porta',
+    'change', 'update', ' set ', 'modify', 'adjust', 'increase', 'decrease',
+    'invece di', 'al posto di', 'aumenta', 'diminuisci', 'riduci',
+    'now change', 'ma ora', 'fai diventare', 'rendi ', 'sostituisci',
+    'ora il', 'ora la', 'ora porta', 'ora cambia',
+  ];
+  // Word-boundary check so "set" doesn't match inside other words.
+  return editSignals.some(s => lo.startsWith(s) || lo.includes(' ' + s) || lo.includes(s + ' '));
+}
+
+function buildEditContext(context) {
+  if (!context) return '(no workbook context provided)';
+  const parts = [];
+  const sheets = context.sheets || [];
+  if (context.workbookSheets) parts.push(`Sheets: ${context.workbookSheets.join(', ')}`);
+  if (context.activeSheet) parts.push(`Active: ${context.activeSheet}`);
+  for (const s of sheets.slice(0, 12)) {
+    parts.push(`\n--- ${s.name} (${s.rowCount || '?'} × ${s.columnCount || '?'}) ---`);
+    const preview = s.preview || [];
+    const formulas = s.formulas || [];
+    for (let r = 0; r < Math.min(preview.length, 30); r++) {
+      const row = preview[r] || [];
+      const frow = formulas[r] || [];
+      const cells = [];
+      for (let c = 0; c < Math.min(row.length, 12); c++) {
+        const v = row[c];
+        const f = frow[c];
+        const colLetter = String.fromCharCode(65 + c);
+        const addr = `${colLetter}${r + 1}`;
+        if (f && String(f).startsWith('=')) cells.push(`${addr}=${f}`);
+        else if (v !== '' && v !== null && v !== undefined) cells.push(`${addr}:${v}`);
+      }
+      if (cells.length > 0) parts.push(cells.join(' | '));
+    }
+  }
+  return parts.join('\n');
+}
+
+async function editPipeline(objective, context, options = {}) {
+  const { modelOverride = null, onProgress = null } = options;
+  const totalStart = Date.now();
+
+  if (onProgress) onProgress('editing', { message: 'Identificazione celle da modificare...' });
+  const systemPrompt = loadPrompt('edit');
+  const ctxStr = buildEditContext(context);
+
+  const userPrompt = [
+    '## User Instruction',
+    objective,
+    '',
+    '## Workbook Context (existing values + formulas)',
+    ctxStr,
+    '',
+    '## Task',
+    'Emit setCellRange actions for ONLY the cells that need to change. Return {"actions":[...], "explanation":"..."} or {"actions":[], "question":"..."} if ambiguous.',
+  ].join('\n');
+
+  resetUsageStats();
+  let result;
+  try {
+    result = await callLLM({
+      system: systemPrompt,
+      userText: userPrompt,
+      timeoutMs: 45000,
+      modelOverride,
+      role: null,
+      thinkingDisabled: true,
+      jsonMode: true,
+      label: 'codefirst_edit',
+    });
+  } catch (e) {
+    return { status: 'failed', error: e.message, totalMs: Date.now() - totalStart };
+  }
+
+  const actions = Array.isArray(result?.actions) ? result.actions : [];
+  const usage = getUsageStats();
+  logger.info(`[Enhanced] Edit done (${Date.now() - totalStart}ms): ${actions.length} actions, "${result?.explanation || ''}"`);
+
+  if (actions.length === 0 && result?.question) {
+    return {
+      status: 'clarification_needed',
+      question: result.question,
+      explanation: result.explanation || null,
+      totalMs: Date.now() - totalStart,
+      totalTokens: usage,
+    };
+  }
+
+  const { sanitizeActions } = require('./actionSanitizer');
+  const sanitized = sanitizeActions(actions);
+
+  return {
+    status: 'ok',
+    mode: 'edit',
+    actions: sanitized.actions,
+    cellCount: sanitized.actions.reduce((s, a) => s + (a.cells ? Object.keys(a.cells).length : 0), 0),
+    explanation: result?.explanation || null,
+    totalMs: Date.now() - totalStart,
+    totalTokens: usage,
+    sanitizerStats: sanitized.stats,
+  };
+}
+
 async function enhancedPipeline(objective, context = {}, options = {}) {
   const {
     modelOverride = null,
     skipCritic = true,
     onProgress = null,
+    forceMode = null, // 'edit' | 'create' | null
   } = options;
   const { sanitizeActions } = require('./actionSanitizer');
+
+  // Auto-route to edit mode when an existing workbook is present and the
+  // instruction looks like an edit. Big speedup: single LLM call ~5-15s vs
+  // full plan+codegen cycle ~60s+.
+  const mode = forceMode || (looksLikeEdit(objective, context) ? 'edit' : 'create');
+  if (mode === 'edit') {
+    logger.info(`[Enhanced] Routing to edit mode: "${objective.slice(0, 80)}..."`);
+    return editPipeline(objective, context, options);
+  }
 
   const totalStart = Date.now();
   const pipeline = { phases: {} };
@@ -520,6 +643,17 @@ async function enhancedPipeline(objective, context = {}, options = {}) {
     logger.info(`[Enhanced] Sanitizer: dropped=${sanitized.stats.dropped} expanded=${sanitized.stats.expanded} bounded=${sanitized.stats.bounded} kept=${sanitized.stats.kept}`);
   }
   codeResult.actions = sanitized.actions;
+
+  // Phase 5: Structural formula validation. Catches broken cross-sheet refs,
+  // self-references, division-by-zero BEFORE Excel sees them.
+  const { validateFormulas } = require('./formulaValidator');
+  const validationIssues = validateFormulas(codeResult.actions, context);
+  const criticalIssues = validationIssues.filter(i => i.severity === 'critical');
+  if (validationIssues.length > 0) {
+    logger.info(`[Enhanced] Validator: ${criticalIssues.length} critical, ${validationIssues.filter(i => i.severity === 'high').length} high, ${validationIssues.filter(i => i.severity === 'medium').length} medium`);
+  }
+  pipeline.validation = { issueCount: validationIssues.length, critical: criticalIssues.length, issues: validationIssues.slice(0, 20) };
+
   const cellInfo = actionsFromResult(codeResult.actions);
   pipeline.phases.execution = { ...cellInfo, executionMs: 0 };
   pipeline.sanitizer = sanitized.stats;
@@ -566,4 +700,4 @@ function buildContextSummary(context) {
   return parts.join('\n');
 }
 
-module.exports = { enhancedPipeline, planWorkbook, generateWithPlan, reviewCode, selectSkills };
+module.exports = { enhancedPipeline, editPipeline, looksLikeEdit, planWorkbook, generateWithPlan, reviewCode, selectSkills };

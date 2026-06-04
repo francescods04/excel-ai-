@@ -58,6 +58,10 @@ async function generateAndExecute(objective, context = {}, options = {}) {
     cellCount: result.cellCount,
     plan: result.plan,
     review: result.review,
+    mode: result.mode || (result.pipeline?.codegenMode) || 'create',
+    explanation: result.explanation || null,
+    validation: result.pipeline?.validation || null,
+    sanitizer: result.pipeline?.sanitizer || result.sanitizerStats || null,
     tokenUsage: result.totalTokens,
     timings: {
       planMs: result.pipeline?.phases?.plan?.planTimeMs || 0,
