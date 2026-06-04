@@ -690,7 +690,7 @@ async function resumeAgent(agentId, userResponse) {
 }
 
 async function runCodeFirstMode(text) {
-  const context = await gatherContext('codefirst');
+  const context = await getExcelContext();
   const planMsgId = addMessage('Generazione codice Python in corso...', 'bot');
 
   try {
