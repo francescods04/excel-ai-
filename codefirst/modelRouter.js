@@ -45,8 +45,36 @@ function selectModel(taskType, options = {}) {
   return MODEL_TIERS[tier];
 }
 
+// Sheet name patterns that benefit from the pro model. Critical reasoning sheets.
+// Conservative: pro adds 3-5x latency per call. Only flag sheets with highest
+// quality lever (Sensitivity = closed-form math, Returns = IRR/NPV logic).
+const PRO_SHEET_PATTERNS = [
+  'sensitivity', 'sensitivityaccrdil', 'sensitivityirr',
+  'accretion_dilution', 'accretiondilution',
+  'returns', 'valuation', 'investorreturns',
+];
+
+function isProSheet(sheetName) {
+  const k = String(sheetName || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  return PRO_SHEET_PATTERNS.some(p => k.includes(p));
+}
+
+// Pick model for a slice based on its sheet type.
+// Respects user override; CF_MODEL_ALL=pro|flash forces global override.
+// Pro routing OPT-IN via CF_PRO_SLICES=1 — benchmarks showed mixed quality with 3-5x latency.
+function pickModelForSlice(slice, userOverride) {
+  if (userOverride) return userOverride;
+  if (process.env.CF_MODEL_ALL === 'pro') return MODEL_TIERS.pro;
+  if (process.env.CF_MODEL_ALL === 'flash') return MODEL_TIERS.flash;
+  if (!process.env.CF_PRO_SLICES) return MODEL_TIERS.flash;
+  if (!slice || !slice.sheet) return MODEL_TIERS.flash;
+  return isProSheet(slice.sheet) ? MODEL_TIERS.pro : MODEL_TIERS.flash;
+}
+
 module.exports = {
   selectModel,
+  pickModelForSlice,
+  isProSheet,
   MODEL_TIERS,
   TASK_DEFAULTS,
 };

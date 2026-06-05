@@ -187,18 +187,58 @@ router.post('/start', async (req, res) => {
     sendEvent('heartbeat', { turnId, status: 'processing' });
   }, 3000);
 
+  // Progressive streaming state: slice actions are sent as each slice completes,
+  // so the user sees Excel populated section-by-section rather than waiting for all.
+  const { sanitizeActions } = require('./actionSanitizer');
+  let sliceBatchIdx = 0;
+  const sheetsSent = new Set();
+  let progressiveMode = false;
+
+  function streamSliceActions(sliceActions) {
+    if (!Array.isArray(sliceActions) || sliceActions.length === 0) return;
+    // Prepend createSheet for new sheets encountered in this slice
+    const newSheets = [];
+    for (const a of sliceActions) {
+      if (a.sheet && !sheetsSent.has(a.sheet) && a.type !== 'createSheet') {
+        sheetsSent.add(a.sheet);
+        newSheets.push({ type: 'createSheet', sheet: a.sheet });
+      }
+    }
+    const sanitized = sanitizeActions([
+      ...newSheets,
+      ...sliceActions.filter(a => a.type !== 'createSheet'),
+    ]);
+    if (sanitized.actions.length === 0) return;
+    sendEvent('taskActions', {
+      turnId,
+      taskId: 'codefirst',
+      itemId: `slice_${sliceBatchIdx++}`,
+      actions: sanitized.actions,
+    });
+    progressiveMode = true;
+  }
+
   try {
     logger.info(`[CodeFirst] Starting turn ${turnId}: "${message.slice(0, 100)}..."`);
-    const result = await generateAndExecute(message, context, {
+    const pipelinePromise = generateAndExecute(message, context, {
       turnId,
       modelOverride,
       timeoutMs: 180000,
       onProgress: (phase, info) => {
         try {
-          sendEvent('progress', { turnId, phase, ...info });
+          if (phase === 'slice_complete') {
+            streamSliceActions(info.sliceActions);
+            sendEvent('progress', { turnId, phase: 'generating', message: info.message });
+          } else {
+            sendEvent('progress', { turnId, phase, ...info });
+          }
         } catch (_) {}
       },
     });
+    const hardTimeoutMs = 270000;
+    const timeoutErr = Object.assign(new Error(`Pipeline timeout after ${hardTimeoutMs / 1000}s — some sections may be missing`), { isTimeout: true });
+    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(timeoutErr), hardTimeoutMs));
+    const result = await Promise.race([pipelinePromise, timeoutPromise]);
 
     clearInterval(heartbeatInterval);
 
@@ -208,6 +248,14 @@ router.post('/start', async (req, res) => {
       return;
     }
 
+    if (progressiveMode) {
+      // Slices already streamed section-by-section. Send a final codefirstComplete.
+      sendEvent('codefirstComplete', { turnId, totalBatches: sliceBatchIdx, cellCount: result.cellCount });
+      res.end();
+      return;
+    }
+
+    // Non-stepwise pipeline (edit mode / small single-shot): send everything at once
     sendEvent('codefirstReady', {
       turnId,
       batchCount: result.batches.length,
@@ -239,8 +287,14 @@ router.post('/start', async (req, res) => {
     res.end();
   } catch (error) {
     clearInterval(heartbeatInterval);
-    logger.error(`[CodeFirst] Error for ${turnId}: ${error.message}`);
-    sendEvent('codefirstError', { turnId, error: error.message });
+    if (error.isTimeout && progressiveMode) {
+      // Partial result already streamed — signal completion rather than error
+      logger.warn(`[CodeFirst] Timeout for ${turnId} — partial result streamed (${sliceBatchIdx} batches)`);
+      sendEvent('codefirstComplete', { turnId, totalBatches: sliceBatchIdx, partial: true });
+    } else {
+      logger.error(`[CodeFirst] Error for ${turnId}: ${error.message}`);
+      sendEvent('codefirstError', { turnId, error: error.message });
+    }
     res.end();
   }
 });

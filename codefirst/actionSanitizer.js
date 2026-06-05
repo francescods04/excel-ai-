@@ -115,16 +115,127 @@ function absolutifyCrossSheetRefs(formula) {
     (m, sheet, ca, col, ra, row) => `${sheet}!$${col}$${row}`);
 }
 
+// Sheet names with spaces, &, /, parens etc. MUST be quoted in formulas:
+//   =P&L!$B$5   → Excel parses as concat "P" & "L"!$B$5 → garbage
+//   ='P&L'!$B$5 → correct
+const SHEET_NEEDS_QUOTING_RE = /[^A-Za-z0-9_.]/;
+
+function needsQuoting(sheetName) {
+  return typeof sheetName === 'string' && SHEET_NEEDS_QUOTING_RE.test(sheetName);
+}
+
+// Build a canonical-sheet map: lowercased+stripped → actual sheet name.
+// createSheet declarations win over inline a.sheet (the explicit one is more authoritative).
+// Used to unify "Cash Flow" vs "CashFlow" inconsistencies between slices.
+function buildSheetCanonicalMap(actions) {
+  const canon = new Map();
+  const fromCreate = new Set();
+  // First pass: createSheet wins
+  for (const a of actions || []) {
+    if (a.type === 'createSheet' && a.sheet) {
+      const key = a.sheet.toLowerCase().replace(/[^a-z0-9]/g, '');
+      canon.set(key, a.sheet);
+      fromCreate.add(key);
+    }
+  }
+  // Second pass: fill gaps from inline a.sheet
+  for (const a of actions || []) {
+    if (a.sheet) {
+      const key = a.sheet.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (!fromCreate.has(key) && !canon.has(key)) canon.set(key, a.sheet);
+    }
+  }
+  return canon;
+}
+
+// Replace any sheet-name token in a formula:
+//   - unquoted: SheetName!  → matched and possibly quoted/renamed
+//   - quoted:   'Sheet Name'!  → matched and possibly renamed
+// Returns { formula, changed }
+function rewriteFormulaSheetRefs(formula, canon, opts = {}) {
+  if (typeof formula !== 'string' || formula.length === 0) return { formula, changed: false };
+  let changed = false;
+
+  // Helper: resolve sheet name via canon map, fall back to substring match
+  // (e.g. "Staffing" matches existing "Staffing & Opex").
+  function resolveSheet(name) {
+    const key = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (canon.has(key)) return canon.get(key);
+    // Fall-back: pick the canonical sheet whose key contains or is contained by `key`
+    let bestMatch = null; let bestLen = 0;
+    for (const [k, real] of canon) {
+      if (k === key) continue;
+      if (k.includes(key) || key.includes(k)) {
+        // prefer longest match
+        if (real.length > bestLen) { bestMatch = real; bestLen = real.length; }
+      }
+    }
+    return bestMatch;
+  }
+
+  // Pattern 1: 'Quoted'!ref  (quoted sheet)
+  let out = formula.replace(/'((?:[^']|'')+)'!/g, (m, name) => {
+    const real = name.replace(/''/g, "'");
+    const canonical = resolveSheet(real) || real;
+    if (canonical !== real) changed = true;
+    return needsQuoting(canonical) ? `'${canonical.replace(/'/g, "''")}'!` : `${canonical}!`;
+  });
+  // Pattern 2: UnquotedSheet!  — but only valid unquoted sheet chars (letters/digits/_/.)
+  out = out.replace(/([A-Za-z_][A-Za-z0-9_.]*)!/g, (m, name) => {
+    const canonical = resolveSheet(name);
+    if (!canonical) return m;
+    if (canonical !== name) changed = true;
+    return needsQuoting(canonical) ? `'${canonical.replace(/'/g, "''")}'!` : `${canonical}!`;
+  });
+  return { formula: out, changed };
+}
+
+// Detect implicit unquoted refs to known sheets when the sheet name contains
+// chars like `&`. The LLM writes `=P&L!$J$5` thinking it's a sheet ref, but
+// Excel reads `=P & L!$J$5`. We can't always recover (ambiguous), but if a
+// known sheet matches the pattern "X&Y" or "X Y", quote it.
+function quoteImplicitSheetRefs(formula, knownSheets) {
+  if (typeof formula !== 'string' || formula.length === 0) return formula;
+  // Build patterns from sheets needing quoting, longest-first to avoid prefix collisions
+  const needing = knownSheets.filter(needsQuoting).sort((a, b) => b.length - a.length);
+  let out = formula;
+  for (const sheet of needing) {
+    if (!sheet) continue;
+    // Escape regex special chars in sheet name
+    const escSheet = sheet.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Match the bare sheet name immediately followed by ! and a cell ref.
+    // Negative lookbehind: NOT preceded by ' (already quoted)
+    const re = new RegExp(`(?<!')${escSheet}!`, 'g');
+    if (re.test(out)) {
+      out = out.replace(re, `'${sheet.replace(/'/g, "''")}'!`);
+    }
+  }
+  return out;
+}
+
 function sanitizeActions(actions, opts = {}) {
   const { maxRows = 200, maxCols = 50 } = opts;
   const out = [];
-  const stats = { dropped: 0, expanded: 0, bounded: 0, kept: 0, absolutified: 0, deduped: 0 };
+  const stats = { dropped: 0, expanded: 0, bounded: 0, kept: 0, absolutified: 0, deduped: 0, sheetRenamed: 0, sheetQuoted: 0 };
+
+  // Phase 0: build canonical sheet-name map so we can unify "Cash Flow" vs "CashFlow"
+  const canon = buildSheetCanonicalMap(actions);
+  const canonicalSheets = [...new Set(canon.values())];
+
+  function canonicalize(name) {
+    if (!name) return name;
+    const key = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    return canon.get(key) || name;
+  }
 
   for (const a of actions || []) {
     if (!a || typeof a !== 'object' || !a.type) {
       stats.dropped++;
       continue;
     }
+    // Unify sheet name to canonical form
+    if (a.sheet) a.sheet = canonicalize(a.sheet);
+    if (a.sheetName) a.sheetName = canonicalize(a.sheetName);
 
     if (a.type === 'fillRange') {
       const hasNewSchema = a.start && a.end && (a.formula !== undefined || a.value !== undefined);
@@ -186,11 +297,25 @@ function sanitizeActions(actions, opts = {}) {
           delete cellSpec.value;
         }
         if (cellSpec && typeof cellSpec === 'object' && typeof cellSpec.formula === 'string') {
-          const fixed = absolutifyCrossSheetRefs(cellSpec.formula);
-          if (fixed !== cellSpec.formula) {
-            cellSpec = { ...cellSpec, formula: fixed };
-            stats.absolutified++;
+          // Defensive: strip accidental "==" prefix (treats as literal text otherwise)
+          if (cellSpec.formula.startsWith('==')) cellSpec = { ...cellSpec, formula: '=' + cellSpec.formula.slice(2) };
+          let f = absolutifyCrossSheetRefs(cellSpec.formula);
+          if (f !== cellSpec.formula) stats.absolutified++;
+          // Quote refs to special-char sheets (P&L, Cash Flow, etc.)
+          const quoted = quoteImplicitSheetRefs(f, canonicalSheets);
+          if (quoted !== f) { f = quoted; stats.sheetQuoted++; }
+          // Canonicalise sheet name variants (CashFlow → Cash Flow)
+          const renamed = rewriteFormulaSheetRefs(f, canon);
+          if (renamed.changed) { f = renamed.formula; stats.sheetRenamed++; }
+          // =TABLE(...) is NOT a valid Excel formula — strip it (cell becomes 0).
+          // Real fix is upstream (planner forced to emit closed-form), but defang here too.
+          if (/^=\s*TABLE\s*\(/i.test(f)) {
+            stats.tableStripped = (stats.tableStripped || 0) + 1;
+            cellSpec = { value: 0, cellStyles: { ...(cellSpec.cellStyles || {}), numberFormat: '#,##0' } };
+            cleanCells[addr] = cellSpec;
+            continue;
           }
+          if (f !== cellSpec.formula) cellSpec = { ...cellSpec, formula: f };
         }
         cleanCells[addr] = cellSpec;
       }

@@ -68,11 +68,15 @@ async function planWorkbook(objective, context, options = {}) {
   resetUsageStats();
   const start = Date.now();
 
+  // Planner: pro is more accurate on exported_cells discipline but ~2x slower.
+  // Default to user override or pro since planner is the highest-leverage call.
+  const { MODEL_TIERS } = require('./modelRouter');
+  const plannerModel = process.env.CF_MODEL_ALL === 'flash' ? MODEL_TIERS.flash : (modelOverride || MODEL_TIERS.pro);
   const result = await callLLMFn({
     system: systemPrompt,
     userText: userPrompt,
-    timeoutMs: 120000,
-    modelOverride,
+    timeoutMs: 180000,
+    modelOverride: plannerModel,
     role: null,
     thinkingDisabled: true,
     jsonMode: true,
@@ -177,7 +181,8 @@ function planComplexity(plan) {
 
 function buildSlices(plan) {
   const sections = plan?.sections || [];
-  const MAX_SLICES = 10;
+  // Default 10 to fit Vercel 270s budget. Override with FORCE_MAX_SLICES env.
+  const MAX_SLICES = Number(process.env.FORCE_MAX_SLICES) || 10;
   const limited = sections.slice(0, MAX_SLICES);
   if (sections.length > MAX_SLICES) {
     logger.warn(`[Enhanced] Plan has ${sections.length} sections; limiting to ${MAX_SLICES} to keep generation fast.`);
@@ -221,6 +226,92 @@ function detectSilentFailures(sliceResults, { threshold = 5 } = {}) {
   return silentFails;
 }
 
+// Build a pre-agreed cell address "contract" from the planner's exported_cells.
+// The planner specifies exact row numbers upfront; all slices use ONLY these addresses.
+// This prevents #REF! even when slices run in full parallel — no guessing needed.
+function buildPreAgreedCellMap(plan) {
+  if (!plan?.sections) return '';
+  const lines = [];
+  for (const s of plan.sections) {
+    const sheet = s.sheet || 'Sheet1';
+    const exported = Array.isArray(s.exported_cells) ? s.exported_cells : [];
+    if (exported.length === 0) continue;
+    lines.push(`\n=== '${sheet}' ===`);
+    for (const e of exported) {
+      if (typeof e !== 'string' || e.length === 0) continue;
+      // Normalise "B5 = Monthly Revenue" → "'Sheet'!$B$5 = Monthly Revenue"
+      const abs = e.replace(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?/, (_, c1, r1, c2, r2) =>
+        c2 ? `$${c1}$${r1}:$${c2}$${r2}` : `$${c1}$${r1}`
+      );
+      lines.push(`'${sheet}'!${abs}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+// Extract a cell-address map from a generated Assumptions-style sheet.
+// Returns lines like: "Assumptions!$B$4 = "Operating Days per Year" (value: 360)"
+// These are injected into downstream slice prompts so formulas use correct addresses.
+function extractCellMap(sheetName, actions) {
+  const rowData = {};
+  for (const a of actions) {
+    if (a.type !== 'setCellRange' || a.sheet !== sheetName || !a.cells) continue;
+    for (const [addr, cell] of Object.entries(a.cells)) {
+      const m = addr.match(/^([A-Z]+)(\d+)$/);
+      if (!m) continue;
+      const [, col, row] = m;
+      if (!rowData[row]) rowData[row] = {};
+      // Only store non-formula values for the map
+      if (!cell.formula && cell.value !== undefined && cell.value !== null && cell.value !== '') {
+        rowData[row][col] = cell.value;
+      }
+    }
+  }
+  const lines = [];
+  for (const row of Object.keys(rowData).sort((a, b) => Number(a) - Number(b))) {
+    const cols = rowData[row];
+    if (cols['A'] && typeof cols['A'] === 'string' && cols['B'] != null) {
+      const label = String(cols['A']).trim();
+      if (label.length > 2 && !label.startsWith('#')) {
+        lines.push(`${sheetName}!$B$${row} = "${label}" (value: ${cols['B']})`);
+      }
+    }
+  }
+  return lines.join('\n');
+}
+
+// Heuristic layer assignment by sheet name patterns. Used as fallback when planner doesn't
+// emit cross_sheet_deps. Layer 0 = pure inputs; later layers = consolidation/derivative.
+const LAYER_PATTERNS = [
+  // L0: pure inputs
+  ['assumptions', 'assunzioni', 'input', 'inputs', 'key assumptions', 'parametri', 'dati', 'menu', 'menumix', 'menueconomics', 'dealstructure', 'sourcesuses', 'sources_uses', 'pricing', 'transactions', 'personnel', 'staffing'],
+  // L1: intermediate builds
+  ['revenue', 'sales', 'costs', 'costi', 'ricavi', 'opex', 'staffingopex', 'acquirerstandalone', 'targetstandalone', 'standalone', 'synergies', 'debtschedule', 'workingcapital'],
+  // L2: consolidation
+  ['pnl', 'p&l', 'profitloss', 'incomestatement', 'is', 'proforma', 'consolidated', 'contoeconomico'],
+  // L3: derivative
+  ['cashflow', 'cash', 'balancesheet', 'bs'],
+  // L4: terminal calcs
+  ['returns', 'valuation', 'indici', 'investorreturns', 'accretion_dilution', 'accretiondilution', 'eps', 'fundinguse', 'funding'],
+  // L5: what-if
+  ['sensitivity', 'sensitivityaccrdil', 'sensitivityirr', 'scaleup', 'scenarios', 'breakeven', 'summary', 'executivesummary'],
+];
+
+function heuristicLayer(sheetName) {
+  const k = String(sheetName || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  for (let i = 0; i < LAYER_PATTERNS.length; i++) {
+    if (LAYER_PATTERNS[i].some(p => k.includes(p))) return i;
+  }
+  return 1; // unknown → middle
+}
+
+const INPUT_SHEET_PATTERNS = ['assumptions', 'assunzioni', 'input', 'inputs', 'key assumptions', 'parametri', 'dati'];
+
+function isInputSheet(sheetName) {
+  const lower = (sheetName || '').toLowerCase();
+  return INPUT_SHEET_PATTERNS.some(p => lower.includes(p));
+}
+
 async function generateStepwise(objective, context, plan, options = {}) {
   const { modelOverride = null, onProgress = null, parallel = true, maxConcurrency = 12, validateSlice = null, researchContext = null } = options;
   const slices = buildSlices(plan);
@@ -235,7 +326,16 @@ async function generateStepwise(objective, context, plan, options = {}) {
   const totals = { promptTokens: 0, completionTokens: 0, calls: 0 };
   let totalMs = 0;
 
-  async function runSlice(slice, idx) {
+  // Agentic loop: generate → validate → identify issues → patch → re-validate.
+  // Inspired by harness-style coding loops. Each slice retries up to N iterations
+  // when the deterministic validator finds issues, feeding errors back to the LLM.
+  const { runSliceLoop } = require('./sliceLoop');
+
+  async function runSlice(slice, idx, objectiveOverride = null, upstreamActions = []) {
+    const eff = objectiveOverride || objective;
+    // Pick best model for this slice: pro for consolidation/sensitivity/returns, flash for routine
+    const { pickModelForSlice } = require('./modelRouter');
+    const sliceModel = pickModelForSlice(slice, modelOverride);
     if (onProgress) onProgress('generating', { message: `Building "${slice.label}" (${idx + 1}/${slices.length})...` });
     const subPlan = {
       sections: [slice.section],
@@ -245,90 +345,368 @@ async function generateStepwise(objective, context, plan, options = {}) {
       estimated_cells: slice.estCells,
     };
     const isHeavyTimeSeries = slice.section.is_time_series && (slice.section.periods || 0) >= 24;
-    const baseTimeout = slice.estCells > 400 || isHeavyTimeSeries ? 300000 : (slice.estCells > 200 ? 180000 : 120000);
+    const verstcap = process.env.VERCEL ? 90000 : null;
+    let baseTimeout = slice.estCells > 400 || isHeavyTimeSeries ? 300000 : (slice.estCells > 200 ? 180000 : 120000);
+    if (verstcap && baseTimeout > verstcap) baseTimeout = verstcap;
     const exported = slice.section.exported_cells || [];
     const exportedNote = exported.length > 0 ? ` CRITICAL: This sheet MUST expose these cells for other sheets: ${exported.join(', ')}.` : '';
     const focusLine = `the "${slice.label}" section in sheet "${slice.sheet}"${slice.section.row_range ? ` rows ${slice.section.row_range}` : ''}. This section MUST contain at least ${slice.estCells} cells (formulas, values, and labels combined). Do not skip rows or summarize; emit every cell.${exportedNote}`;
-    const subResult = await generateWithPlan(objective, context, subPlan, {
-      modelOverride,
-      sliceFocus: focusLine,
-      timeoutMs: baseTimeout,
-      label: `cf_slice_${slice.id}`,
-      researchContext,
-    });
-    if (subResult.codeTokens) {
-      totals.promptTokens += subResult.codeTokens.promptTokens || 0;
-      totals.completionTokens += subResult.codeTokens.completionTokens || 0;
-      totals.calls += subResult.codeTokens.calls || 0;
-    }
-    totalMs += subResult.codeTimeMs || 0;
 
-    // Inline validation: if caller provided validateSlice, check for critical formula errors early
-    let validatedActions = subResult.actions || [];
-    if (validateSlice && validatedActions.length > 0) {
-      try {
-        const v = validateSlice(validatedActions);
-        if (!v.valid) {
-          logger.warn(`[Enhanced] Slice "${slice.label}" has ${v.criticalCount} critical formula issues. Retrying with validation feedback.`);
-          const feedback = `CRITICAL FORMULA ERRORS detected in previous output for "${slice.label}": ${v.issues.map(i => `${i.location}: ${i.detail}`).join('; ')}. Fix these before emitting cells.`;
-          const retryVal = await generateWithPlan(
-            `${objective}\n\n${feedback}\n\nREMEMBER: This section MUST contain at least ${slice.estCells} cells.`,
-            context, subPlan,
-            { modelOverride, sliceFocus: focusLine, timeoutMs: baseTimeout, label: `cf_slice_${slice.id}_valfix`, researchContext }
-          );
-          if (retryVal.codeTokens) {
-            totals.promptTokens += retryVal.codeTokens.promptTokens || 0;
-            totals.completionTokens += retryVal.codeTokens.completionTokens || 0;
-            totals.calls += retryVal.codeTokens.calls || 0;
-          }
-          totalMs += retryVal.codeTimeMs || 0;
-          if (retryVal.actions && retryVal.actions.length > 0) {
-            validatedActions = retryVal.actions;
-          }
-        }
-      } catch (e) {
-        logger.warn(`[Enhanced] validateSlice callback error: ${e.message}`);
+    // The generateFn closure used by runSliceLoop. extraInstructions is the patch-prompt
+    // appended on retry iterations. If consensus is enabled and this slice is critical,
+    // generate N parallel attempts and pick the best by validator score.
+    let iterCounter = 0;
+    async function generateFn(extraInstructions) {
+      iterCounter++;
+      const label = iterCounter === 1 ? `cf_slice_${slice.id}` : `cf_slice_${slice.id}_iter${iterCounter}`;
+      const fullObjective = extraInstructions ? `${eff}\n${extraInstructions}` : eff;
+      const callerOpts = {
+        modelOverride: sliceModel,
+        sliceFocus: focusLine,
+        timeoutMs: baseTimeout,
+        label,
+        researchContext,
+      };
+      if (useConsensus && iterCounter === 1) {
+        const { consensusGenerate } = require('./consensusGen');
+        const gens = Array.from({ length: consensusN }, (_, i) => () => generateWithPlan(
+          fullObjective, context, subPlan, { ...callerOpts, label: `${label}_n${i}` }
+        ));
+        return consensusGenerate(gens, slice.sheet);
+      }
+      return generateWithPlan(fullObjective, context, subPlan, callerOpts);
+    }
+
+    // Micro-step: huge time-series slices split into 2 LLM calls. EXPERIMENTAL —
+    // benchmark showed expansion step produces too-small outputs (LLM doesn't track
+    // skeleton context well). Disabled by default; enable with CF_MICRO_STEP=1.
+    const { shouldMicroStep, runMicroStep } = require('./microStep');
+    const microStepOn = !!process.env.CF_MICRO_STEP && shouldMicroStep(slice);
+    if (microStepOn) {
+      const ms = await runMicroStep({
+        slice,
+        baseObjective: eff,
+        context,
+        subPlan,
+        modelOverride: sliceModel,
+        generateWithPlanFn: generateWithPlan,
+        baseTimeout,
+      });
+      totals.promptTokens += ms.totals.promptTokens;
+      totals.completionTokens += ms.totals.completionTokens;
+      totals.calls += ms.totals.calls;
+      totalMs += ms.totalMs;
+      if (ms.actions && ms.actions.length > 0) {
+        return { slice, actions: ms.actions, error: null, microStep: true };
       }
     }
 
-    if (validatedActions.length > 0) {
-      return { slice, actions: validatedActions, error: null };
+    // Multi-LLM consensus: parallel codegen calls, pick best by validator score.
+    // Used on input/consolidation slices where errors cascade most. Enable with
+    // CF_CONSENSUS_N=2 (or 3). Default OFF — costs N× tokens.
+    const consensusN = Number(process.env.CF_CONSENSUS_N) || 1;
+    // Heuristic for "critical" slices that benefit most from consensus
+    const isCriticalSlice = /assumptions|menu|input|pnl|p&l|incomestatement|proforma|consolidated|revenue/i.test(slice.sheet);
+    const useConsensus = consensusN > 1 && isCriticalSlice;
+
+    // Decide whether to use agentic loop. Default ON; disable with CF_DISABLE_SLICE_LOOP.
+    const sliceLoopOn = !process.env.CF_DISABLE_SLICE_LOOP;
+    // Huge slices (>250 cells, like 60-month P&L): the LLM can't reliably fix 60-cell
+    // refs in 2 iterations. Skip loop, fall through to single-shot + autofix downstream.
+    const maxIterations = slice.estCells > 250 ? 1
+      : (process.env.CF_SLICE_MAX_ITER ? Number(process.env.CF_SLICE_MAX_ITER) : 2);
+
+    if (sliceLoopOn) {
+      // AI reviewer: experimental peer-review LLM. Adds quality on simple scenarios
+      // but regresses complex ones (generator can't fix many issues at once).
+      // Opt-in via CF_AI_REVIEWER=1. Use pro via CF_REVIEWER_PRO=1.
+      const { MODEL_TIERS: MR_TIERS } = require('./modelRouter');
+      const aiReviewerEnabled = !!process.env.CF_AI_REVIEWER;
+      const aiReviewerModel = process.env.CF_REVIEWER_PRO ? MR_TIERS.pro : MR_TIERS.flash;
+      const loopResult = await runSliceLoop({
+        sliceLabel: slice.label,
+        sliceSheet: slice.sheet,
+        sliceSection: slice.section,
+        objectiveBase: eff,
+        context,
+        subPlan,
+        upstreamActions,
+        generateFn,
+        maxIterations,
+        timeoutMs: baseTimeout,
+        expectedMinCells: Math.max(10, Math.floor(slice.estCells * 0.5)),
+        aiReviewerEnabled,
+        aiReviewerModel,
+      });
+      if (loopResult.totals) {
+        totals.promptTokens += loopResult.totals.promptTokens || 0;
+        totals.completionTokens += loopResult.totals.completionTokens || 0;
+        totals.calls += loopResult.totals.calls || 0;
+      }
+      totalMs += loopResult.totalMs || 0;
+      if (loopResult.actions && loopResult.actions.length > 0) {
+        return { slice, actions: loopResult.actions, error: null, iterations: loopResult.iterations };
+      }
     }
 
-    logger.warn(`[Enhanced] Slice "${slice.label}" failed (${subResult.error}). Retrying with reduced density.`);
-    const retry = await generateWithPlan(
-      `${objective}\n\nNOTE: previous attempt timed out. For "${slice.label}" use only annual columns or split rows; keep output under 200 cells.`,
-      context, subPlan,
-      { modelOverride, sliceFocus: focusLine, timeoutMs: 180000, label: `cf_slice_${slice.id}_retry` }
-    );
-    if (retry.codeTokens) {
-      totals.promptTokens += retry.codeTokens.promptTokens || 0;
-      totals.completionTokens += retry.codeTokens.completionTokens || 0;
-      totals.calls += retry.codeTokens.calls || 0;
+    if (sliceModel !== modelOverride) {
+      logger.info(`[ModelRouter] Slice "${slice.label}" → ${sliceModel}`);
     }
-    totalMs += retry.codeTimeMs || 0;
-    return { slice, actions: retry.actions || [], error: retry.error || subResult.error };
+    // Fallback path: single-shot codegen if loop disabled or empty result
+    const fallback = await generateFn('');
+    if (fallback.codeTokens) {
+      totals.promptTokens += fallback.codeTokens.promptTokens || 0;
+      totals.completionTokens += fallback.codeTokens.completionTokens || 0;
+      totals.calls += fallback.codeTokens.calls || 0;
+    }
+    totalMs += fallback.codeTimeMs || 0;
+    return { slice, actions: fallback.actions || [], error: fallback.error };
   }
 
+  // Helper: fire onProgress for a completed slice + push to sliceResults
+  function emitSliceDone(slice, r) {
+    completedSlices++;
+    if (onProgress) {
+      const cells = countSetCellRangeCells(r.actions);
+      onProgress('slice_complete', {
+        message: `Done "${slice.label}" — ${cells} cells (${completedSlices}/${slices.length})`,
+        sliceLabel: slice.label,
+        sliceSheet: slice.sheet,
+        sliceActions: r.actions || [],
+        completedSlices,
+        totalSlices: slices.length,
+      });
+    }
+    sliceResults.push(r);
+  }
+
+  // --- Layered topological generation ---
+  // Layer 0: sheets nothing depends on (or input sheets). Layer 1: depends only on layer 0. Etc.
+  // Within a layer: parallel. Between layers: sequential, so downstream slices see
+  // the actual generated cell addresses of their upstream deps.
+
+  // Pre-agreed cell map: extracted from planner's exported_cells BEFORE any LLM call.
+  const preAgreedMap = buildPreAgreedCellMap(plan);
+  if (preAgreedMap) {
+    logger.info(`[Enhanced] Pre-agreed cell map: ${preAgreedMap.split('\n').filter(l => l.trim()).length} entries`);
+  }
+
+  // Topological layering: prefer explicit cross_sheet_deps; fallback to name heuristic.
+  function buildSheetLayers() {
+    const sheetSet = new Set(slices.map(s => s.sheet));
+    const deps = plan.cross_sheet_deps || {};
+    // Count actual declared deps
+    let depCount = 0;
+    for (const sheet of sheetSet) {
+      const readsFrom = (deps[sheet] && Array.isArray(deps[sheet].reads_from)) ? deps[sheet].reads_from : [];
+      depCount += readsFrom.filter(s => sheetSet.has(s) && s !== sheet).length;
+    }
+    // If planner gave us substantial deps (>= sheetCount-1), use topological.
+    // Otherwise use name-heuristic layering — more reliable than dumping everything into L0.
+    const useTopological = depCount >= sheetSet.size - 1 && depCount > 0;
+
+    if (!useTopological) {
+      // Name-pattern layering
+      const byLayer = [[], [], [], [], [], []];
+      for (const sheet of sheetSet) {
+        const li = Math.min(heuristicLayer(sheet), byLayer.length - 1);
+        byLayer[li].push(sheet);
+      }
+      // Drop empty layers
+      return byLayer.filter(l => l.length > 0);
+    }
+
+    // Topological by declared deps
+    const reads = {};
+    for (const sheet of sheetSet) {
+      const readsFrom = (deps[sheet] && Array.isArray(deps[sheet].reads_from)) ? deps[sheet].reads_from : [];
+      reads[sheet] = new Set(readsFrom.filter(s => sheetSet.has(s) && s !== sheet));
+    }
+    const layers = [];
+    const placed = new Set();
+    const layer0 = [];
+    for (const sheet of sheetSet) {
+      if (isInputSheet(sheet) || reads[sheet].size === 0) {
+        layer0.push(sheet);
+        placed.add(sheet);
+      }
+    }
+    if (layer0.length === 0) {
+      for (const s of sheetSet) { layer0.push(s); placed.add(s); }
+    }
+    layers.push(layer0);
+    let guard = 0;
+    while (placed.size < sheetSet.size && guard++ < 10) {
+      const next = [];
+      for (const sheet of sheetSet) {
+        if (placed.has(sheet)) continue;
+        const allDepsPlaced = [...reads[sheet]].every(d => placed.has(d));
+        if (allDepsPlaced) next.push(sheet);
+      }
+      if (next.length === 0) {
+        for (const sheet of sheetSet) if (!placed.has(sheet)) next.push(sheet);
+      }
+      for (const s of next) placed.add(s);
+      layers.push(next);
+    }
+    return layers;
+  }
+
+  const sheetLayers = buildSheetLayers();
+  logger.info(`[Enhanced] Sheet layers: ${sheetLayers.map((l, i) => `L${i}=[${l.join(',')}]`).join(' | ')}`);
+
+  let completedSlices = 0;
   const sliceResults = [];
-  if (parallel) {
-    let cursor = 0;
-    async function worker() {
-      while (true) {
-        const idx = cursor++;
-        if (idx >= slices.length) return;
+  let runtimeCellMapContext = '';
+
+  function buildCombinedObjective(base) {
+    const parts = [];
+    if (preAgreedMap) {
+      parts.push(`## PRE-AGREED CELL MAP (from plan — use ONLY these exact addresses)\n${preAgreedMap}`);
+    }
+    if (runtimeCellMapContext) {
+      parts.push(`## RUNTIME CELL MAP (actual generated addresses from prior layers)\n${runtimeCellMapContext}`);
+    }
+    if (parts.length === 0) return base;
+    return `${base}\n\n${parts.join('\n\n')}`;
+  }
+
+  async function runLayer(layerSheets) {
+    const layerSlices = slices.filter(s => layerSheets.includes(s.sheet));
+    if (layerSlices.length === 0) return;
+    const layerResults = [];
+    if (parallel) {
+      let cursor = 0;
+      async function worker() {
+        while (true) {
+          const idx = cursor++;
+          if (idx >= layerSlices.length) return;
+          const slice = layerSlices[idx];
+          const globalIdx = slices.indexOf(slice);
+          try {
+            // Build upstream snapshot for slice's agentic loop to validate cross-refs
+            const upstreamSnapshot = [...createActions];
+            for (const sr of sliceResults) {
+              for (const a of (sr.actions || [])) upstreamSnapshot.push(a);
+            }
+            const r = await runSlice(slice, globalIdx, buildCombinedObjective(objective), upstreamSnapshot);
+            layerResults.push(r);
+            emitSliceDone(slice, r);
+          } catch (e) {
+            completedSlices++;
+            if (onProgress) onProgress('generating', { message: `Failed "${slice.label}" (${completedSlices}/${slices.length})` });
+            const errR = { slice, actions: [], error: e.message };
+            layerResults.push(errR);
+            sliceResults.push(errR);
+          }
+        }
+      }
+      const workers = Array.from({ length: Math.min(maxConcurrency, layerSlices.length) }, () => worker());
+      await Promise.all(workers);
+    } else {
+      for (let i = 0; i < layerSlices.length; i++) {
+        const slice = layerSlices[i];
+        const globalIdx = slices.indexOf(slice);
         try {
-          sliceResults.push(await runSlice(slices[idx], idx));
+          const r = await runSlice(slice, globalIdx, buildCombinedObjective(objective));
+          layerResults.push(r);
+          emitSliceDone(slice, r);
         } catch (e) {
-          sliceResults.push({ slice: slices[idx], actions: [], error: e.message });
+          completedSlices++;
+          if (onProgress) onProgress('generating', { message: `Failed "${slice.label}" (${completedSlices}/${slices.length})` });
+          const errR = { slice, actions: [], error: e.message };
+          layerResults.push(errR);
+          sliceResults.push(errR);
         }
       }
     }
-    const workers = Array.from({ length: Math.min(maxConcurrency, slices.length) }, () => worker());
-    await Promise.all(workers);
-  } else {
-    for (let i = 0; i < slices.length; i++) {
-      sliceResults.push(await runSlice(slices[i], i));
+    // Update runtime cell map from this layer's outputs so next layer can ref them
+    for (const r of layerResults) {
+      if (!r.actions || r.actions.length === 0) continue;
+      const sheetName = r.slice.sheet;
+      const map = extractCellMap(sheetName, r.actions);
+      if (map) runtimeCellMapContext += (runtimeCellMapContext ? '\n\n' : '') + `=== ${sheetName} ===\n${map}`;
+    }
+  }
+
+  // Inline layer supervisor: senior-analyst critic runs after each layer. EXPERIMENTAL:
+  // currently disabled by default because subagent audit showed the LLM patches Y1
+  // cells correctly but breaks Y2-Y5 (uses wrong assumption rows for later periods).
+  // Enable via CF_LAYER_SUPERVISOR=1 to opt in. The single-pass semantic critic
+  // (Phase 4c) gives most of the value with less regression risk.
+  const layerSupervisorOn = !!process.env.CF_LAYER_SUPERVISOR;
+  const { superviseLayer, applyLayerFixes } = require('./layerSupervisor');
+
+  for (let li = 0; li < sheetLayers.length; li++) {
+    if (onProgress) onProgress('generating', { message: `Layer ${li + 1}/${sheetLayers.length}: ${sheetLayers[li].join(', ')}` });
+    await runLayer(sheetLayers[li]);
+    if (runtimeCellMapContext) {
+      logger.info(`[Enhanced] After layer ${li}: ${runtimeCellMapContext.split('\n').length} runtime map lines`);
+    }
+
+    // Deep mode (default): supervise EVERY layer for max quality. Adds ~60s wall
+    // but catches consolidation/derivative/sensitivity bugs at source.
+    // Fast mode: only supervise L0 + L1 (~15s). Set CF_SUPERVISOR_MODE=fast to enable.
+    const supervisorMode = process.env.CF_SUPERVISOR_MODE || 'deep';
+    const supervisorOK = supervisorMode === 'deep'
+      ? true
+      : new Set([0, 1]).has(li);
+    if (layerSupervisorOn && supervisorOK) {
+      if (onProgress) onProgress('reviewing', { message: `Layer ${li + 1} supervisor review...` });
+      const upstreamSheets = sheetLayers.slice(0, li).flat();
+      // Build the current actions snapshot for supervisor
+      const snapshotActions = [...createActions];
+      for (const r of sliceResults) {
+        for (const a of (r.actions || [])) snapshotActions.push(a);
+      }
+      try {
+        const sup = await superviseLayer({
+          layerIdx: li,
+          totalLayers: sheetLayers.length,
+          layerSheets: sheetLayers[li],
+          allActions: snapshotActions,
+          upstreamSheets,
+          modelOverride,
+          timeoutMs: 45000,
+        });
+        if (sup.issues && sup.issues.length > 0) {
+          // Apply fixes IN-PLACE to sliceResults (which feed the next layer's prompt
+          // via extractCellMap → runtimeCellMapContext).
+          let appliedTotal = 0;
+          for (const r of sliceResults) {
+            const fixesForThisSlice = sup.issues.filter(i => i.fix && i.fix.sheet === r.slice.sheet);
+            if (fixesForThisSlice.length === 0) continue;
+            appliedTotal += applyLayerFixes(r.actions, fixesForThisSlice);
+          }
+          // For fixes addressed to sheets not yet in sliceResults, append a synthetic slice
+          const extraFixes = sup.issues.filter(i => i.fix && i.fix.sheet && !sliceResults.some(r => r.slice.sheet === i.fix.sheet));
+          if (extraFixes.length > 0) {
+            const synthActions = [];
+            for (const issue of extraFixes) {
+              const f = issue.fix;
+              const spec = f.formula ? { formula: f.formula } : (f.value !== undefined ? { value: f.value } : null);
+              if (!spec) continue;
+              synthActions.push({ type: 'setCellRange', sheet: f.sheet, cells: { [f.addr]: spec } });
+              appliedTotal++;
+            }
+            if (synthActions.length > 0) {
+              sliceResults.push({ slice: { sheet: '__supervisor__', label: `L${li}_fix` }, actions: synthActions, error: null });
+            }
+          }
+          logger.info(`[LayerSupervisor] L${li}: ${sup.issues.length} issues, ${appliedTotal} fixes applied (${sup.elapsedMs}ms)`);
+          // Re-extract runtime cell map after fixes so next layer sees updated addresses
+          runtimeCellMapContext = '';
+          for (const r of sliceResults) {
+            if (!r.actions || r.actions.length === 0) continue;
+            const map = extractCellMap(r.slice.sheet, r.actions);
+            if (map) runtimeCellMapContext += (runtimeCellMapContext ? '\n\n' : '') + `=== ${r.slice.sheet} ===\n${map}`;
+          }
+        } else {
+          logger.info(`[LayerSupervisor] L${li}: clean (${sup.elapsedMs}ms)`);
+        }
+      } catch (e) {
+        logger.warn(`[LayerSupervisor] L${li} failed: ${e.message}`);
+      }
     }
   }
 
@@ -346,8 +724,14 @@ async function generateStepwise(objective, context, plan, options = {}) {
       slicesToRetry.push({ r, slice: r.slice, reason: `low density (${cells}/${r.slice.estCells})` });
     }
   }
-  if (slicesToRetry.length > 0) {
+  // Skip retry pass if we're running on Vercel (budget-tight) to fit in 270s.
+  // The repair LLM calls double time. Auto-stub handles the missing cells anyway.
+  const skipRetryForBudget = !!process.env.VERCEL;
+  if (slicesToRetry.length > 0 && skipRetryForBudget) {
+    logger.warn(`[Enhanced] ${slicesToRetry.length} slices low-density but skipping retry on Vercel (budget-tight). Auto-stub will fill gaps.`);
+  } else if (slicesToRetry.length > 0) {
     logger.warn(`[Enhanced] ${slicesToRetry.length} slices need retry: ${slicesToRetry.map(s => s.slice.label + ' ' + s.reason).join('; ')}`);
+    if (onProgress) onProgress('finalizing', { message: `Repairing ${slicesToRetry.length} low-density sections...` });
     await Promise.all(slicesToRetry.map(async ({ r }) => {
       const slice = r.slice;
       const subPlan = {
@@ -357,7 +741,7 @@ async function generateStepwise(objective, context, plan, options = {}) {
         estimated_cells: slice.estCells,
       };
       const repair = await generateWithPlan(
-        `${objective}\n\nCRITICAL: previous attempt for "${slice.label}" produced too few cells (${countSetCellRangeCells(r.actions)} vs expected ${slice.estCells}). You MUST emit at least ${slice.estCells} setCellRange cells with formulas/values for this section. Do not skip rows, periods, or formulas.`,
+        `${buildCombinedObjective(objective)}\n\nCRITICAL: previous attempt for "${slice.label}" produced too few cells (${countSetCellRangeCells(r.actions)} vs expected ${slice.estCells}). You MUST emit at least ${slice.estCells} setCellRange cells with formulas/values for this section. Do not skip rows, periods, or formulas.`,
         context, subPlan,
         {
           modelOverride,
@@ -394,6 +778,7 @@ async function generateStepwise(objective, context, plan, options = {}) {
 
   const failedSlices = sliceResults.filter(r => !r.actions || r.actions.length === 0);
   const repairedCount = sliceResults.filter(r => r.repaired).length;
+  if (onProgress) onProgress('finalizing', { message: `Assembling ${allActions.length} actions across ${sliceResults.length - failedSlices.length}/${sliceResults.length} sections...` });
   logger.info(`[Enhanced] Stepwise done: ${sliceResults.length - failedSlices.length}/${sliceResults.length} slices OK${repairedCount ? `, ${repairedCount} repaired` : ''}, ${allActions.length} actions, ${totals.calls} LLM calls`);
 
   return {
@@ -754,6 +1139,148 @@ async function enhancedPipeline(objective, context = {}, options = {}) {
     logger.info(`[Enhanced] Sanitizer: dropped=${sanitized.stats.dropped} expanded=${sanitized.stats.expanded} bounded=${sanitized.stats.bounded} kept=${sanitized.stats.kept}`);
   }
   codeResult.actions = sanitized.actions;
+
+  // Phase 4b: Auto-stub broken cell refs + auto-coerce string-in-arith.
+  // Runs AFTER sanitizer so it sees the canonical sheet names and final cell layout.
+  {
+    const { indexCells, extractCellRefs } = require('./cellDepValidator');
+    let idx = indexCells(codeResult.actions);
+    const sheetSet = new Set();
+    for (const a of codeResult.actions) {
+      if (a.sheet) sheetSet.add(a.sheet);
+      if (a.type === 'createSheet' && a.sheet) sheetSet.add(a.sheet);
+    }
+    const stubsBySheet = new Map();
+    for (const [_key, cell] of idx) {
+      if (!cell.formula) continue;
+      const refs = extractCellRefs(cell.formula);
+      for (const ref of refs) {
+        const refSheet = ref.sheet || cell.sheet;
+        if (!sheetSet.has(refSheet)) continue;
+        const refKey = `${refSheet}!${ref.addr}`;
+        if (idx.has(refKey)) continue;
+        if (!stubsBySheet.has(refSheet)) stubsBySheet.set(refSheet, {});
+        stubsBySheet.get(refSheet)[ref.addr] = { value: 0, cellStyles: { numberFormat: '#,##0' } };
+      }
+    }
+    if (stubsBySheet.size > 0) {
+      let totalStubs = 0;
+      for (const [sheet, cells] of stubsBySheet) {
+        totalStubs += Object.keys(cells).length;
+        codeResult.actions.push({ type: 'setCellRange', sheet, cells });
+      }
+      logger.info(`[Enhanced] Auto-stubbed ${totalStubs} unwritten cells across ${stubsBySheet.size} sheets (eliminates #REF!)`);
+    }
+    // Re-index for string-in-arith coercion
+    idx = indexCells(codeResult.actions);
+    const coercedAddrsBySheet = new Map();
+    for (const [_k, cell] of idx) {
+      if (!cell.formula) continue;
+      if (/^=\s*TABLE\s*\(/i.test(cell.formula)) continue;
+      const isArith = /[+\-*/^]/.test(cell.formula.replace(/^=/, '')) || /\b(SUM|PRODUCT|AVERAGE|NPV|IRR|XIRR|XNPV|RATE|PMT|FV|PV|POWER)\s*\(/i.test(cell.formula);
+      if (!isArith) continue;
+      const refs = extractCellRefs(cell.formula);
+      for (const ref of refs) {
+        if (ref.positional) continue;
+        const refSheet = ref.sheet || cell.sheet;
+        const refKey = `${refSheet}!${ref.addr}`;
+        const target = idx.get(refKey);
+        if (!target || target.formula) continue;
+        const v = target.value;
+        if (typeof v !== 'string') continue;
+        if (v.trim() === '' || /^-?\d+(\.\d+)?$/.test(v.trim()) || /^[€$£]?\s*-?\d/.test(v.trim())) continue;
+        if (!coercedAddrsBySheet.has(refSheet)) coercedAddrsBySheet.set(refSheet, new Set());
+        coercedAddrsBySheet.get(refSheet).add(ref.addr);
+      }
+    }
+    if (coercedAddrsBySheet.size > 0) {
+      let totalCoerced = 0;
+      for (const a of codeResult.actions) {
+        if (a.type !== 'setCellRange' || !a.cells) continue;
+        const set = coercedAddrsBySheet.get(a.sheet);
+        if (!set) continue;
+        for (const addr of Object.keys(a.cells)) {
+          if (!set.has(addr)) continue;
+          const spec = a.cells[addr];
+          if (!spec || typeof spec !== 'object') continue;
+          spec.value = 0;
+          if (!spec.cellStyles) spec.cellStyles = {};
+          if (!spec.cellStyles.numberFormat) spec.cellStyles.numberFormat = '#,##0';
+          totalCoerced++;
+        }
+      }
+      if (totalCoerced > 0) logger.info(`[Enhanced] Auto-coerced ${totalCoerced} string cells to 0 (eliminates #VALUE! in arithmetic)`);
+    }
+  }
+
+  // Phase 4b2: Deterministic auto-fixes — Mix% normalization, time-series column auto-fill, label-aware ref repair.
+  {
+    const { applyAutoFixes } = require('./semanticAutoFix');
+    const { repairRefs } = require('./refRepair');
+    // Run ref repair FIRST so subsequent fills propagate correct refs.
+    const refsFixed = repairRefs(codeResult.actions);
+    const autoStats = applyAutoFixes(codeResult.actions);
+    autoStats.refsRepaired = refsFixed;
+    if (autoStats.mixCellsNormalized + autoStats.timeSeriesCellsAdded + refsFixed > 0) {
+      logger.info(`[Enhanced] AutoFix: ${refsFixed} refs repaired, ${autoStats.mixCellsNormalized} Mix cells normalized, ${autoStats.timeSeriesCellsAdded} time-series cells filled`);
+    }
+    pipeline.autoFix = autoStats;
+  }
+
+  // Phase 4b3: Second auto-stub pass to catch refs introduced by time-series fill.
+  // When fill expands B5 → C5:N5, the new shifted formulas reference C4:N4 (and so on)
+  // which may not exist. Stub those zeros so user sees clean values not #REF!.
+  {
+    const { indexCells, extractCellRefs } = require('./cellDepValidator');
+    const idx = indexCells(codeResult.actions);
+    const sheetSet = new Set();
+    for (const a of codeResult.actions) {
+      if (a.sheet) sheetSet.add(a.sheet);
+      if (a.type === 'createSheet' && a.sheet) sheetSet.add(a.sheet);
+    }
+    const stubsBySheet = new Map();
+    for (const [_key, cell] of idx) {
+      if (!cell.formula) continue;
+      const refs = extractCellRefs(cell.formula);
+      for (const ref of refs) {
+        const refSheet = ref.sheet || cell.sheet;
+        if (!sheetSet.has(refSheet)) continue;
+        const refKey = `${refSheet}!${ref.addr}`;
+        if (idx.has(refKey)) continue;
+        if (!stubsBySheet.has(refSheet)) stubsBySheet.set(refSheet, {});
+        stubsBySheet.get(refSheet)[ref.addr] = { value: 0, cellStyles: { numberFormat: '#,##0' } };
+      }
+    }
+    if (stubsBySheet.size > 0) {
+      let totalStubs = 0;
+      for (const [sheet, cells] of stubsBySheet) {
+        totalStubs += Object.keys(cells).length;
+        codeResult.actions.push({ type: 'setCellRange', sheet, cells });
+      }
+      logger.info(`[Enhanced] Post-autofix stub pass: ${totalStubs} additional unwritten cells stubbed`);
+    }
+  }
+
+  // Phase 4c: Semantic critic — finance-aware audit of cross-sheet coherence.
+  // Catches Mix % ≠ 100%, AOV inconsistency, wrong formula structure.
+  // Single LLM call, ~30-60s, cheap model.
+  if (options.enableSemanticCritic !== false) {
+    try {
+      if (onProgress) onProgress('reviewing', { message: 'Auditing financial coherence...' });
+      const { semanticAudit, applyCriticFixes } = require('./semanticCritic');
+      // Semantic critic: flash by default (fast, mostly catches things); pro opt-in.
+      const { MODEL_TIERS } = require('./modelRouter');
+      const criticModel = process.env.CF_PRO_CRITIC ? MODEL_TIERS.pro : (modelOverride || MODEL_TIERS.flash);
+      const audit = await semanticAudit(codeResult.actions, { modelOverride: criticModel, timeoutMs: 60000 });
+      if (audit.issues && audit.issues.length > 0) {
+        const applied = applyCriticFixes(codeResult.actions, audit.issues);
+        logger.info(`[Enhanced] Semantic critic: ${audit.issues.length} issues, ${applied} fixes applied`);
+        pipeline.semanticCritic = { issueCount: audit.issues.length, fixesApplied: applied, tokens: audit.tokens };
+      }
+    } catch (e) {
+      logger.warn(`[Enhanced] Semantic critic skipped: ${e.message}`);
+    }
+  }
 
   // Phase 5: Structural formula validation. Catches broken cross-sheet refs,
   // self-references, division-by-zero BEFORE Excel sees them.

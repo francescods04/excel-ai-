@@ -187,7 +187,7 @@ async function init() {
     hideStepsPanel();
     hideActionsPreview();
     actionsList.innerHTML = '';
-    hidePendingBanner();
+    hidePendingQuestionBanner();
     stopElapsedTimer();
     updateProgress(0, 0);
     updateProgressBadge(0);
@@ -729,6 +729,7 @@ async function readSSEStream(response, onEvent) {
 async function runCodeFirstMode(text) {
   const context = await getExcelContext();
   const planMsgId = addMessage('Pianificazione e generazione azioni in corso...', 'bot');
+  const cfStartTime = Date.now();
 
   try {
     const response = await startCodeFirst(text, context, modelSelect.value);
@@ -737,15 +738,18 @@ async function runCodeFirstMode(text) {
     }
 
     let receivedActions = false;
+    let completedNormally = false;
 
     await readSSEStream(response, (eventType, data) => {
       switch (eventType) {
         case 'turnStarted':
           addLog(`CodeFirst stream iniziato: ${data.status}`);
           break;
-        case 'heartbeat':
-          addLog(`CodeFirst elaborazione in corso... (${data.status})`);
+        case 'heartbeat': {
+          const elapsed = Math.round((Date.now() - cfStartTime) / 1000);
+          addLog(`CodeFirst elaborazione in corso... (${elapsed}s)`);
           break;
+        }
         case 'progress':
           addLog(`CodeFirst: ${data.message || data.phase}`);
           break;
@@ -762,19 +766,31 @@ async function runCodeFirstMode(text) {
           }
           break;
         case 'codefirstComplete':
-          addLog(`CodeFirst completato: ${data.totalBatches} batch applicati`);
-          addMessage('Fatto! Foglio generato con CodeFirst.', 'bot');
+          completedNormally = true;
+          addLog(`CodeFirst completato: ${data.totalBatches} batch applicati${data.partial ? ' (parziale)' : ''}`);
+          if (data.partial) {
+            addMessage('Alcune sezioni generate — le restanti hanno richiesto troppo tempo. Il foglio è in Excel. Puoi chiedere le sezioni mancanti separatamente.', 'bot');
+          } else {
+            addMessage('Fatto! Foglio generato con CodeFirst.', 'bot');
+          }
           resetAgent();
           break;
         case 'codefirstError':
+          completedNormally = true;
           addMessage('CodeFirst errore: ' + (data.error || 'sconosciuto'), 'error');
           resetAgent();
           break;
       }
     });
 
+    if (completedNormally) return;
     if (!receivedActions) {
-      addMessage('CodeFirst completato ma nessuna azione generata.', 'error');
+      addMessage('CodeFirst completato ma nessuna azione generata. Riprova con una richiesta più semplice.', 'error');
+      resetAgent();
+    } else {
+      // Stream closed after partial progressive streaming (Vercel cut the connection).
+      // Partial result is already in Excel — let user know.
+      addMessage('CodeFirst: alcune sezioni applicate. Connessione interrotta prima del completamento — le sezioni rimaste non sono state generate.', 'bot');
       resetAgent();
     }
   } catch (err) {

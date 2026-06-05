@@ -110,6 +110,9 @@ For formulas, ALWAYS use setCellRange with explicit per-cell formulas instead. T
 #E2EFDA = totals/subtotals background (light green)
 ```
 
+## EXPLICIT cells_spec
+If the plan section includes `"cells_spec": {...}`, transcribe those formulas EXACTLY into the cells. Do not modify, simplify, or re-derive them. The planner specified the math; your job is execution. Wrap each in cellStyles for formatting.
+
 ## Anti-patterns (DO NOT DO)
 - ❌ Hardcoding computed values: `{"value":1.21}` where it should be `{"formula":"=1+Assumptions!$B$2"}`
 - ❌ Computing multiplication: `{"value":240}` where revenue * price should be `{"formula":"=B2*C2"}`
@@ -118,6 +121,9 @@ For formulas, ALWAYS use setCellRange with explicit per-cell formulas instead. T
 - ❌ fillRange with a single formula expected to shift across periods — emit each period cell explicitly
 - ❌ Cross-sheet refs without `$`: `Assumptions!B3` → MUST be `Assumptions!$B$3`
 - ❌ Using separate setCellRange for every row — batch a whole section per action
+- ❌ Storing arrays in a single cell: NEVER `{"value":"1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0"}` — this causes `#VALUE!`. Monthly scalars must be in 12 SEPARATE cells (e.g. B19:M19).
+- ❌ Guessing cross-sheet row numbers: if the prompt provides a "PRE-AGREED CELL MAP" or "MANDATORY CROSS-SHEET REFERENCE MAP", use ONLY those exact addresses — never invent your own row numbers for other sheets.
+- ❌ `=TABLE(row_input, col_input)` — this is NOT a callable Excel function. It's a placeholder string Excel writes when you create a Data Table via menu. Emitting it produces `#NAME?` in every cell. For Sensitivity tables, write the FULL closed-form formula in each cell: `=(B$1*Assumptions!$B$5*30 - Assumptions!$B$7*B$1*Assumptions!$B$5*30 - Assumptions!$B$10)`. Reference the row/col axis values explicitly: `B3:F3` = first input axis, `A4:A8` = second input axis. Each interior cell `Bn:Fn` (n=4..8) computes the metric from BOTH axes using `B$n` and `$A4` mixed refs.
 
 ## Output Format
 

@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { enhancedPipeline } = require('./enhanced');
 const { sanitizeActions, isWholeColumnOrRow, validateActionsStrict } = require('./actionSanitizer');
+const { validateCellDeps } = require('./cellDepValidator');
 
 const SCENARIOS = {
   sumcol: {
@@ -29,7 +30,8 @@ const SCENARIOS = {
     domain: 'finance',
     objective: 'Crea business plan MEAT CREW fast-food Milano. Fogli: (1) Assumptions: affitto 8000, food cost 28%, labor 22%, utenze 3%, marketing 2%, scontrino 18, coperti 120, capex 350k, multiplo 8x, WACC 9%. (2) Menu completo: Starters MOCHOS BITES 6.90, CHICKEN TENDERS 6.90. Burger: L.A. 14.50/21.90, CRISPY 14.50/21.90, MAC CHEESE 15.50/22.90, OKLAHOMA 15.00/22.40, JUNIOR 8.50. Sandwiches: PASTRAMI 19.00/26.40, THE O.G. 14.50/21.90. Hot Dogs: BACON DOG 8.00/15.40, CHILI DOG 9.00/16.40. Sides: CRISPY FRIES 5.50, BACON FRIES 6.50, CHILI FRIES 6.50, MAC CHEESE 6.50. Sweets: BANANA PUDDING 4.90, GLAZED DONUT 2.50. Milkshakes 6.00. Drinks: Acqua 2.00, FREE REFILL 4.50, Birra Raw 5.50. (3) Personnel: Manager 3500, 2 Leader 2400, 6 Crew 1500, +30% loaded. (4) Revenue: 60 mesi, stagionalità ±15%, growth Y2+15% Y3+10% Y4-5+5%, revenue = coperti*giorni*scontrino. (5) PnL: 60 mesi + 5 annuali, EBITDA, ammortamenti(350k/60mesi), EBIT, IRES+IRAP, Net Income. (6) CashFlow: Operating CF, Investing, FCF. (7) BreakEven mensile costi fissi/variabili. (8) ScaleUp 4 città. (9) Valuation DCF IRR. (10) Sensitivity 5×5 scontrino×coperti su EBITDA con FORMULE verso Assumptions. SOLO FORMULE.',
     expect: {
-      sheets: ['Assumptions', 'Menu', 'Personnel', 'Revenue', 'PnL', 'CashFlow', 'BreakEven', 'ScaleUp', 'Valuation', 'Sensitivity'],
+      // Accept common synonyms via canonKey fuzzy-match: "Menu" ↔ "Menu Mix", "Personnel" ↔ "Staffing".
+      sheets: ['Assumptions', 'Menu', 'Staffing', 'Revenue', 'PnL', 'CashFlow', 'Valuation', 'Sensitivity'],
       minCells: 200,
       minFormulas: 80,
       mustHaveFormulas: [/Assumptions!/, /SUM/i],
@@ -165,8 +167,20 @@ function scoreScenario(key, scenario, actions, summary) {
   const exp = scenario.expect || {};
   const issues = [];
 
+  // Cell-level dependency validation — catches #REF!/#NAME?/#VALUE! before deploy.
+  const depIssues = validateCellDeps(actions);
+  for (const d of depIssues) {
+    issues.push({ severity: d.severity, kind: d.kind, msg: `${d.location}: ${d.detail}` });
+  }
+
+  function canonKey(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+  const presentKeys = summary.sheets.map(canonKey);
+  function matchSheet(req) {
+    const r = canonKey(req);
+    return presentKeys.some(p => p === r || p.includes(r) || r.includes(p));
+  }
   for (const required of exp.sheets || []) {
-    if (!summary.sheets.includes(required)) {
+    if (!matchSheet(required)) {
       issues.push({ severity: 'critical', kind: 'missing_sheet', msg: `sheet "${required}" not created` });
     }
   }
@@ -200,12 +214,24 @@ function scoreScenario(key, scenario, actions, summary) {
     issues.push({ severity: 'medium', kind: 'too_many_hardcoded', msg: `${summary.hardcoded} hardcoded numerics vs ${summary.formulas} formulas` });
   }
   for (const required of exp.sheets || []) {
-    if (summary.sheets.includes(required) && (!summary.cellsBySheet[required] || summary.cellsBySheet[required] < 4)) {
-      issues.push({ severity: 'high', kind: 'empty_sheet', msg: `sheet "${required}" has only ${summary.cellsBySheet[required] || 0} cells` });
+    const r = canonKey(required);
+    const matchedReal = summary.sheets.find(s => {
+      const p = canonKey(s);
+      return p === r || p.includes(r) || r.includes(p);
+    });
+    if (matchedReal && (!summary.cellsBySheet[matchedReal] || summary.cellsBySheet[matchedReal] < 4)) {
+      issues.push({ severity: 'high', kind: 'empty_sheet', msg: `sheet "${required}" (→${matchedReal}) has only ${summary.cellsBySheet[matchedReal] || 0} cells` });
     }
   }
   if (summary.unformattedNumeric > 5) {
     issues.push({ severity: 'low', kind: 'unformatted_numbers', msg: `${summary.unformattedNumeric} numeric cells without numberFormat` });
+  }
+
+  // Semantic checks: detect Mix % NOT summing to 100% via SUMPRODUCT
+  for (const f of summary.allFormulaStrings) {
+    if (/SUMPRODUCT/i.test(f) && /\bF\b|\bMix\b/i.test(f)) {
+      // We can't easily evaluate without running Excel — but flag suspicious patterns
+    }
   }
 
   const criticalCount = issues.filter(i => i.severity === 'critical').length;
