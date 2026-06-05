@@ -1264,6 +1264,39 @@ async function enhancedPipeline(objective, context = {}, options = {}) {
     }
   }
 
+  // Phase 4b4: TARGETED FIXER — code-agent-style per-bug patches.
+  // Run finance lints + cellDepValidator on assembled workbook. For each bug
+  // dispatch a focused LLM call (single cell, single fix). Like Claude Code:
+  // tiny prompt, tiny scope, surgical patch.
+  if (options.enableTargetedFixer !== false) {
+    try {
+      const { runFinanceLints } = require('./financeLint');
+      const { validateCellDeps } = require('./cellDepValidator');
+      const lintBugs = runFinanceLints(codeResult.actions);
+      const depBugs = validateCellDeps(codeResult.actions).map(d => ({ severity: d.severity, kind: d.kind, location: d.location, detail: d.detail }));
+      const allBugs = [...lintBugs, ...depBugs].filter(b => b.severity === 'critical' || b.severity === 'high');
+      // Don't try to fix broken_cell_ref (auto-stub already handles), focus on semantic + lint bugs
+      const semanticOnly = allBugs.filter(b => !['broken_cell_ref', 'silent_slice', 'empty_output'].includes(b.kind));
+      if (semanticOnly.length > 0) {
+        const { dispatchTargetedFixes } = require('./targetedFixer');
+        const { MODEL_TIERS: TF_TIERS } = require('./modelRouter');
+        const fixerModel = process.env.CF_FIXER_PRO ? TF_TIERS.pro : TF_TIERS.flash;
+        if (onProgress) onProgress('reviewing', { message: `Targeted fixer: ${semanticOnly.length} bugs to patch...` });
+        const fixResult = await dispatchTargetedFixes({
+          bugs: semanticOnly,
+          actions: codeResult.actions,
+          modelOverride: fixerModel,
+          maxConcurrency: 6,
+          timeoutMs: 25000,
+        });
+        logger.info(`[Enhanced] TargetedFixer: ${fixResult.applied} patches applied, ${fixResult.skipped} skipped (${semanticOnly.length} bugs total)`);
+        pipeline.targetedFixer = { bugs: semanticOnly.length, applied: fixResult.applied, skipped: fixResult.skipped, tokens: fixResult.tokens };
+      }
+    } catch (e) {
+      logger.warn(`[Enhanced] TargetedFixer skipped: ${e.message}`);
+    }
+  }
+
   // Phase 4c: Semantic critic — finance-aware audit of cross-sheet coherence.
   // Catches Mix % ≠ 100%, AOV inconsistency, wrong formula structure.
   // Single LLM call, ~30-60s, cheap model.
