@@ -13,9 +13,19 @@ const { callLLM, resetUsageStats, getUsageStats } = require('../server/tools/llm
 const logger = require('../server/utils/logger');
 const { validateCellDeps, indexCells, extractCellRefs } = require('./cellDepValidator');
 
+const { runFinanceLints } = require('./financeLint');
+
 // Quick local validator that runs on JUST this slice's output, given upstream snapshot.
 function validateSliceActions(sliceActions, upstreamActions = [], expectedSheet = null) {
   const issues = [];
+
+  // 0. Finance-specific lints (sensitivity grid, IRR array literal, period mismatch, semantic labels)
+  const lintIssues = runFinanceLints(sliceActions);
+  for (const l of lintIssues) {
+    if (!expectedSheet || l.location.startsWith(expectedSheet)) {
+      issues.push(l);
+    }
+  }
 
   // 1. Cell-level dep validation (cross-slice + same-sheet)
   const combined = [...upstreamActions, ...sliceActions];

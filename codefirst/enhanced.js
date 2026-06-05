@@ -1217,12 +1217,15 @@ async function enhancedPipeline(objective, context = {}, options = {}) {
   {
     const { applyAutoFixes } = require('./semanticAutoFix');
     const { repairRefs } = require('./refRepair');
+    const { autoFixIRRArrayLiterals } = require('./financeLint');
     // Run ref repair FIRST so subsequent fills propagate correct refs.
     const refsFixed = repairRefs(codeResult.actions);
+    const irrFixed = autoFixIRRArrayLiterals(codeResult.actions);
     const autoStats = applyAutoFixes(codeResult.actions);
     autoStats.refsRepaired = refsFixed;
-    if (autoStats.mixCellsNormalized + autoStats.timeSeriesCellsAdded + refsFixed > 0) {
-      logger.info(`[Enhanced] AutoFix: ${refsFixed} refs repaired, ${autoStats.mixCellsNormalized} Mix cells normalized, ${autoStats.timeSeriesCellsAdded} time-series cells filled`);
+    autoStats.irrArrayFixed = irrFixed;
+    if (autoStats.mixCellsNormalized + autoStats.timeSeriesCellsAdded + refsFixed + irrFixed > 0) {
+      logger.info(`[Enhanced] AutoFix: ${refsFixed} refs, ${irrFixed} IRR/NPV arrays, ${autoStats.mixCellsNormalized} Mix, ${autoStats.timeSeriesCellsAdded} time-series filled`);
     }
     pipeline.autoFix = autoStats;
   }

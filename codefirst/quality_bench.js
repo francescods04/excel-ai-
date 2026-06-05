@@ -8,6 +8,7 @@ const path = require('path');
 const { enhancedPipeline } = require('./enhanced');
 const { sanitizeActions, isWholeColumnOrRow, validateActionsStrict } = require('./actionSanitizer');
 const { validateCellDeps } = require('./cellDepValidator');
+const { runFinanceLints } = require('./financeLint');
 
 const SCENARIOS = {
   sumcol: {
@@ -82,6 +83,80 @@ const SCENARIOS = {
       minCells: 250,
       minFormulas: 150,
       mustHaveFormulas: [/Assumptions!/, /Synergies|Synerg/i, /Accretion|Dilution|EPS/i],
+    },
+  },
+
+  // === ANALYST-WEEK-OF-WORK SCENARIOS ===
+  // These take a real finance analyst 3-5 days to build properly.
+
+  // Full LBO with operating model + debt waterfall + scenarios + returns
+  lbo_full: {
+    domain: 'finance',
+    objective: `Costruisci LBO model completo per acquisizione "TechCo SaaS" da Private Equity. Fogli necessari:
+(1) Cover_Summary: deal summary, returns table (MOIC, IRR base/upside/downside), key metrics.
+(2) Assumptions: Entry EV €750m, LTM Revenue €180m, LTM EBITDA €54m (30% margin), Revenue growth Y1-Y5 (15%/13%/11%/10%/8%), EBITDA margin steady 32%, D&A 5% revenue, CapEx 4% revenue, NWC 2% revenue change, Tax 24%. Exit Multiple 11x EBITDA. Debt structure: Revolver €50m undrawn, Term Loan A €150m (5% amort + 4% rate), Term Loan B €250m (1% amort + 5% rate), Senior Notes €100m (0% amort + 6.5% rate). Equity €200m sponsor.
+(3) Sources_Uses: Sources (Equity €200m + new Debt €500m + Cash on Hand €50m), Uses (Entry EV + Transaction Fees 2%). Balance check.
+(4) Operating_Model Y0-Y5 quarterly: Revenue, EBITDA, D&A, EBIT, Interest expense (linked to debt schedule), EBT, Tax, Net Income, FCF (NI + D&A - CapEx - NWC change).
+(5) Debt_Schedule Y0-Y5 quarterly: per-tranche begin balance, mandatory amort, cash sweep (50% excess FCF), ending balance, interest on average balance, total debt service. Revolver draw if cash insufficient.
+(6) Balance_Sheet Y0-Y5: Cash plug, AR, Inventory, PP&E (PP&E rollforward), Total Assets = Debt (per tranche) + Equity. Check.
+(7) Cash_Flow Y0-Y5: Operating CF + Investing (CapEx) + Financing (debt paydown).
+(8) Credit_Stats: Total Leverage (Debt/EBITDA), Senior Leverage, Interest Coverage (EBITDA/Interest), FCCR. By year.
+(9) Returns: Exit EV Y5 = Exit Multiple × Y5 EBITDA. Equity Value = Exit EV - Net Debt. MOIC = Exit Equity / Entry Equity. IRR base case + sensitivity. Cash on Cash multiple. NPV at hurdle rate.
+(10) Sensitivity_MOIC: 5×5 grid Entry Multiple (12x-16x) vs Exit Multiple (9x-13x).
+(11) Sensitivity_IRR: 5×5 grid Revenue Growth (10%-20%) vs Exit Multiple (9x-13x).
+(12) Scenarios: Base/Upside/Downside summary table with key metrics each scenario.
+CRITICAL: SOLO FORMULE. Cross-sheet refs SEMPRE absolute con $. Returns formulas correct: IRR over EQUITY cash flows, NPV with WACC discount rate.`,
+    expect: {
+      sheets: ['Cover_Summary', 'Assumptions', 'Sources_Uses', 'Operating_Model', 'Debt_Schedule', 'Balance_Sheet', 'Cash_Flow', 'Credit_Stats', 'Returns', 'Sensitivity_MOIC', 'Sensitivity_IRR', 'Scenarios'],
+      minCells: 400,
+      minFormulas: 250,
+      mustHaveFormulas: [/IRR|MOIC/i, /Assumptions!/, /Debt|Leverage/i],
+    },
+  },
+
+  // Multi-location franchise rollout model
+  franchise_rollout: {
+    domain: 'finance',
+    objective: `Crea un modello di rollout per una catena di gelaterie premium "GELATO LAB" da 1 a 25 location in 5 anni. Fogli:
+(1) Assumptions: Capex per location €180k, Pre-opening €25k, Working Capital €15k. Mature location: Daily customers 280, Conversion 90%, AOV €11.50, COGS 28%, Labor 24% of revenue, Rent €4.5k/month, Marketing 3% revenue, Utilities/Other €2.5k/month, Tax 24%. Ramp curve: Month 1=40%, M2=60%, M3=80%, M4-12=100%. Annual revenue growth post-Y1: 5%.
+(2) Rollout_Schedule: numero location aperte per trimestre Q1Y1=1, Q2Y1=1, Q3Y1=2, Q4Y1=2, Q1Y2=3, Q2Y2=3, Q3Y2=3, Q4Y2=3, Y3=4 per Q, Y4=2 per Q, Y5=2 per Q. Total 25 location.
+(3) Single_Location_PnL: 60 mesi P&L per UNA location matura (Revenue, COGS, Gross Profit, Labor, Rent, Marketing, Utilities, EBITDA, Tax, NI).
+(4) Cohort_Analysis: per ogni cohort di location (apertura Q), calcola Revenue/EBITDA per mese da apertura. 8 cohorts in Y1-Y2.
+(5) Consolidated_PnL Y1-Y5 monthly: somma di tutte le cohort attive ogni mese.
+(6) Consolidated_CashFlow Y1-Y5: Operating CF, Investing (capex × new openings per Q), Financing.
+(7) Funding_Need: cumulative capex required + working capital + minimum cash buffer.
+(8) Returns: IRR equity by year, MOIC per location average, payback period per location.
+(9) Sensitivity: 5×5 AOV vs Daily Customers su Year-5 EBITDA.
+(10) ScaleEconomics: HQ cost (€500k/year fixed), regional managers (€80k each per 5 location), supply chain savings (-2% COGS at 10+ location, -4% at 20+).
+CRITICAL: SOLO FORMULE. Match cohort opening date to ramp curve correctly. EBITDA includes HQ allocation.`,
+    expect: {
+      sheets: ['Assumptions', 'Rollout_Schedule', 'Single_Location_PnL', 'Cohort_Analysis', 'Consolidated_PnL', 'Consolidated_CashFlow', 'Funding_Need', 'Returns', 'Sensitivity', 'ScaleEconomics'],
+      minCells: 500,
+      minFormulas: 300,
+      mustHaveFormulas: [/Assumptions!/, /Cohort|Rollout/i, /IRR/i],
+    },
+  },
+
+  // SaaS subscription business with cohort revenue model
+  saas_full: {
+    domain: 'finance',
+    objective: `Crea modello SaaS "DataCloud" cohort-based valuation. Fogli:
+(1) Assumptions: Starting ARR €5m, Y1-Y5 new ARR growth (60%/45%/35%/25%/20%), Gross retention 92%, Net retention 110% (upsell), Gross margin 78%, S&M as % of ARR (45%/40%/35%/30%/25%), R&D % (25% steady), G&A % (12% Y1 declining to 8%), Tax 24%, Discount rate (WACC) 10%, Terminal growth 3%, Exit Multiple 8x ARR (or 25x EBITDA).
+(2) Cohort_Revenue Y1-Y5 quarterly: ogni cohort di nuovi customer ha churn 8%/anno e upsell 18%/anno. Build matrix di revenue contribution per cohort × quarter.
+(3) ARR_Build: New ARR + Expansion ARR - Churned ARR = Net New ARR. Beginning + Net = Ending ARR.
+(4) Revenue_PnL: Subscription revenue = Average ARR × 12 (or simply ending ARR for recognized rev). COGS, Gross Profit, S&M, R&D, G&A, EBITDA, D&A, EBIT, Tax, NI.
+(5) Cash_Flow Y1-Y5 quarterly: Operating CF, deferred revenue impact, CapEx, Working Capital.
+(6) Unit_Economics: LTV per customer (= ARPU × Gross Margin / Churn), CAC (= S&M spend / new customers), LTV/CAC ratio, CAC payback months, Magic Number (Net New ARR Q×4 / S&M Q prior).
+(7) DCF_Valuation: FCF projection Y1-Y5 + Terminal Value (Gordon Growth or Exit Multiple). Discount to PV. Enterprise Value, Equity Value, Per-Share if shares given.
+(8) Comparables: Rule of 40 (Growth + EBITDA margin), Multiples by year (EV/ARR, EV/Revenue, EV/EBITDA).
+(9) Sensitivity: 5×5 Net Retention vs Discount Rate su Enterprise Value.
+(10) Scenarios: Conservative/Base/Aggressive with key inputs sensitized.
+CRITICAL: SOLO FORMULE. Cohort revenue calculation correct (compound retention). LTV/CAC sanity check.`,
+    expect: {
+      sheets: ['Assumptions', 'Cohort_Revenue', 'ARR_Build', 'Revenue_PnL', 'Cash_Flow', 'Unit_Economics', 'DCF_Valuation', 'Comparables', 'Sensitivity', 'Scenarios'],
+      minCells: 450,
+      minFormulas: 300,
+      mustHaveFormulas: [/Assumptions!/, /ARR|Retention|Churn/i, /LTV|CAC/i],
     },
   },
 };
@@ -171,6 +246,11 @@ function scoreScenario(key, scenario, actions, summary) {
   const depIssues = validateCellDeps(actions);
   for (const d of depIssues) {
     issues.push({ severity: d.severity, kind: d.kind, msg: `${d.location}: ${d.detail}` });
+  }
+  // Finance-specific lints (sensitivity dead grid, IRR array, scenario static, etc.)
+  const lintIssues = runFinanceLints(actions);
+  for (const l of lintIssues) {
+    issues.push({ severity: l.severity, kind: l.kind, msg: `${l.location}: ${l.detail}` });
   }
 
   function canonKey(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
