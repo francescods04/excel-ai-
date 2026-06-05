@@ -154,9 +154,8 @@ function validateCellDeps(actions) {
       const refSheet = ref.sheet || cell.sheet;
       const refKey = `${refSheet}!${ref.addr}`;
       if (refKey === key) {
-        // Self-ref is often a model bug, but classic financial models (Cash plug) and
-        // copyToRange edge cases trip this. Keep flagged but at "high" not "critical".
-        issues.push({ severity: 'high', kind: 'self_ref', location: key, detail: `formula refs itself: ${cell.formula}` });
+        // Self-ref is often intentional (Cash plug, Cumulative formulas). Demote to medium.
+        issues.push({ severity: 'medium', kind: 'self_ref', location: key, detail: `formula refs itself: ${cell.formula}` });
         continue;
       }
       const target = idx.get(refKey);

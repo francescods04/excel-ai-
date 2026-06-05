@@ -1327,8 +1327,20 @@ async function enhancedPipeline(objective, context = {}, options = {}) {
       const lintBugs = runFinanceLints(codeResult.actions);
       const depBugs = validateCellDeps(codeResult.actions).map(d => ({ severity: d.severity, kind: d.kind, location: d.location, detail: d.detail }));
       const allBugs = [...lintBugs, ...depBugs].filter(b => b.severity === 'critical' || b.severity === 'high');
-      // Don't try to fix broken_cell_ref (auto-stub already handles), focus on semantic + lint bugs
-      const semanticOnly = allBugs.filter(b => !['broken_cell_ref', 'silent_slice', 'empty_output'].includes(b.kind));
+      // Skip bug kinds the targeted fixer can't reliably handle:
+      //   - broken_cell_ref: auto-stub fills with 0
+      //   - missing_required_sheet / missing_sheet: needs codegen, not patch
+      //   - duplicate_addresses: not a real bug (just notice)
+      //   - unformatted_numbers: cosmetic
+      //   - silent_slice / empty_output: empty slice, can't patch
+      //   - too_many_hardcoded: warning, not a specific cell
+      const SKIP_KINDS = new Set([
+        'broken_cell_ref', 'silent_slice', 'empty_output',
+        'missing_required_sheet', 'missing_sheet',
+        'duplicate_addresses', 'unformatted_numbers', 'too_many_hardcoded',
+        'sources_uses_no_check', 'bs_no_check', // structural advice, not single-cell fix
+      ]);
+      const semanticOnly = allBugs.filter(b => !SKIP_KINDS.has(b.kind));
       if (semanticOnly.length > 0) {
         const { dispatchTargetedFixes } = require('./targetedFixer');
         const { MODEL_TIERS: TF_TIERS } = require('./modelRouter');
