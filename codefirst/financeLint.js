@@ -136,48 +136,44 @@ function lintScenarios(sheetName, sheetData) {
   return issues;
 }
 
-// L6: annual sheet references single quarterly cell — should SUM range
-// Heuristic: if a sheet has labels like "Y1","Y2".. and references a sheet with "Q1","Q2"...
-//            and the formula is a single ref (e.g. =QSheet!$C$5), flag.
+// L6: annual sheet references single quarterly cell — should SUM range.
+// Smarter check: only flag if source sheet has SIGNIFICANTLY more columns
+// than this sheet (≥3× more cols in the same header row).
 function lintPeriodMismatch(sheetName, sheetData, allSheets) {
   const issues = [];
-  // Detect if this sheet is annual: row 1 contains "Y1","Y2"...
-  let isAnnual = false;
-  for (const [addr, cell] of sheetData.cells) {
-    const p = splitAddr(addr); if (!p || p.row > 2) continue;
-    if (typeof cell.value === 'string' && /^Y\s?\d$/i.test(cell.value.trim())) { isAnnual = true; break; }
-  }
-  if (!isAnnual) return issues;
-
-  // Find quarterly source sheets in allSheets (sheets whose row1 contains Q1,Q2..)
-  const quarterlySheets = new Set();
-  for (const [otherSheet, otherData] of Object.entries(allSheets)) {
-    if (otherSheet === sheetName) continue;
-    for (const [addr, cell] of otherData.cells) {
+  // Count columns used in this sheet's header rows
+  function countCols(data) {
+    const cols = new Set();
+    for (const [addr, cell] of data.cells) {
       const p = splitAddr(addr); if (!p || p.row > 2) continue;
-      if (typeof cell.value === 'string' && /^Q\s?\d$|Y\d?Q\d/i.test(cell.value.trim())) { quarterlySheets.add(otherSheet); break; }
+      if (cell.value !== undefined && cell.value !== null && cell.value !== '') cols.add(p.col);
     }
+    return cols.size;
   }
+  const myCols = countCols(sheetData);
+  if (myCols < 3) return issues; // too small to be an annual axis sheet
 
-  if (quarterlySheets.size === 0) return issues;
-  // For each formula in this sheet referencing a quarterly source, check if it's a single ref vs SUM
+  // For each formula referencing another sheet, check column-count ratio
   for (const [addr, cell] of sheetData.cells) {
     if (!cell.formula) continue;
     const p = splitAddr(addr); if (!p || p.col === 'A') continue;
-    const isSumWrapper = /\b(SUM|AVERAGE|AVG)\s*\(/i.test(cell.formula);
-    // Detect if formula references one of the quarterly sheets
-    let refsQuarterly = null;
-    for (const qs of quarterlySheets) {
-      const re = new RegExp(`(?:'${qs.replace(/'/g, "''")}'|${qs})!`, 'i');
-      if (re.test(cell.formula)) { refsQuarterly = qs; break; }
-    }
-    if (!refsQuarterly || isSumWrapper) continue;
-    // Single-ref to a quarterly cell from annual sheet → likely periodicity mismatch
+    const isSumWrapper = /\b(SUM|AVERAGE|AVG|SUMPRODUCT|SUMIFS|SUMIF)\s*\(/i.test(cell.formula);
+    if (isSumWrapper) continue;
+    // Find the referenced sheet
+    const refSheetMatch = cell.formula.match(/(?:'([^']+)'|([A-Za-z_][A-Za-z0-9_]*))!/);
+    if (!refSheetMatch) continue;
+    const refSheet = (refSheetMatch[1] || refSheetMatch[2] || '').trim();
+    if (refSheet === sheetName) continue;
+    const refData = allSheets[refSheet];
+    if (!refData) continue;
+    const refCols = countCols(refData);
+    // Only flag if reference sheet has >= 3× more cols than us
+    if (refCols < myCols * 3) continue;
     issues.push({
       severity: 'high',
       kind: 'annual_ref_quarterly_single',
       location: `${sheetName}!${addr}`,
-      detail: `Annual sheet "${sheetName}" cell ${addr} references quarterly sheet "${refsQuarterly}" via single cell ref "${cell.formula.slice(0, 80)}" — should SUM 4 quarterly cells (e.g. =SUM('${refsQuarterly}'!$C$5:$F$5)).`,
+      detail: `${sheetName} has ${myCols} period cols but references "${refSheet}" (${refCols} cols) via single cell ref "${cell.formula.slice(0, 80)}". Wrap with SUM over the matching ${Math.round(refCols/myCols)} cols.`,
     });
   }
   return issues;
@@ -292,4 +288,72 @@ function autoFixIRRArrayLiterals(actions) {
 
 function numToCol(n) { let s=''; while (n>0) { const r=(n-1)%26; s=String.fromCharCode(65+r)+s; n=Math.floor((n-1)/26); } return s||'A'; }
 
-module.exports = { runFinanceLints, autoFixIRRArrayLiterals, lintSensitivity, lintIRRNPV, lintScenarios, lintPeriodMismatch, lintSemanticLabel };
+// AUTO-FIX: period mismatch — wrap single cell ref to a wider sheet with SUM over
+// the matching slice of columns. For Credit_Stats Y2 referencing Debt_Schedule!$D$12
+// (single Y2Q1 cell), rewrite to =SUM('Debt_Schedule'!$F$12:$I$12) (Y2Q1..Y2Q4).
+function autoFixPeriodMismatch(actions) {
+  const allSheets = buildSheetIndex(actions);
+  let fixed = 0;
+  // Compute cols-per-period ratio for each sheet pair when relevant
+  function colsOf(sheetName) {
+    const d = allSheets[sheetName]; if (!d) return 0;
+    const cols = new Set();
+    for (const [addr, cell] of d.cells) {
+      const p = splitAddr(addr); if (!p || p.row > 2) continue;
+      if (cell.value !== undefined && cell.value !== null && cell.value !== '') cols.add(p.col);
+    }
+    return cols.size;
+  }
+  // Find sheet column-counts; assume index col is A (1 col), data cols are after
+  for (const [sheetName, sheetData] of Object.entries(allSheets)) {
+    const myCols = colsOf(sheetName);
+    if (myCols < 3) continue;
+    for (const [addr, cell] of sheetData.cells) {
+      if (!cell.formula) continue;
+      const p = splitAddr(addr); if (!p || p.col === 'A') continue;
+      if (/\b(SUM|AVERAGE|AVG|SUMPRODUCT|SUMIFS|SUMIF)\s*\(/i.test(cell.formula)) continue;
+      // Detect a single absolute ref like =Sheet!$C$5 (one ref formula)
+      const singleRefMatch = cell.formula.match(/^=([A-Za-z_][A-Za-z0-9_]*|'[^']+')!\$([A-Z]+)\$(\d+)$/);
+      if (!singleRefMatch) continue;
+      const refSheetRaw = singleRefMatch[1].replace(/^'|'$/g, '');
+      const refSheet = allSheets[refSheetRaw];
+      if (!refSheet) continue;
+      const refCols = colsOf(refSheetRaw);
+      if (refCols < myCols * 3) continue;
+      const ratio = Math.round(refCols / myCols);
+      const refCol = singleRefMatch[2];
+      const refRow = singleRefMatch[3];
+      const refColNum = colNum(refCol);
+      // Determine which "period" this is: my col position vs my total cols
+      const myColNum = colNum(p.col);
+      // For my col N (1-indexed from data start col, e.g. B=1), source range starts at
+      // (N-1)*ratio + first_data_col_in_source, spans ratio cols
+      // Heuristic: assume both sheets start data at col B (col 2). So Y2 in me = col C (3rd col); Y2 in source = cols D..G (4..7).
+      const myDataIdx = myColNum - 2; // 0-indexed (B=0, C=1, ...)
+      if (myDataIdx < 0) continue;
+      const srcStartIdx = myDataIdx * ratio;
+      const srcEndIdx = srcStartIdx + ratio - 1;
+      const srcStartCol = numToCol(2 + srcStartIdx);
+      const srcEndCol = numToCol(2 + srcEndIdx);
+      const needsQuoting = /[^A-Za-z0-9_]/.test(refSheetRaw);
+      const sheetRef = needsQuoting ? `'${refSheetRaw.replace(/'/g, "''")}'` : refSheetRaw;
+      const newFormula = `=SUM(${sheetRef}!$${srcStartCol}$${refRow}:$${srcEndCol}$${refRow})`;
+      // Only apply if the new range doesn't reuse the same single col (would be no-op)
+      if (srcStartCol === srcEndCol) continue;
+      cell.formula = newFormula;
+      // Need to update the actual action too (cell is from indexCells which returns refs)
+      for (const a of actions) {
+        if (a.type !== 'setCellRange' || !a.cells) continue;
+        if ((a.sheet || a.sheetName) !== sheetName) continue;
+        if (a.cells[addr] && typeof a.cells[addr] === 'object') {
+          a.cells[addr].formula = newFormula;
+          fixed++;
+          break;
+        }
+      }
+    }
+  }
+  return fixed;
+}
+
+module.exports = { runFinanceLints, autoFixIRRArrayLiterals, autoFixPeriodMismatch, lintSensitivity, lintIRRNPV, lintScenarios, lintPeriodMismatch, lintSemanticLabel };
