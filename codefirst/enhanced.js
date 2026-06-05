@@ -182,6 +182,7 @@ function planComplexity(plan) {
 function buildSlices(plan) {
   const sections = plan?.sections || [];
   // Default 10 to fit Vercel 270s budget. Override with FORCE_MAX_SLICES env.
+  // For mega scenarios (institutional) bump via env: FORCE_MAX_SLICES=25.
   const MAX_SLICES = Number(process.env.FORCE_MAX_SLICES) || 10;
   const limited = sections.slice(0, MAX_SLICES);
   if (sections.length > MAX_SLICES) {
@@ -244,6 +245,55 @@ function buildPreAgreedCellMap(plan) {
         c2 ? `$${c1}$${r1}:$${c2}$${r2}` : `$${c1}$${r1}`
       );
       lines.push(`'${sheet}'!${abs}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+// Build a SYMBOL-LIKE cell map with semantic concept tags so downstream slices
+// can pick the right row by concept name, not by guessing the row number.
+// Maps both directions: concept name → address AND address → concept.
+// Concepts derived from row labels via fuzzy match.
+const CONCEPT_PATTERNS = {
+  wacc: /\bwacc|cost of capital|discount rate/i,
+  tax_rate: /\btax rate|aliquota|imposta/i,
+  cogs_pct: /\bcogs\s*%|food cost/i,
+  ebitda_margin: /ebitda\s*margin/i,
+  capex: /\bcapex\b|capital expenditure|initial capex/i,
+  d_and_a: /\bd&a|depreciation|amortization/i,
+  daily_traffic: /daily traffic|daily customers|covers|footfall/i,
+  conversion: /conversion\s*rate|conv\s*%/i,
+  aov: /\baov\b|average order value|scontrino|average check|ticket/i,
+  operating_days: /operating days|giorni operativi|days per year/i,
+  growth_y1: /growth.*y1|y1.*growth|crescita.*1/i,
+  exit_multiple: /exit multiple|terminal multiple/i,
+  terminal_growth: /terminal growth|gordon/i,
+  inflation: /inflation/i,
+  shares: /shares\s*outstanding|share count|sharecount/i,
+  ev: /enterprise value|^ev$/i,
+  equity: /\bequity\s*purchase|equity value/i,
+};
+
+function extractSymbolMap(sheetName, actions) {
+  const lines = [];
+  for (const a of actions) {
+    if (a.type !== 'setCellRange' || a.sheet !== sheetName || !a.cells) continue;
+    const rowMap = {};
+    for (const [addr, cell] of Object.entries(a.cells)) {
+      const m = addr.match(/^([A-Z]+)(\d+)$/); if (!m) continue;
+      if (!rowMap[m[2]]) rowMap[m[2]] = {};
+      rowMap[m[2]][m[1]] = cell;
+    }
+    for (const row of Object.keys(rowMap).sort((a, b) => Number(a) - Number(b))) {
+      const a1 = rowMap[row].A?.value, b1 = rowMap[row].B?.value;
+      if (typeof a1 !== 'string' || a1.length < 2 || b1 === undefined) continue;
+      // Try to tag this row with a known concept
+      let concept = null;
+      for (const [name, pat] of Object.entries(CONCEPT_PATTERNS)) {
+        if (pat.test(a1)) { concept = name; break; }
+      }
+      const tag = concept ? `[@${concept}]` : '';
+      lines.push(`${sheetName}!$B$${row} = "${a1}" ${tag} (val: ${b1})`);
     }
   }
   return lines.join('\n');
@@ -620,11 +670,13 @@ async function generateStepwise(objective, context, plan, options = {}) {
         }
       }
     }
-    // Update runtime cell map from this layer's outputs so next layer can ref them
+    // Update runtime cell map from this layer's outputs so next layer can ref them.
+    // Use symbol map (with concept tags) when available — better grounding for downstream LLM.
     for (const r of layerResults) {
       if (!r.actions || r.actions.length === 0) continue;
       const sheetName = r.slice.sheet;
-      const map = extractCellMap(sheetName, r.actions);
+      const symMap = extractSymbolMap(sheetName, r.actions);
+      const map = symMap || extractCellMap(sheetName, r.actions);
       if (map) runtimeCellMapContext += (runtimeCellMapContext ? '\n\n' : '') + `=== ${sheetName} ===\n${map}`;
     }
   }

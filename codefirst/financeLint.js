@@ -219,7 +219,95 @@ function lintSemanticLabel(sheetName, sheetData, allSheets) {
   return issues;
 }
 
-function runFinanceLints(actions) {
+// L8: Sources_Uses balance — sum of sources should equal sum of uses
+function lintSourcesUses(sheetName, sheetData) {
+  const issues = [];
+  if (!/source.*use|sources?_?uses?|sources?.?and.?uses?/i.test(sheetName)) return issues;
+  // Look for "Total Sources" and "Total Uses" rows by label
+  let totalSourcesRow = null, totalUsesRow = null;
+  for (const [row, label] of sheetData.rowLabels) {
+    const lab = label.toLowerCase();
+    if (/total\s*sources?/.test(lab)) totalSourcesRow = row;
+    if (/total\s*uses?/.test(lab)) totalUsesRow = row;
+  }
+  if (!totalSourcesRow || !totalUsesRow) return issues;
+  const srcCell = sheetData.cells.get(`B${totalSourcesRow}`);
+  const useCell = sheetData.cells.get(`B${totalUsesRow}`);
+  if (!srcCell || !useCell) return issues;
+  // Look for explicit "Check" row that subtracts them
+  let hasCheck = false;
+  for (const [row, label] of sheetData.rowLabels) {
+    if (/\bcheck\b|\bbalance\b/i.test(label)) {
+      const cc = sheetData.cells.get(`B${row}`);
+      if (cc?.formula && (/B\d+\s*[-=]\s*B\d+/.test(cc.formula))) { hasCheck = true; break; }
+    }
+  }
+  if (!hasCheck) {
+    issues.push({
+      severity: 'high',
+      kind: 'sources_uses_no_check',
+      location: `${sheetName}!B${totalSourcesRow}`,
+      detail: `Sources_Uses sheet lacks a Check row formula (=Total_Sources - Total_Uses). Add it to verify balance.`,
+    });
+  }
+  // Both should be formulas (not hardcoded). If both are values, possibly hardcoded balance.
+  if (srcCell.value !== undefined && useCell.value !== undefined && !srcCell.formula && !useCell.formula) {
+    if (Number(srcCell.value) !== Number(useCell.value)) {
+      issues.push({
+        severity: 'critical',
+        kind: 'sources_uses_imbalance',
+        location: `${sheetName}`,
+        detail: `Hardcoded Total Sources (${srcCell.value}) != Total Uses (${useCell.value}). Should balance.`,
+      });
+    }
+  }
+  return issues;
+}
+
+// L9: Balance Sheet — Total Assets row should equal Total Liabilities + Equity row
+function lintBalanceSheet(sheetName, sheetData) {
+  const issues = [];
+  if (!/balance.?sheet|bs|stato.?patrimon/i.test(sheetName)) return issues;
+  let totalAssetsRow = null, totalLiabEqRow = null;
+  for (const [row, label] of sheetData.rowLabels) {
+    const lab = label.toLowerCase();
+    if (/total\s*assets?/.test(lab) || /totale\s*attiv/.test(lab)) totalAssetsRow = row;
+    if (/total\s*(liab|liabilities).*equity|total\s*l\s*\+\s*e|totale\s*passiv/.test(lab)) totalLiabEqRow = row;
+  }
+  if (totalAssetsRow && !totalLiabEqRow) {
+    issues.push({
+      severity: 'high',
+      kind: 'bs_no_check',
+      location: `${sheetName}`,
+      detail: `Balance Sheet has "Total Assets" but no "Total Liab + Equity" row. Cannot verify balance.`,
+    });
+  }
+  return issues;
+}
+
+// L10: Missing-required-sheet — caller can pass expected sheets list via opts
+function lintMissingSheets(allSheets, expectedSheets) {
+  const issues = [];
+  if (!Array.isArray(expectedSheets)) return issues;
+  const canon = s => String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  const present = new Set(Object.keys(allSheets).map(canon));
+  for (const exp of expectedSheets) {
+    const c = canon(exp);
+    let found = false;
+    for (const p of present) { if (p === c || p.includes(c) || c.includes(p)) { found = true; break; } }
+    if (!found) {
+      issues.push({
+        severity: 'high',
+        kind: 'missing_required_sheet',
+        location: exp,
+        detail: `Required sheet "${exp}" missing from output. Planner declared it but codegen didn't produce it.`,
+      });
+    }
+  }
+  return issues;
+}
+
+function runFinanceLints(actions, opts = {}) {
   const allSheets = buildSheetIndex(actions);
   const issues = [];
   for (const [sheetName, sheetData] of Object.entries(allSheets)) {
@@ -228,6 +316,11 @@ function runFinanceLints(actions) {
     issues.push(...lintScenarios(sheetName, sheetData));
     issues.push(...lintPeriodMismatch(sheetName, sheetData, allSheets));
     issues.push(...lintSemanticLabel(sheetName, sheetData, allSheets));
+    issues.push(...lintSourcesUses(sheetName, sheetData));
+    issues.push(...lintBalanceSheet(sheetName, sheetData));
+  }
+  if (opts.expectedSheets) {
+    issues.push(...lintMissingSheets(allSheets, opts.expectedSheets));
   }
   return issues;
 }

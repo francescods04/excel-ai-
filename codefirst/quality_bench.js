@@ -138,6 +138,81 @@ CRITICAL: SOLO FORMULE. Match cohort opening date to ramp curve correctly. EBITD
   },
 
   // SaaS subscription business with cohort revenue model
+  // === MEGA SCENARIOS — 20+ sheets, 5k-10k cells, full institutional deliverable ===
+  // These represent 1-2 weeks of analyst work.
+
+  lbo_institutional: {
+    domain: 'finance',
+    objective: `Costruisci un LBO MODEL ISTITUZIONALE completo (deliverable da MD-PE-firm) per acquisizione "MediaCorp" da PE. Tutti i seguenti 22 fogli devono essere generati con FORMULE (no hardcoded computed):
+
+(1) Cover_Page: deal name, sponsor, target, transaction date, key returns summary.
+(2) Executive_Summary: deal overview, valuation, transaction multiples, returns by scenario.
+(3) Transaction_Overview: deal structure, ownership pre/post, key dates.
+(4) Sources_Uses: full table con balance check. Sources (Revolver, TLA, TLB, Senior Notes, Mezz, Sponsor Equity, Mgmt Rollover, Cash on Hand). Uses (Equity Purchase Price, Refinance Debt, Transaction Fees, Financing Fees, OID, Working Capital). Total Sources = Total Uses (check formula).
+(5) Assumptions_Operating: Revenue €450m LTM, Growth Y1-Y5 (10%/9%/8%/7%/6%), EBITDA margin steady 32%, D&A 4% revenue, CapEx 5% revenue, NWC 2% delta revenue, Tax 24%.
+(6) Assumptions_Financing: Revolver €75m undrawn (3.5% rate, 0.5% commitment fee), TLA €200m (4.5% rate, 5% amort), TLB €350m (5.5% rate, 1% amort), Senior Notes €150m (7% rate, 0% amort), Mezz €100m (10% PIK), all with maturity dates. Entry Multiple 11x LTM EBITDA. Exit Multiple 10x at Y5.
+(7) Pre_Acquisition_PnL Y-2..Y0: historical 3yr P&L for target.
+(8) Operating_Model Y0-Y5 quarterly (24 quarter cols): Revenue, COGS, GP, SG&A, EBITDA, D&A, EBIT, Interest, EBT, Tax, NI. Tutti quarterly formula.
+(9) Annual_Rollup Y0-Y5: SUM of 4 quarters per year for all P&L lines.
+(10) Debt_Schedule Y0-Y5 quarterly: per-tranche begin balance, mandatory amort, cash sweep (75% excess FCF), ending balance, interest on avg, total debt service.
+(11) Balance_Sheet Y0-Y5: Cash plug, AR, Inventory, PP&E rollforward, Total Assets = Debt by tranche + Mezz + Equity rollforward. Check formula.
+(12) Cash_Flow Y0-Y5: NI + D&A - CapEx - NWC = FCF. Operating CF, Investing CF, Financing CF.
+(13) Working_Capital_Schedule: DSO, DPO, DIO build, NWC per period.
+(14) Credit_Stats Y0-Y5: Total Leverage, Senior Leverage, Net Leverage, Interest Coverage, FCCR, Min Coverage Trigger.
+(15) Covenant_Compliance: Maintenance covenants (Leverage <6x, ICR >2x), Springing covenants, baskets, Compliance/Breach status per period.
+(16) Returns_Equity: Equity Cash Flows Y0-Y5, Sponsor IRR, Sponsor MOIC, Cash on Cash Multiple.
+(17) Returns_Detail: Per scenario MOIC build (Operations CF + Multiple Expansion + Debt Paydown).
+(18) WACC_Build: Risk-free rate, ERP, Beta (levered/unlevered), Cost of Equity, Cost of Debt after-tax, Capital Structure, WACC.
+(19) Comparables_Trading: 6 public comps with EV/Revenue, EV/EBITDA, P/E multiples (current + LTM + NTM).
+(20) Sensitivity_IRR: 5x5 grid Entry Multiple (10x-14x) vs Exit Multiple (8x-12x) → Sponsor IRR.
+(21) Sensitivity_MOIC: 5x5 grid Revenue Growth (5%-15%) vs Exit Multiple (8x-12x) → MOIC.
+(22) Scenarios: 5 scenarios (Worst / Bear / Base / Bull / Best) con tutti i key outputs.
+
+CRITICAL: SOLO FORMULE. Cross-sheet refs absolute. Sources=Uses balance check. Returns IRR su equity flows (B<0 inflows then C..G >0).`,
+    expect: {
+      sheets: ['Cover_Page', 'Executive_Summary', 'Transaction_Overview', 'Sources_Uses', 'Assumptions_Operating', 'Assumptions_Financing', 'Pre_Acquisition_PnL', 'Operating_Model', 'Annual_Rollup', 'Debt_Schedule', 'Balance_Sheet', 'Cash_Flow', 'Working_Capital_Schedule', 'Credit_Stats', 'Covenant_Compliance', 'Returns_Equity', 'Returns_Detail', 'WACC_Build', 'Comparables_Trading', 'Sensitivity_IRR', 'Sensitivity_MOIC', 'Scenarios'],
+      minCells: 2000,
+      minFormulas: 1200,
+      mustHaveFormulas: [/IRR|MOIC/i, /WACC/i, /Leverage|Coverage/i, /Sources_Uses/i],
+    },
+  },
+
+  bank_stress_test: {
+    domain: 'finance',
+    objective: `Crea uno STRESS TEST BANCARIO 3-year forward completo per banca commerciale "EuroBank" sotto scenari macroeconomici (base/adverse/severely adverse). Fogli (20+):
+
+(1) Macro_Scenarios: GDP growth, Unemployment, Interest rates, Equity index, House prices per scenario per quarter (12 quarter forward).
+(2) Loan_Book: per segment (Corporate / Mortgage / SME / Retail / Consumer): Balance, average rate, NPL ratio, LGD, PD per scenario.
+(3) Interest_Income: per segment per scenario per quarter: rate × avg balance.
+(4) Funding_Cost: deposit base, average cost, wholesale funding, repos.
+(5) Net_Interest_Margin: NII / avg interest earning assets.
+(6) Trading_Book_PnL: market shock scenarios on equity, FX, IR, Credit positions.
+(7) Fees_Commissions: F&C revenue forward.
+(8) Operating_Expenses: staff costs, G&A, D&A, regulatory costs (resolution fund).
+(9) Loan_Loss_Provisions: IFRS 9 staging (S1/S2/S3), ECL per stage per segment per scenario.
+(10) NPL_Forecast: New NPL inflows, cures, write-offs, NPL stock per quarter.
+(11) PnL_Forecast 12Q: NII + F&C + Trading + Other - OpEx - Provisions - Tax = NI.
+(12) Capital_Position: CET1, Tier1, T2, Total Capital each quarter.
+(13) RWA_Build: Credit RWA (per segment), Market RWA, Operational RWA per scenario.
+(14) Capital_Ratios: CET1/RWA, Tier1/RWA, Total Capital/RWA per scenario per quarter.
+(15) Liquidity_Ratios: LCR (HQLA / net outflows), NSFR (stable funding / required), LDR.
+(16) Capital_Actions: Dividend, buyback, rights issue, AT1 issuance.
+(17) Stress_Impact_Summary: Capital depletion vs starting CET1 per scenario.
+(18) Regulatory_Buffers: Pillar 2 buffer, CCB, CCyB, G-SIB, applicable per quarter.
+(19) Sensitivity_CET1: 5x5 GDP shock vs Unemployment shock → CET1 end-period.
+(20) Reverse_Stress_Test: find combination of shocks that breach CET1 minimum (4.5% + buffers).
+(21) Scenario_Summary: KPIs (NI, ROE, CET1, NPL ratio, NIM) per scenario per year.
+(22) Executive_Dashboard: heat map of key ratios vs regulatory minima.
+
+CRITICAL: SOLO FORMULE. Cross-scenario refs use absolute. Provisions linked to PD × LGD × EAD per segment. NIM = NII / interest earning assets. CET1 ratio = CET1 / RWA.`,
+    expect: {
+      sheets: ['Macro_Scenarios', 'Loan_Book', 'Interest_Income', 'Funding_Cost', 'Net_Interest_Margin', 'Trading_Book_PnL', 'Fees_Commissions', 'Operating_Expenses', 'Loan_Loss_Provisions', 'NPL_Forecast', 'PnL_Forecast', 'Capital_Position', 'RWA_Build', 'Capital_Ratios', 'Liquidity_Ratios', 'Capital_Actions', 'Stress_Impact_Summary', 'Sensitivity_CET1', 'Scenario_Summary'],
+      minCells: 2500,
+      minFormulas: 1500,
+      mustHaveFormulas: [/CET1|RWA/i, /NIM|Interest/i, /Provisions|ECL/i],
+    },
+  },
+
   saas_full: {
     domain: 'finance',
     objective: `Crea modello SaaS "DataCloud" cohort-based valuation. Fogli:
