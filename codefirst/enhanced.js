@@ -1522,6 +1522,32 @@ async function enhancedPipeline(objective, context = {}, options = {}) {
     }
   }
 
+  // Phase 4d: Execution-grounded value loop — compute the workbook, let a strong
+  // critic judge the NUMBERS (no domain rules), re-check the planner's own
+  // invariants numerically, patch surgically, re-evaluate. The general quality
+  // mechanism for arbitrary complex tasks. Disable with CF_VALUE_LOOP=0.
+  if (process.env.CF_VALUE_LOOP !== '0') {
+    try {
+      const sheetCount = new Set(codeResult.actions.filter(a => a.sheet).map(a => a.sheet)).size;
+      if (sheetCount >= 4) {
+        if (onProgress) onProgress('reviewing', { message: 'Computing model and reviewing the numbers...' });
+        const { runValueLoop } = require('./valueLoop');
+        const vl = await runValueLoop({
+          actions: codeResult.actions,
+          objective,
+          plan: planResult.plan,
+          modelOverride,
+          maxPasses: Number(process.env.CF_VALUE_LOOP_PASSES) || 2,
+          onProgress,
+        });
+        logger.info(`[Enhanced] ValueLoop: ${vl.passes} passes, ${vl.bugsFound} bugs, ${vl.patchesApplied} patches`);
+        pipeline.valueLoop = vl;
+      }
+    } catch (e) {
+      logger.warn(`[Enhanced] ValueLoop skipped: ${e.message}`);
+    }
+  }
+
   // Phase 5: Structural formula validation. Catches broken cross-sheet refs,
   // self-references, division-by-zero BEFORE Excel sees them.
   const { validateFormulas } = require('./formulaValidator');
