@@ -93,11 +93,41 @@ function buildContextForBug(actions, bugLocation, bugDetail) {
     if (labels.length > 0) upstreamIdx[otherSheet] = labels.slice(0, 30);
   }
 
+  // 4) Computed values around the bug — the fixer reasons far better when it
+  // sees the actual numbers ("interest computes to 0 while debt is 300M"),
+  // not just formula text. Window: ±3 rows, bug column ±2.
+  const computedRows = [];
+  try {
+    const { WorkbookEvaluator } = require('./formulaEval');
+    const ev = new WorkbookEvaluator(actions);
+    const colNum = (c) => { let n = 0; for (const ch of c) n = n * 26 + (ch.charCodeAt(0) - 64); return n; };
+    const numCol = (n) => { let s = ''; while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); } return s; };
+    const bugColN = colNum(m[1]);
+    for (let r = Math.max(1, targetRow - 3); r <= targetRow + 3; r++) {
+      const vals = [];
+      for (let c = Math.max(2, bugColN - 2); c <= bugColN + 2; c++) {
+        const cAddr = `${numCol(c)}${r}`;
+        if (!currentSheet.cells.has(cAddr)) continue;
+        let v;
+        try { v = ev.getCell(`${sheet}!${cAddr}`); } catch (_) { v = '#ERR'; }
+        if (typeof v === 'number' && isFinite(v)) v = Math.abs(v) >= 1e6 ? (v / 1e6).toFixed(2) + 'M' : Number(v.toFixed(4));
+        vals.push(`${cAddr}=${v}`);
+      }
+      if (vals.length > 0) {
+        const label = currentSheet.rowLabels.get(r);
+        computedRows.push(`R${r}${label ? `[${label}]` : ''}: ${vals.join(' ')}`);
+      }
+    }
+  } catch (e) {
+    logger.warn(`[TargetedFixer] Computed context failed: ${e.message}`);
+  }
+
   return {
     sheet,
     addr,
     buggyFormula,
     nearbyRows,
+    computedRows,
     upstreamIdx,
   };
 }
@@ -118,6 +148,9 @@ async function fixOneBug({ bug, actions, modelOverride = null, timeoutMs = 25000
     '## Same-sheet context (rows near the bug):',
     ...ctx.nearbyRows.slice(0, 8),
     '',
+    ...(ctx.computedRows && ctx.computedRows.length > 0
+      ? ['## COMPUTED VALUES around the bug (what the formulas actually evaluate to):', ...ctx.computedRows.slice(0, 8), '']
+      : []),
     '## Upstream sheets (label index for cross-sheet refs):',
     JSON.stringify(ctx.upstreamIdx, null, 2).slice(0, 3000),
     '',

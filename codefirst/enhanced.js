@@ -1265,6 +1265,21 @@ async function enhancedPipeline(objective, context = {}, options = {}) {
     return { status: 'failed', error: 'Code generation failed' };
   }
 
+  // Phase 1b: Plan review gate — pro reviewer validates the plan against the
+  // objective (missing sections/deps/exports/invariants) and patches it via
+  // structured ops before any codegen. Variance at the plan level cascades
+  // hardest, so this is the cheapest place to kill it. Disable with CF_PLAN_REVIEW=0.
+  if (process.env.CF_PLAN_REVIEW !== '0' && (planResult.plan.sections || []).length >= 4) {
+    try {
+      if (onProgress) onProgress('planning', { message: 'Reviewing blueprint for structural gaps...' });
+      const { reviewPlan } = require('./planReview');
+      const pr = await reviewPlan(planResult.plan, objective, { modelOverride });
+      pipeline.planReview = pr;
+    } catch (e) {
+      logger.warn(`[Enhanced] Plan review skipped: ${e.message}`);
+    }
+  }
+
   // Phase 2: Code Generation. Stepwise per-sheet for big plans, single-shot for small.
   const cx = planComplexity(planResult.plan);
   const stepwiseOverride = options.stepwise; // null | true | false
@@ -1542,6 +1557,11 @@ async function enhancedPipeline(objective, context = {}, options = {}) {
         });
         logger.info(`[Enhanced] ValueLoop: ${vl.passes} passes, ${vl.bugsFound} bugs, ${vl.patchesApplied} patches`);
         pipeline.valueLoop = vl;
+        if (vl.patchesApplied > 0) {
+          // Deterministic re-closure: patches may introduce refs past written edges
+          const { snapRefsToEdge } = require('./refRepair');
+          snapRefsToEdge(codeResult.actions);
+        }
       }
     } catch (e) {
       logger.warn(`[Enhanced] ValueLoop skipped: ${e.message}`);
