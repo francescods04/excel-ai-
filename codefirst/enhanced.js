@@ -75,7 +75,7 @@ async function planWorkbook(objective, context, options = {}) {
   const result = await callLLMFn({
     system: systemPrompt,
     userText: userPrompt,
-    timeoutMs: 180000,
+    timeoutMs: Number(process.env.CF_PLANNER_TIMEOUT_MS) || 180000,
     modelOverride: plannerModel,
     role: null,
     thinkingDisabled: true,
@@ -97,7 +97,7 @@ async function planWorkbook(objective, context, options = {}) {
 }
 
 async function generateWithPlan(objective, context, plan, options = {}) {
-  const { callLLMFn = callLLM, modelOverride = null, sliceFocus = null, timeoutMs = 180000, label = 'codefirst_codegen_v3', researchContext = null } = options;
+  const { callLLMFn = callLLM, modelOverride = null, sliceFocus = null, timeoutMs = 180000, label = 'codefirst_codegen_v3', researchContext = null, maxRetries = 2 } = options;
 
   const systemPrompt = loadPrompt('codegen-v3');
   const planSummary = JSON.stringify(plan, null, 2);
@@ -127,49 +127,67 @@ async function generateWithPlan(objective, context, plan, options = {}) {
 
   resetUsageStats();
   const start = Date.now();
+  let lastError = null;
 
-  try {
-    const result = await callLLMFn({
-      system: systemPrompt,
-      userText: userPrompt,
-      timeoutMs,
-      modelOverride,
-      role: null,
-      thinkingDisabled: true,
-      jsonMode: true,
-      label,
-    });
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const result = await callLLMFn({
+        system: systemPrompt,
+        userText: userPrompt,
+        timeoutMs,
+        modelOverride,
+        role: null,
+        thinkingDisabled: true,
+        jsonMode: true,
+        label: attempt === 0 ? label : `${label}_retry${attempt}`,
+      });
 
-    let actions = null;
-    let code = null;
+      let actions = null;
+      let code = null;
 
-    if (result && typeof result === 'object') {
-      if (Array.isArray(result.actions)) {
-        actions = result.actions;
-      } else if (Array.isArray(result)) {
-        actions = result;
+      if (result && typeof result === 'object') {
+        if (Array.isArray(result.actions)) {
+          actions = result.actions;
+        } else if (Array.isArray(result)) {
+          actions = result;
+        }
+        if (result.code && typeof result.code === 'string') code = result.code;
       }
-      if (result.code && typeof result.code === 'string') code = result.code;
+
+      if (!actions && result && typeof result === 'string') {
+        try { const parsed = JSON.parse(result); actions = parsed.actions || parsed; } catch (_) {}
+      }
+
+      const usage = getUsageStats();
+
+      if (!actions || actions.length === 0) {
+        if (attempt < maxRetries - 1) {
+          logger.warn(`[Enhanced] CodeGen attempt ${attempt + 1} returned empty actions, retrying in ${(attempt + 1) * 2000}ms...`);
+          await new Promise(r => setTimeout(r, (attempt + 1) * 2000));
+          continue;
+        }
+      }
+
+      logger.info(`[Enhanced] CodeGen done (${Date.now() - start}ms, attempt ${attempt + 1}): ${actions ? actions.length : 0} actions`);
+
+      return {
+        actions,
+        code,
+        codeTokens: usage,
+        codeTimeMs: Date.now() - start,
+      };
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxRetries - 1) {
+        const delay = (attempt + 1) * 3000;
+        logger.warn(`[Enhanced] CodeGen attempt ${attempt + 1} failed: ${error.message}. Retrying in ${delay}ms...`);
+        await new Promise(r => setTimeout(r, delay));
+      }
     }
-
-    if (!actions && result && typeof result === 'string') {
-      try { const parsed = JSON.parse(result); actions = parsed.actions || parsed; } catch (_) {}
-    }
-
-    const usage = getUsageStats();
-
-    logger.info(`[Enhanced] CodeGen done (${Date.now() - start}ms): ${actions ? actions.length : 0} actions`);
-
-    return {
-      actions,
-      code,
-      codeTokens: usage,
-      codeTimeMs: Date.now() - start,
-    };
-  } catch (error) {
-    logger.error(`[Enhanced] CodeGen failed: ${error.message}`);
-    return { actions: null, error: error.message };
   }
+
+  logger.error(`[Enhanced] CodeGen failed after ${maxRetries} attempts: ${lastError ? lastError.message : 'no actions'}`);
+  return { actions: null, error: lastError ? lastError.message : 'no actions after retries' };
 }
 
 function planComplexity(plan) {
@@ -230,11 +248,12 @@ function detectSilentFailures(sliceResults, { threshold = 5 } = {}) {
 // Build a pre-agreed cell address "contract" from the planner's exported_cells.
 // The planner specifies exact row numbers upfront; all slices use ONLY these addresses.
 // This prevents #REF! even when slices run in full parallel — no guessing needed.
-function buildPreAgreedCellMap(plan) {
+function buildPreAgreedCellMap(plan, sheetFilter = null) {
   if (!plan?.sections) return '';
   const lines = [];
   for (const s of plan.sections) {
     const sheet = s.sheet || 'Sheet1';
+    if (sheetFilter && !sheetFilter.has(sheet)) continue;
     const exported = Array.isArray(s.exported_cells) ? s.exported_cells : [];
     if (exported.length === 0) continue;
     lines.push(`\n=== '${sheet}' ===`);
@@ -274,6 +293,12 @@ const CONCEPT_PATTERNS = {
   equity: /\bequity\s*purchase|equity value/i,
 };
 
+function colToNum(col) {
+  let n = 0;
+  for (const ch of col) n = n * 26 + (ch.charCodeAt(0) - 64);
+  return n;
+}
+
 function extractSymbolMap(sheetName, actions) {
   const lines = [];
   for (const a of actions) {
@@ -285,15 +310,26 @@ function extractSymbolMap(sheetName, actions) {
       rowMap[m[2]][m[1]] = cell;
     }
     for (const row of Object.keys(rowMap).sort((a, b) => Number(a) - Number(b))) {
-      const a1 = rowMap[row].A?.value, b1 = rowMap[row].B?.value;
-      if (typeof a1 !== 'string' || a1.length < 2 || b1 === undefined) continue;
+      const a1 = rowMap[row].A?.value;
+      const bCell = rowMap[row].B;
+      if (typeof a1 !== 'string' || a1.length < 2 || !bCell) continue;
+      // Formula rows (computed lines like EBITDA) must appear in the map too —
+      // downstream sheets reference them. Skipping them made the LLM invent
+      // addresses (observed mega failure class: exit_analysis_wrong_column).
+      const b1 = bCell.value !== undefined ? bCell.value : (bCell.formula ? '(formula)' : undefined);
+      if (b1 === undefined) continue;
       // Try to tag this row with a known concept
       let concept = null;
       for (const [name, pat] of Object.entries(CONCEPT_PATTERNS)) {
         if (pat.test(a1)) { concept = name; break; }
       }
       const tag = concept ? `[@${concept}]` : '';
-      lines.push(`${sheetName}!$B$${row} = "${a1}" ${tag} (val: ${b1})`);
+      // Column extent: time-series rows span B..lastCol. Downstream sheets need the
+      // last period column (exit year, terminal value).
+      const cols = Object.keys(rowMap[row]).filter(c => c !== 'A').sort((x, y) => colToNum(x) - colToNum(y));
+      const lastCol = cols[cols.length - 1];
+      const extent = lastCol && lastCol !== 'B' ? ` [spans B${row}:${lastCol}${row}, last period col ${lastCol}]` : '';
+      lines.push(`${sheetName}!$B$${row} = "${a1}" ${tag} (val: ${b1})${extent}`);
     }
   }
   return lines.join('\n');
@@ -422,7 +458,19 @@ async function generateStepwise(objective, context, plan, options = {}) {
         const gens = Array.from({ length: consensusN }, (_, i) => () => generateWithPlan(
           fullObjective, context, subPlan, { ...callerOpts, label: `${label}_n${i}` }
         ));
-        return consensusGenerate(gens, slice.sheet);
+        const consensusResult = await consensusGenerate(gens, slice.sheet);
+        if (rejectionSamplingOn && consensusResult.actions) {
+          const { judgeAndPick } = require('./consensusGen');
+          const judged = await judgeAndPick(
+            consensusResult.rawResults || [{ actions: consensusResult.actions }],
+            slice.sheet,
+            modelOverride
+          );
+          if (judged && judged.actions) {
+            return { ...consensusResult, actions: judged.actions, judged: true };
+          }
+        }
+        return consensusResult;
       }
       return generateWithPlan(fullObjective, context, subPlan, callerOpts);
     }
@@ -607,15 +655,46 @@ async function generateStepwise(objective, context, plan, options = {}) {
 
   let completedSlices = 0;
   const sliceResults = [];
-  let runtimeCellMapContext = '';
+  const runtimeCellMaps = {};
+  const symbolLayerOn = !!process.env.CF_SYMBOL_LAYER;
+  let runtimeSymbolTables = {};
+  const sensitivityDslOn = !!process.env.CF_SENSITIVITY_DSL;
+  const skeletonFillOn = !!process.env.CF_SKELETON_FILL;
+  const invariantsOn = !!process.env.CF_INVARIANTS;
+  const rejectionSamplingOn = !!process.env.CF_REJECTION_SAMPLING;
 
-  function buildCombinedObjective(base) {
+  // Context diet: each slice only sees RUNTIME maps of sheets it declares it reads
+  // from (plan.cross_sheet_deps[sheet].reads_from) plus its own sheet. The compact
+  // pre-agreed map stays FULL for every slice — planner reads_from lists are often
+  // incomplete, and without an anchor for undeclared sheets the LLM invents
+  // addresses (observed: broken_cell_ref retries). Sheets with no declared deps
+  // get full context (safe fallback). CF_FULL_CONTEXT=1 reverts.
+  function depSheetsFor(sliceSheet) {
+    if (process.env.CF_FULL_CONTEXT) return null;
+    const d = (plan.cross_sheet_deps || {})[sliceSheet];
+    if (!d || !Array.isArray(d.reads_from)) return null;
+    return new Set([...d.reads_from, sliceSheet]);
+  }
+
+  function buildCombinedObjective(base, slice) {
+    const filter = slice ? depSheetsFor(slice.sheet) : null;
     const parts = [];
     if (preAgreedMap) {
       parts.push(`## PRE-AGREED CELL MAP (from plan — use ONLY these exact addresses)\n${preAgreedMap}`);
     }
-    if (runtimeCellMapContext) {
-      parts.push(`## RUNTIME CELL MAP (actual generated addresses from prior layers)\n${runtimeCellMapContext}`);
+    const runtimeEntries = Object.entries(runtimeCellMaps)
+      .filter(([sheet, map]) => map && (!filter || filter.has(sheet)))
+      .map(([sheet, map]) => `=== ${sheet} ===\n${map}`);
+    if (runtimeEntries.length > 0) {
+      parts.push(`## RUNTIME CELL MAP (actual generated addresses from prior layers)\n${runtimeEntries.join('\n\n')}`);
+    }
+    if (symbolLayerOn && Object.keys(runtimeSymbolTables).length > 0) {
+      const { buildSymbolResolutionPrompt } = require('./symbolLayer');
+      const tables = filter
+        ? Object.fromEntries(Object.entries(runtimeSymbolTables).filter(([sheet]) => filter.has(sheet)))
+        : runtimeSymbolTables;
+      const symPrompt = Object.keys(tables).length > 0 ? buildSymbolResolutionPrompt(tables) : '';
+      if (symPrompt) parts.push(symPrompt);
     }
     if (parts.length === 0) return base;
     return `${base}\n\n${parts.join('\n\n')}`;
@@ -639,7 +718,7 @@ async function generateStepwise(objective, context, plan, options = {}) {
             for (const sr of sliceResults) {
               for (const a of (sr.actions || [])) upstreamSnapshot.push(a);
             }
-            const r = await runSlice(slice, globalIdx, buildCombinedObjective(objective), upstreamSnapshot);
+            const r = await runSlice(slice, globalIdx, buildCombinedObjective(objective, slice), upstreamSnapshot);
             layerResults.push(r);
             emitSliceDone(slice, r);
           } catch (e) {
@@ -658,7 +737,7 @@ async function generateStepwise(objective, context, plan, options = {}) {
         const slice = layerSlices[i];
         const globalIdx = slices.indexOf(slice);
         try {
-          const r = await runSlice(slice, globalIdx, buildCombinedObjective(objective));
+          const r = await runSlice(slice, globalIdx, buildCombinedObjective(objective, slice));
           layerResults.push(r);
           emitSliceDone(slice, r);
         } catch (e) {
@@ -677,7 +756,11 @@ async function generateStepwise(objective, context, plan, options = {}) {
       const sheetName = r.slice.sheet;
       const symMap = extractSymbolMap(sheetName, r.actions);
       const map = symMap || extractCellMap(sheetName, r.actions);
-      if (map) runtimeCellMapContext += (runtimeCellMapContext ? '\n\n' : '') + `=== ${sheetName} ===\n${map}`;
+      if (map) runtimeCellMaps[sheetName] = runtimeCellMaps[sheetName] ? `${runtimeCellMaps[sheetName]}\n${map}` : map;
+      if (symbolLayerOn) {
+        const { buildSymbolTable } = require('./symbolLayer');
+        runtimeSymbolTables[sheetName] = buildSymbolTable(sheetName, r.actions);
+      }
     }
   }
 
@@ -692,8 +775,9 @@ async function generateStepwise(objective, context, plan, options = {}) {
   for (let li = 0; li < sheetLayers.length; li++) {
     if (onProgress) onProgress('generating', { message: `Layer ${li + 1}/${sheetLayers.length}: ${sheetLayers[li].join(', ')}` });
     await runLayer(sheetLayers[li]);
-    if (runtimeCellMapContext) {
-      logger.info(`[Enhanced] After layer ${li}: ${runtimeCellMapContext.split('\n').length} runtime map lines`);
+    const mapLineCount = Object.values(runtimeCellMaps).reduce((s, m) => s + m.split('\n').length, 0);
+    if (mapLineCount > 0) {
+      logger.info(`[Enhanced] After layer ${li}: ${mapLineCount} runtime map lines across ${Object.keys(runtimeCellMaps).length} sheets`);
     }
 
     // Deep mode (default): supervise EVERY layer for max quality. Adds ~60s wall
@@ -747,17 +831,62 @@ async function generateStepwise(objective, context, plan, options = {}) {
           }
           logger.info(`[LayerSupervisor] L${li}: ${sup.issues.length} issues, ${appliedTotal} fixes applied (${sup.elapsedMs}ms)`);
           // Re-extract runtime cell map after fixes so next layer sees updated addresses
-          runtimeCellMapContext = '';
+          for (const k of Object.keys(runtimeCellMaps)) delete runtimeCellMaps[k];
           for (const r of sliceResults) {
             if (!r.actions || r.actions.length === 0) continue;
             const map = extractCellMap(r.slice.sheet, r.actions);
-            if (map) runtimeCellMapContext += (runtimeCellMapContext ? '\n\n' : '') + `=== ${r.slice.sheet} ===\n${map}`;
+            if (map) runtimeCellMaps[r.slice.sheet] = runtimeCellMaps[r.slice.sheet] ? `${runtimeCellMaps[r.slice.sheet]}\n${map}` : map;
           }
         } else {
           logger.info(`[LayerSupervisor] L${li}: clean (${sup.elapsedMs}ms)`);
         }
       } catch (e) {
         logger.warn(`[LayerSupervisor] L${li} failed: ${e.message}`);
+      }
+    }
+  }
+
+  // Phase 2 hook: Sensitivity DSL deterministic generation
+  if (sensitivityDslOn) {
+    const { generateSensitivityActions, detectSensitivitySpec } = require('./sensitivityGen');
+    for (const r of sliceResults) {
+      const section = r.slice?.section;
+      if (!section) continue;
+      const isSens = /^Sensitivity/i.test(r.slice.sheet) || !!section.sensitivity_spec;
+      if (isSens && section.sensitivity_spec) {
+        const sensActions = generateSensitivityActions(section, runtimeSymbolTables);
+        if (sensActions) {
+          r.actions = sensActions;
+          logger.info(`[Enhanced] Sensitivity DSL applied for ${r.slice.sheet}`);
+        }
+      } else if (isSens && !section.sensitivity_spec) {
+        const detected = detectSensitivitySpec(r.actions, r.slice.sheet);
+        if (detected && detected.sensitivity_spec) {
+          const sensActions = generateSensitivityActions(detected, runtimeSymbolTables);
+          if (sensActions) {
+            r.actions = sensActions;
+            logger.info(`[Enhanced] Sensitivity DSL fallback applied for ${r.slice.sheet}`);
+          }
+        }
+      }
+    }
+  }
+
+  // Phase 4 hook: Invariant enforcement
+  if (invariantsOn && plan.invariants) {
+    const { checkInvariants, buildInvariantFixes } = require('./invariantChecker');
+    const allActions = [...createActions];
+    for (const r of sliceResults) {
+      for (const a of r.actions || []) allActions.push(a);
+    }
+    const invIssues = checkInvariants(allActions, plan.invariants);
+    if (invIssues.length > 0) {
+      logger.warn(`[Enhanced] Invariant violations: ${invIssues.length}`);
+      const fixes = buildInvariantFixes(allActions, invIssues);
+      if (fixes.length > 0) {
+        for (const fix of fixes) {
+          sliceResults.push({ slice: { sheet: fix.sheet || 'InvariantFix', label: 'invariant_fix' }, actions: [fix], error: null });
+        }
       }
     }
   }
@@ -1269,15 +1398,19 @@ async function enhancedPipeline(objective, context = {}, options = {}) {
   {
     const { applyAutoFixes } = require('./semanticAutoFix');
     const { repairRefs } = require('./refRepair');
-    const { autoFixIRRArrayLiterals } = require('./financeLint');
+    const { autoFixIRRArrayLiterals, autoFixTaxMax, autoFixDebtEndingInterest } = require('./financeLint');
     // Run ref repair FIRST so subsequent fills propagate correct refs.
     const refsFixed = repairRefs(codeResult.actions);
     const irrFixed = autoFixIRRArrayLiterals(codeResult.actions);
+    const taxFixed = autoFixTaxMax(codeResult.actions);
+    const debtFixed = autoFixDebtEndingInterest(codeResult.actions);
     const autoStats = applyAutoFixes(codeResult.actions);
     autoStats.refsRepaired = refsFixed;
     autoStats.irrArrayFixed = irrFixed;
-    if (autoStats.mixCellsNormalized + autoStats.timeSeriesCellsAdded + refsFixed + irrFixed > 0) {
-      logger.info(`[Enhanced] AutoFix: ${refsFixed} refs, ${irrFixed} IRR/NPV arrays, ${autoStats.mixCellsNormalized} Mix, ${autoStats.timeSeriesCellsAdded} time-series filled`);
+    autoStats.taxMaxFixed = taxFixed;
+    autoStats.debtInterestFixed = debtFixed;
+    if (autoStats.mixCellsNormalized + autoStats.timeSeriesCellsAdded + refsFixed + irrFixed + taxFixed + debtFixed > 0) {
+      logger.info(`[Enhanced] AutoFix: ${refsFixed} refs, ${irrFixed} IRR/NPV arrays, ${taxFixed} tax MAX, ${debtFixed} debt interest, ${autoStats.mixCellsNormalized} Mix, ${autoStats.timeSeriesCellsAdded} time-series filled`);
     }
     pipeline.autoFix = autoStats;
   }
