@@ -60,4 +60,17 @@ function cells(sheet, spec) {
   assert.ok(snap.includes('#ERR') || snap.includes('#NOEVAL'), `error marker rendered: ${snap}`);
 }
 
+// --- targeted fixer rejects self-referencing patches ---
+{
+  const { applyPatches } = require('../../codefirst/targetedFixer');
+  const actions = [cells('Debt', { C4: { formula: '=B4*2' } })];
+  const applied = applyPatches(actions, [
+    { sheet: 'Debt', addr: 'C4', formula: '=IF(COLUMN()=3, 100, OFFSET(C4,0,-1))' }, // self-ref → reject
+    { sheet: 'Debt', addr: 'C4', formula: '=Debt!$C$4+1' },                          // qualified self-ref → reject
+    { sheet: 'Debt', addr: 'C4', formula: '=B4*3' },                                 // clean → apply
+  ]);
+  assert.strictEqual(applied, 1, `only the clean patch applies, got ${applied}`);
+  assert.strictEqual(actions[0].cells.C4.formula, '=B4*3');
+}
+
 console.log('[test_valueLoop] All tests passed');

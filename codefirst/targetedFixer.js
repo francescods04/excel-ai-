@@ -154,12 +154,24 @@ async function fixOneBug({ bug, actions, modelOverride = null, timeoutMs = 25000
   }
 }
 
+// A patch that references its own cell creates an Excel circular reference —
+// the fixer occasionally invents OFFSET(self,...) patterns that look clever but
+// break the workbook (observed: 47 self_reference criticals from one pass).
+function patchIsSelfReferencing(patch) {
+  const refs = extractCellRefs(patch.formula);
+  return refs.some(r => (!r.sheet || r.sheet === patch.sheet) && r.addr === patch.addr);
+}
+
 // Apply patches to actions array. Returns count applied.
 function applyPatches(actions, patches) {
   if (!patches || patches.length === 0) return 0;
   let applied = 0;
   for (const patch of patches) {
     if (!patch || !patch.sheet || !patch.addr || !patch.formula) continue;
+    if (patchIsSelfReferencing(patch)) {
+      logger.warn(`[TargetedFixer] Rejected self-referencing patch at ${patch.sheet}!${patch.addr}: ${patch.formula.slice(0, 80)}`);
+      continue;
+    }
     // Find existing setCellRange action that touches this address
     let found = false;
     for (const a of actions) {
@@ -219,7 +231,55 @@ async function dispatchTargetedFixes({ bugs, actions, modelOverride = null, maxC
   await Promise.all(Array.from({ length: Math.min(maxConcurrency, target.length) }, () => worker()));
 
   const patches = results.filter(r => r.patch).map(r => r.patch);
-  const applied = applyPatches(actions, patches);
+
+  // Verify-then-keep, like a coding agent running tests after an edit:
+  // snapshot the patched cells, apply, re-validate; any patch whose cell now
+  // raises a NEW critical gets rolled back to the original formula/value.
+  const { validateFormulas } = require('./formulaValidator');
+  const preCriticals = new Set(
+    validateFormulas(actions).filter(i => i.severity === 'critical').map(i => i.location)
+  );
+  const originals = new Map();
+  for (const p of patches) {
+    for (const a of actions) {
+      if (a.type !== 'setCellRange' || !a.cells) continue;
+      if ((a.sheet || a.sheetName) !== p.sheet) continue;
+      if (a.cells[p.addr] !== undefined) {
+        const cur = a.cells[p.addr];
+        originals.set(`${p.sheet}!${p.addr}`, typeof cur === 'object' ? { ...cur } : { value: cur });
+        break;
+      }
+    }
+  }
+
+  let applied = applyPatches(actions, patches);
+
+  let reverted = 0;
+  if (applied > 0) {
+    const postCriticals = validateFormulas(actions).filter(i => i.severity === 'critical').map(i => i.location);
+    const newCriticals = new Set(postCriticals.filter(l => !preCriticals.has(l)));
+    if (newCriticals.size > 0) {
+      for (const p of patches) {
+        const loc = `${p.sheet}!${p.addr}`;
+        if (!newCriticals.has(loc)) continue;
+        const orig = originals.get(loc);
+        for (const a of actions) {
+          if (a.type !== 'setCellRange' || !a.cells) continue;
+          if ((a.sheet || a.sheetName) !== p.sheet) continue;
+          if (a.cells[p.addr] !== undefined) {
+            a.cells[p.addr] = orig !== undefined ? orig : { value: 0 };
+            reverted++;
+            break;
+          }
+        }
+      }
+      if (reverted > 0) {
+        applied -= reverted;
+        logger.warn(`[TargetedFixer] Rolled back ${reverted} patches that introduced new critical issues`);
+      }
+    }
+  }
+
   const skipped = results.filter(r => r.skipped).length;
   const tokens = results.reduce((acc, r) => {
     if (!r.tokens) return acc;
