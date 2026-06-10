@@ -147,4 +147,73 @@ function repairRefs(actions) {
   return fixed;
 }
 
-module.exports = { repairRefs, buildLabelMap, buildConceptIndex, groupOf };
+function colToNum(col) {
+  let n = 0;
+  for (const ch of col) n = n * 26 + (ch.charCodeAt(0) - 64);
+  return n;
+}
+
+function numToCol(n) {
+  let s = '';
+  while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); }
+  return s;
+}
+
+// Snap cross-sheet refs that point past the actual written edge of a series row
+// back to the last written column. The LLM trusts the plan's promised extent
+// (e.g. Operating_Model B4:Y4) but the upstream slice may have written fewer
+// columns — refs like Operating_Model!X4 then land on empty cells and get
+// stubbed to 0, silently corrupting IRR/exit math. Runs BEFORE the zero-stub pass.
+function snapRefsToEdge(actions) {
+  // Index: sheet → row → set of col numbers written
+  const rowCols = {};
+  for (const a of actions) {
+    if (a.type !== 'setCellRange' || !a.cells) continue;
+    const sh = a.sheet || a.sheetName || 'Sheet1';
+    if (!rowCols[sh]) rowCols[sh] = {};
+    for (const addr of Object.keys(a.cells)) {
+      const m = addr.match(/^([A-Z]+)(\d+)$/); if (!m) continue;
+      const row = Number(m[2]);
+      if (!rowCols[sh][row]) rowCols[sh][row] = new Set();
+      rowCols[sh][row].add(colToNum(m[1]));
+    }
+  }
+
+  let snapped = 0;
+  const refRe = /(?:'([^']+)'|([A-Za-z_][A-Za-z0-9_]*))!(\$?)([A-Z]+)(\$?)(\d+)/g;
+
+  for (const a of actions) {
+    if (a.type !== 'setCellRange' || !a.cells) continue;
+    const localSheet = a.sheet || a.sheetName || 'Sheet1';
+    for (const spec of Object.values(a.cells)) {
+      if (!spec || typeof spec !== 'object' || !spec.formula) continue;
+      let changed = false;
+      const newFormula = spec.formula.replace(refRe, (match, qsheet, usheet, d1, col, d2, row) => {
+        const targetSheet = (qsheet || usheet || '').trim();
+        if (targetSheet === localSheet) return match;
+        const rows = rowCols[targetSheet];
+        if (!rows) return match;
+        const written = rows[Number(row)];
+        const refCol = colToNum(col);
+        if (written && written.has(refCol)) return match; // target exists — fine
+        if (!written) return match;                       // whole row missing — not a column problem
+        const seriesCols = [...written].filter(c => c >= 2);
+        if (seriesCols.length < 3) return match;          // not a series row — don't guess
+        const maxWritten = Math.max(...seriesCols);
+        if (refCol <= maxWritten) return match;           // gap inside the row — stub pass handles it
+        changed = true;
+        return match.replace(`${d1}${col}${d2}${row}`, `${d1}${numToCol(maxWritten)}${d2}${row}`);
+      });
+      if (changed) {
+        spec.formula = newFormula;
+        snapped++;
+      }
+    }
+  }
+  if (snapped > 0) {
+    logger.info(`[RefRepair] Snapped ${snapped} formulas with past-the-edge refs to last written column`);
+  }
+  return snapped;
+}
+
+module.exports = { repairRefs, buildLabelMap, buildConceptIndex, groupOf, snapRefsToEdge };

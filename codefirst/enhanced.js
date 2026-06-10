@@ -510,9 +510,12 @@ async function generateStepwise(objective, context, plan, options = {}) {
     // Decide whether to use agentic loop. Default ON; disable with CF_DISABLE_SLICE_LOOP.
     const sliceLoopOn = !process.env.CF_DISABLE_SLICE_LOOP;
     // Huge slices (>250 cells, like 60-month P&L): the LLM can't reliably fix 60-cell
-    // refs in 2 iterations. Skip loop, fall through to single-shot + autofix downstream.
-    const maxIterations = slice.estCells > 250 ? 1
-      : (process.env.CF_SLICE_MAX_ITER ? Number(process.env.CF_SLICE_MAX_ITER) : 2);
+    // refs in 2 iterations — but density-contract violations (row stops short of the
+    // promised column extent) DO fix reliably with a precise instruction, and they're
+    // the dominant mega bug. So big slices get a retry restricted to those kinds.
+    const isHugeSlice = slice.estCells > 250;
+    const maxIterations = process.env.CF_SLICE_MAX_ITER ? Number(process.env.CF_SLICE_MAX_ITER) : 2;
+    const retryOnlyKinds = isHugeSlice ? ['density_contract', 'silent_slice', 'empty_output'] : null;
 
     if (sliceLoopOn) {
       // AI reviewer: experimental peer-review LLM. Adds quality on simple scenarios
@@ -535,6 +538,7 @@ async function generateStepwise(objective, context, plan, options = {}) {
         expectedMinCells: Math.max(10, Math.floor(slice.estCells * 0.5)),
         aiReviewerEnabled,
         aiReviewerModel,
+        retryOnlyKinds,
       });
       if (loopResult.totals) {
         totals.promptTokens += loopResult.totals.promptTokens || 0;
@@ -1397,20 +1401,23 @@ async function enhancedPipeline(objective, context = {}, options = {}) {
   // Phase 4b2: Deterministic auto-fixes — Mix% normalization, time-series column auto-fill, label-aware ref repair.
   {
     const { applyAutoFixes } = require('./semanticAutoFix');
-    const { repairRefs } = require('./refRepair');
+    const { repairRefs, snapRefsToEdge } = require('./refRepair');
     const { autoFixIRRArrayLiterals, autoFixTaxMax, autoFixDebtEndingInterest } = require('./financeLint');
     // Run ref repair FIRST so subsequent fills propagate correct refs.
     const refsFixed = repairRefs(codeResult.actions);
+    // Snap past-the-edge series refs BEFORE the zero-stub pass would hide them.
+    const refsSnapped = snapRefsToEdge(codeResult.actions);
     const irrFixed = autoFixIRRArrayLiterals(codeResult.actions);
     const taxFixed = autoFixTaxMax(codeResult.actions);
     const debtFixed = autoFixDebtEndingInterest(codeResult.actions);
     const autoStats = applyAutoFixes(codeResult.actions);
     autoStats.refsRepaired = refsFixed;
+    autoStats.refsSnapped = refsSnapped;
     autoStats.irrArrayFixed = irrFixed;
     autoStats.taxMaxFixed = taxFixed;
     autoStats.debtInterestFixed = debtFixed;
-    if (autoStats.mixCellsNormalized + autoStats.timeSeriesCellsAdded + refsFixed + irrFixed + taxFixed + debtFixed > 0) {
-      logger.info(`[Enhanced] AutoFix: ${refsFixed} refs, ${irrFixed} IRR/NPV arrays, ${taxFixed} tax MAX, ${debtFixed} debt interest, ${autoStats.mixCellsNormalized} Mix, ${autoStats.timeSeriesCellsAdded} time-series filled`);
+    if (autoStats.mixCellsNormalized + autoStats.timeSeriesCellsAdded + refsFixed + refsSnapped + irrFixed + taxFixed + debtFixed > 0) {
+      logger.info(`[Enhanced] AutoFix: ${refsFixed} refs, ${refsSnapped} edge-snapped, ${irrFixed} IRR/NPV arrays, ${taxFixed} tax MAX, ${debtFixed} debt interest, ${autoStats.mixCellsNormalized} Mix, ${autoStats.timeSeriesCellsAdded} time-series filled`);
     }
     pipeline.autoFix = autoStats;
   }

@@ -15,9 +15,95 @@ const { validateCellDeps, indexCells, extractCellRefs } = require('./cellDepVali
 
 const { runFinanceLints } = require('./financeLint');
 
-// Quick local validator that runs on JUST this slice's output, given upstream snapshot.
-function validateSliceActions(sliceActions, upstreamActions = [], expectedSheet = null) {
+function colToNum(col) {
+  let n = 0;
+  for (const ch of col) n = n * 26 + (ch.charCodeAt(0) - 64);
+  return n;
+}
+
+function numToCol(n) {
+  let s = '';
+  while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); }
+  return s;
+}
+
+// Density contract: the plan promises per-row column extents (exported_cells ranges
+// like "B4:Y4 = EBITDA", or is_time_series with periods=N). Downstream sheets TRUST
+// those extents — if the slice writes fewer columns, downstream formulas land on
+// empty cells (dominant mega-scenario bug class). Enforce the contract here so the
+// slice loop retries with a precise "extend row X through col Y" instruction.
+function checkDensityContract(sliceActions, sliceSection, expectedSheet) {
   const issues = [];
+  if (!sliceSection || !expectedSheet) return issues;
+
+  // Index actual written cells: per row → set of col numbers
+  const rowCols = {};
+  for (const a of sliceActions) {
+    if (a.type !== 'setCellRange' || !a.cells) continue;
+    if (a.sheet && a.sheet !== expectedSheet) continue;
+    for (const addr of Object.keys(a.cells)) {
+      const m = addr.match(/^([A-Z]+)(\d+)$/); if (!m) continue;
+      const row = Number(m[2]);
+      if (!rowCols[row]) rowCols[row] = new Set();
+      rowCols[row].add(colToNum(m[1]));
+    }
+  }
+
+  // 1. Exported-cells range contracts (hard promises other sheets rely on)
+  const exported = Array.isArray(sliceSection.exported_cells) ? sliceSection.exported_cells : [];
+  for (const e of exported) {
+    if (typeof e !== 'string') continue;
+    const m = e.match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)/);
+    if (!m || m[2] !== m[4]) continue; // single-row ranges only
+    const row = Number(m[2]);
+    const startCol = colToNum(m[1]);
+    const endCol = colToNum(m[3]);
+    if (endCol - startCol < 2) continue;
+    const written = rowCols[row];
+    if (!written || written.size === 0) continue; // row entirely missing → other checks
+    const maxWritten = Math.max(...written);
+    if (maxWritten < endCol) {
+      issues.push({
+        severity: 'critical',
+        kind: 'density_contract',
+        location: `${expectedSheet}!${m[1]}${row}`,
+        detail: `plan exports range ${e.slice(0, 60)} but row ${row} is only written through col ${numToCol(maxWritten)}. Other sheets WILL reference up to col ${m[3]}. Write EVERY column ${m[1]}..${m[3]} on row ${row}.`,
+      });
+    }
+  }
+
+  // 2. Time-series period contract: rows that look like series (>=3 period cells)
+  //    must reach the declared period count.
+  const periods = Number(sliceSection.periods) || 0;
+  if (sliceSection.is_time_series && periods >= 4) {
+    const expectedEnd = 1 + periods; // B=2 is period 1 → last period col = 1+periods
+    const flagged = issues.length;
+    for (const [row, cols] of Object.entries(rowCols)) {
+      const periodCols = [...cols].filter(c => c >= 2);
+      if (periodCols.length < 3) continue; // single-value/label rows are fine
+      const maxWritten = Math.max(...periodCols);
+      // Tolerate one missing trailing col (totals layouts vary)
+      if (maxWritten < expectedEnd - 1 && !issues.some(i => i.location === `${expectedSheet}!B${row}` || i.location.endsWith(`${row}`))) {
+        issues.push({
+          severity: 'high',
+          kind: 'density_contract',
+          location: `${expectedSheet}!B${row}`,
+          detail: `series row ${row} stops at col ${numToCol(maxWritten)} but section declares ${periods} periods (through col ${numToCol(expectedEnd)}). Fill the row through col ${numToCol(expectedEnd)}.`,
+        });
+      }
+      if (issues.length - flagged >= 8) break; // cap prompt noise
+    }
+  }
+
+  return issues;
+}
+
+// Quick local validator that runs on JUST this slice's output, given upstream snapshot.
+function validateSliceActions(sliceActions, upstreamActions = [], expectedSheet = null, sliceSection = null) {
+  const issues = [];
+
+  // 0a. Density contract vs plan promises (exported ranges, declared periods)
+  issues.push(...checkDensityContract(sliceActions, sliceSection, expectedSheet));
 
   // 0. Finance-specific lints (sensitivity grid, IRR array literal, period mismatch, semantic labels)
   const lintIssues = runFinanceLints(sliceActions);
@@ -119,6 +205,7 @@ async function runSliceLoop({
   expectedMinCells = 10,
   aiReviewerEnabled = false,
   aiReviewerModel = null,
+  retryOnlyKinds = null,  // if set, iterations past the first only happen for these issue kinds
 }) {
   const totals = { promptTokens: 0, completionTokens: 0, calls: 0 };
   let totalMs = 0;
@@ -133,6 +220,13 @@ async function runSliceLoop({
   const upstreamLabels = aiReviewer ? buildUpstreamLabelsForReview(upstreamActions) : null;
 
   for (let iter = 0; iter < maxIterations; iter++) {
+    if (iter > 0 && Array.isArray(retryOnlyKinds)) {
+      const worthRetry = lastIssues.some(i => retryOnlyKinds.includes(i.kind));
+      if (!worthRetry) {
+        logger.info(`[SliceLoop] ${sliceLabel} skipping retry — no ${retryOnlyKinds.join('/')} issues`);
+        break;
+      }
+    }
     let extraInstructions = '';
     if (iter > 0 && lastIssues.length > 0) {
       // Cap to top 5 to avoid overwhelming the generator — too many issues = it gives up
@@ -156,7 +250,7 @@ async function runSliceLoop({
       continue;
     }
     // Deterministic validator (cell-dep, density, etc.)
-    const detIssues = validateSliceActions(actions, upstreamActions, sliceSheet);
+    const detIssues = validateSliceActions(actions, upstreamActions, sliceSheet, sliceSection);
     const detCritical = detIssues.filter(i => i.severity === 'critical');
     const detHigh = detIssues.filter(i => i.severity === 'high');
 
@@ -212,7 +306,9 @@ async function runSliceLoop({
     }
 
     logger.info(`[SliceLoop] ${sliceLabel} iter ${iter + 1}: ${allCritical} critical (${detCritical.length} det + ${aiCritical.length} ai), ${allHigh} high — retrying (best score so far: ${bestScore.toFixed(1)})`);
-    lastIssues = [...detCritical, ...aiCritical, ...detHigh, ...aiHigh];
+    lastIssues = [...detCritical, ...aiCritical, ...detHigh, ...aiHigh]
+      // density_contract first: the fix instruction is precise and high-yield
+      .sort((a, b) => (b.kind === 'density_contract') - (a.kind === 'density_contract'));
   }
 
   logger.info(`[SliceLoop] ${sliceLabel} max iter reached — keeping best (score ${bestScore.toFixed(1)}, ${bestIssueCount} issues)`);
