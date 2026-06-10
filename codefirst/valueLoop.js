@@ -118,28 +118,41 @@ Return ONLY JSON:
 Return {"issues":[]} if the numbers look coherent. Max 12 issues, most severe first.`;
 
 async function valueCritic({ snapshot, objective, modelOverride = null, timeoutMs = 90000 }) {
+  const MAX_SNAPSHOT_CHARS = 60000;
   const userText = [
     '## What the model was asked to build',
     String(objective || '').slice(0, 1500),
     '',
     '## COMPUTED VALUES (whole workbook, labeled rows)',
-    snapshot,
+    snapshot.length > MAX_SNAPSHOT_CHARS ? snapshot.slice(0, MAX_SNAPSHOT_CHARS) + '\n…(truncated)' : snapshot,
     '',
     'Review the numbers. Return JSON only.',
   ].join('\n');
 
   resetUsageStats();
   const start = Date.now();
-  const result = await callLLM({
-    system: CRITIC_SYSTEM,
-    userText,
-    timeoutMs,
-    modelOverride: modelOverride || MODEL_TIERS.pro,
-    role: null,
-    thinkingDisabled: true,
-    jsonMode: true,
-    label: 'cf_value_critic',
-  });
+  let result = null;
+  let lastErr = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      result = await callLLM({
+        system: CRITIC_SYSTEM,
+        userText,
+        timeoutMs,
+        modelOverride: modelOverride || MODEL_TIERS.pro,
+        role: null,
+        thinkingDisabled: true,
+        jsonMode: true,
+        label: attempt === 0 ? 'cf_value_critic' : 'cf_value_critic_retry',
+      });
+      break;
+    } catch (e) {
+      lastErr = e;
+      logger.warn(`[ValueLoop] Critic attempt ${attempt + 1} failed: ${e.message}`);
+      await new Promise(r => setTimeout(r, 3000));
+    }
+  }
+  if (!result) throw lastErr || new Error('value critic failed');
   const tokens = getUsageStats();
   const issues = (result && Array.isArray(result.issues)) ? result.issues : [];
   const valid = issues.filter(i => i && typeof i.location === 'string' && /^[^!]+![A-Z]+\d+$/.test(i.location) && i.detail);
