@@ -307,6 +307,291 @@ function lintMissingSheets(allSheets, expectedSheets) {
   return issues;
 }
 
+// L11: Tax formula on potentially negative base — needs MAX(...,0).
+// Heuristic: any row labeled with tax/imposte that contains a multiplication
+// of a P&L-like cell ref (likely EBT) by a rate cell ref, missing MAX, gets flagged.
+function lintTaxNoMaxGuard(sheetName, sheetData) {
+  const issues = [];
+  for (const [addr, cell] of sheetData.cells) {
+    if (!cell.formula) continue;
+    const p = splitAddr(addr); if (!p) continue;
+    const localLabel = sheetData.rowLabels.get(p.row);
+    if (!localLabel) continue;
+    if (!/\btax(es)?\b|income tax|imposte|tax expense|tax provision/i.test(localLabel)) continue;
+    if (/tax rate|aliquota/i.test(localLabel)) continue; // skip the rate row itself
+    // Multiplication of two refs without MAX, IF, or IFERROR guard
+    const hasMul = /\*/.test(cell.formula);
+    const hasGuard = /\bMAX\s*\(|\bIF\s*\(|\bIFERROR\s*\(/i.test(cell.formula);
+    const refCount = (cell.formula.match(/\$?[A-Z]+\$?\d+/g) || []).length;
+    if (hasMul && !hasGuard && refCount >= 2) {
+      issues.push({
+        severity: 'high',
+        kind: 'tax_no_max_guard',
+        location: `${sheetName}!${addr}`,
+        detail: `Tax row "${localLabel}" formula "${cell.formula.slice(0,80)}" multiplies a P&L base by a rate without MAX(...,0). Negative pretax produces a negative tax (a credit) — institutional models wrap the base in MAX(EBT,0).`,
+      });
+    }
+  }
+  return issues;
+}
+
+// L12: Debt schedule ending balance is flat across periods (Bal_t = Bal_{t-1}).
+// Flat is correct for a true bullet, but the audit penalises absence of an
+// explicit "Principal Repayment" or "Amortization" row when leverage > 0.
+// Flag only when the sheet has a balance row but NO matching amort row.
+function lintDebtScheduleAmort(sheetName, sheetData) {
+  const issues = [];
+  if (!/debt[_ ]?schedule|debt[_ ]?roll/i.test(sheetName)) return issues;
+  let balanceRows = [];
+  let amortRows = 0;
+  let repayRows = 0;
+  for (const [row, label] of sheetData.rowLabels) {
+    const l = label.toLowerCase();
+    if (/balance|outstanding|principal\s*end|ending/i.test(l)) balanceRows.push(row);
+    if (/\bamort|principal\s*(repay|payment)|scheduled\s*repay/i.test(l)) amortRows++;
+    if (/cash\s*sweep|optional\s*prepay|prepayment|repayment\s*at\s*exit|bullet\s*repay/i.test(l)) repayRows++;
+  }
+  if (balanceRows.length > 0 && amortRows === 0 && repayRows === 0) {
+    issues.push({
+      severity: 'high',
+      kind: 'debt_schedule_no_amort_row',
+      location: sheetName,
+      detail: `Debt schedule has ${balanceRows.length} balance row(s) but no Amortization / Cash Sweep / Repayment-at-Exit row. Even bullet structures need a final-period repayment row so the audit can verify the debt unwinds at exit.`,
+    });
+  }
+  return issues;
+}
+
+// L12: PnL — EBITDA formula subtracts D&A (D&A must be BELOW EBITDA, not in it)
+function lintPnLEBITDA(sheetName, sheetData) {
+  const issues = [];
+  if (!/pnl|p&l|income|profit.*loss|conto.*econom/i.test(sheetName)) return issues;
+  let ebitdaRow = null;
+  for (const [row, label] of sheetData.rowLabels) {
+    if (/\bebitda\b/i.test(label)) { ebitdaRow = row; break; }
+  }
+  if (!ebitdaRow) return issues;
+  for (const [addr, cell] of sheetData.cells) {
+    const p = splitAddr(addr); if (!p || p.row !== ebitdaRow) continue;
+    if (!cell.formula) continue;
+    if (/d&a|depreciation|amortization|ammortament/i.test(cell.formula)) {
+      issues.push({
+        severity: 'critical',
+        kind: 'pnl_ebitda_minus_dna',
+        location: `${sheetName}!${addr}`,
+        detail: `EBITDA formula "${cell.formula.slice(0,100)}" contains D&A subtraction. EBITDA = Gross Profit - OpEx. D&A is a SEPARATE line below EBITDA. EBIT = EBITDA - D&A.`,
+      });
+    }
+  }
+  return issues;
+}
+
+// L13: PnL — EBIT formula subtracts Capex (Capex is NOT a PnL expense)
+function lintPnLEBIT(sheetName, sheetData) {
+  const issues = [];
+  if (!/pnl|p&l|income|profit.*loss|conto.*econom/i.test(sheetName)) return issues;
+  let ebitRow = null;
+  for (const [row, label] of sheetData.rowLabels) {
+    if (/\bebit\b/i.test(label) && !/ebitda/i.test(label)) { ebitRow = row; break; }
+  }
+  if (!ebitRow) return issues;
+  for (const [addr, cell] of sheetData.cells) {
+    const p = splitAddr(addr); if (!p || p.row !== ebitRow) continue;
+    if (!cell.formula) continue;
+    if (/capex|capital expenditure|investiment/i.test(cell.formula)) {
+      issues.push({
+        severity: 'critical',
+        kind: 'pnl_ebit_minus_capex',
+        location: `${sheetName}!${addr}`,
+        detail: `EBIT formula "${cell.formula.slice(0,100)}" contains Capex. Capex is a Cash Flow / Balance Sheet item, NEVER a PnL expense. EBIT = EBITDA - D&A.`,
+      });
+    }
+  }
+  return issues;
+}
+
+// L14: Debt Schedule — Ending Balance includes Interest Expense cash (only PIK capitalizes)
+function lintDebtEndingInterest(sheetName, sheetData) {
+  const issues = [];
+  if (!/debt[_ ]?schedule|debt[_ ]?roll/i.test(sheetName)) return issues;
+  // Find ending balance rows
+  let endingRows = [];
+  for (const [row, label] of sheetData.rowLabels) {
+    if (/ending balance|end balance|principal end/i.test(label.toLowerCase())) endingRows.push(row);
+  }
+  if (endingRows.length === 0) return issues;
+  // Find interest expense rows
+  let interestRows = [];
+  for (const [row, label] of sheetData.rowLabels) {
+    if (/interest expense|interest.*cash|cash interest/i.test(label.toLowerCase())) interestRows.push(row);
+  }
+  for (const endRow of endingRows) {
+    let firstBadCell = null;
+    let badCount = 0;
+    for (const [addr, cell] of sheetData.cells) {
+      const p = splitAddr(addr); if (!p || p.row !== endRow) continue;
+      if (!cell.formula) continue;
+      // Check if formula references an interest expense row in the SAME sheet
+      const hasInterestRef = interestRows.some(ir => {
+        const refPat = new RegExp(`[A-Z]+${ir}\\b`, 'i');
+        return refPat.test(cell.formula);
+      });
+      if (hasInterestRef) {
+        badCount++;
+        if (!firstBadCell) firstBadCell = { addr, formula: cell.formula };
+      }
+    }
+    if (badCount > 0 && firstBadCell) {
+      const label = sheetData.rowLabels.get(endRow) || 'Ending Balance';
+      issues.push({
+        severity: 'critical',
+        kind: 'debt_ending_includes_interest_cash',
+        location: `${sheetName}!${firstBadCell.addr}`,
+        detail: `${label} row has ${badCount} cells referencing Interest Expense cash (e.g. ${firstBadCell.addr}: "${firstBadCell.formula.slice(0,100)}"). Interest Expense is a PnL/CF cost — it does NOT capitalize into principal. Only PIK interest adds to principal. FIX: replace "+InterestExpenseCell" with nothing. Ending Balance = Beginning + PIK - Repayment.`,
+      });
+    }
+  }
+  return issues;
+}
+
+// L15+L16+L17: Balance Sheet — Cash/PP&E/Equity must be cumulative
+function lintBalanceSheetCumulative(sheetName, sheetData) {
+  const issues = [];
+  if (!/balance.?sheet|bs|stato.?patrimon/i.test(sheetName)) return issues;
+  const rowsToCheck = [
+    { pat: /\bcash\b/i, name: 'Cash', reason: 'Cash must be cumulative = previous Cash + Net Cash Flow. Not period-only flow.' },
+    { pat: /pp&e|property|plant|equipment|fixed assets?/i, name: 'PP&E', reason: 'PP&E must be cumulative = previous PP&E + Capex - D&A. Not Capex/4.' },
+    { pat: /\bequity\b/i, name: 'Equity', reason: 'Equity must grow with retained earnings = previous Equity + Net Income. Not static source value.' },
+  ];
+  for (const { pat, name, reason } of rowsToCheck) {
+    let targetRow = null;
+    for (const [row, label] of sheetData.rowLabels) {
+      if (pat.test(label)) { targetRow = row; break; }
+    }
+    if (!targetRow) continue;
+    let firstBadCell = null;
+    let badCount = 0;
+    let badKind = null;
+    for (const [addr, cell] of sheetData.cells) {
+      const p = splitAddr(addr); if (!p || p.row !== targetRow) continue;
+      if (!cell.formula) {
+        if (p.col !== 'A') {
+          badCount++;
+          if (!firstBadCell) { firstBadCell = { addr, formula: '(static value)' }; badKind = 'bs_row_static'; }
+        }
+        continue;
+      }
+      const f = cell.formula;
+      if (name === 'Cash') {
+        const hasPrevRef = new RegExp(`['"]${sheetName}['"]?![A-Z]+${targetRow}`, 'i').test(f) || /[A-Z]+\d+\s*[+\-]/.test(f);
+        if (!hasPrevRef && !/sum|cumul/i.test(f)) {
+          badCount++;
+          if (!firstBadCell) { firstBadCell = { addr, formula: f }; badKind = 'bs_cash_not_cumulative'; }
+        }
+      }
+      if (name === 'PP&E') {
+        const hasPrevPPE = new RegExp(`['"]${sheetName}['"]?![A-Z]+${targetRow}`, 'i').test(f) || /[A-Z]+\d+\s*[+\-]/.test(f);
+        if (!hasPrevPPE) {
+          badCount++;
+          if (!firstBadCell) { firstBadCell = { addr, formula: f }; badKind = 'bs_ppe_not_cumulative'; }
+        }
+      }
+      if (name === 'Equity') {
+        const hasNI = /net income|ni|pnl|p&l|income statement/i.test(f);
+        const hasPrev = new RegExp(`['"]${sheetName}['"]?![A-Z]+${targetRow}`, 'i').test(f) || /[A-Z]+\d+\s*[+\-]/.test(f);
+        if (!hasNI && !hasPrev) {
+          badCount++;
+          if (!firstBadCell) { firstBadCell = { addr, formula: f }; badKind = 'bs_equity_static'; }
+        }
+      }
+    }
+    if (badCount > 0 && firstBadCell) {
+      issues.push({
+        severity: 'high',
+        kind: badKind,
+        location: `${sheetName}!${firstBadCell.addr}`,
+        detail: `${name} row has ${badCount} cells that are not cumulative/static (e.g. ${firstBadCell.addr}: "${firstBadCell.formula.slice(0,80)}"). ${reason}`,
+      });
+    }
+  }
+  return issues;
+}
+
+// L18: Returns — IRR must include initial negative equity outflow
+function lintIRRStructure(sheetName, sheetData) {
+  const issues = [];
+  if (!/return|irr|moic|sponsor/i.test(sheetName)) return issues;
+  for (const [addr, cell] of sheetData.cells) {
+    if (!cell.formula) continue;
+    const m = cell.formula.match(/=\s*(IRR|XIRR)\s*\(([^)]+)\)/i);
+    if (!m) continue;
+    const range = m[2].trim();
+    // Check if range includes a negative initial value (outflow)
+    // Heuristic: the range should be wide enough (multiple cols) and ideally
+    // the first cell should reference a negative equity contribution
+    const cellsInRange = range.match(/\$?[A-Z]+\$?\d+/g);
+    if (!cellsInRange || cellsInRange.length < 2) {
+      issues.push({
+        severity: 'high',
+        kind: 'irr_range_too_short',
+        location: `${sheetName}!${addr}`,
+        detail: `IRR formula "${cell.formula}" range "${range}" is too short. IRR needs at least an initial outflow + one return period.`,
+      });
+      continue;
+    }
+    // Check if the range starts with a cell that likely contains negative equity
+    const firstCell = cellsInRange[0];
+    const firstFormula = sheetData.cells.get(firstCell)?.formula || '';
+    const hasNegative = /-\s*[A-Z]+|negative|outflow|contribution/i.test(firstFormula + cell.formula);
+    const hasEquityRef = /equity|sponsor|contribution|investment/i.test(firstFormula + cell.formula);
+    if (!hasNegative && !hasEquityRef) {
+      issues.push({
+        severity: 'high',
+        kind: 'irr_missing_initial_outflow',
+        location: `${sheetName}!${addr}`,
+        detail: `IRR formula "${cell.formula}" range "${range}" does not appear to include an initial negative equity outflow. IRR requires a negative cash flow at t=0 (equity invested) to be mathematically valid.`,
+      });
+    }
+  }
+  return issues;
+}
+
+// L19: Exit Analysis — references must point to last operational period, not empty far-right column
+function lintExitAnalysisColumn(sheetName, sheetData, allSheets) {
+  const issues = [];
+  if (!/exit|exit_analysis|exit_.*analysis/i.test(sheetName)) return issues;
+  for (const [addr, cell] of sheetData.cells) {
+    if (!cell.formula) continue;
+    const refs = extractCellRefs(cell.formula);
+    for (const ref of refs) {
+      const refSheetName = ref.sheet || sheetName;
+      const refSheet = allSheets[refSheetName]; if (!refSheet) continue;
+      const refP = splitAddr(ref.addr); if (!refP) continue;
+      const colN = colNum(refP.col);
+      // Only flag refs whose target is actually EMPTY or a zero-stub. A written
+      // formula/value cell near the edge is legitimate (exit quarter IS one of the
+      // last columns) — flagging it was a false positive once density enforcement
+      // started filling rows through the full declared extent.
+      const target = refSheet.cells.get(ref.addr);
+      const isEmpty = !target;
+      const isZeroStub = !!target && !target.formula && (target.value === 0 || target.value === null || target.value === undefined);
+      if (!isEmpty && !isZeroStub) continue;
+      const maxColInRefSheet = Math.max(...Array.from(refSheet.cells.keys()).map(a => {
+        const p = splitAddr(a); return p ? colNum(p.col) : 0;
+      }).filter(n => n > 1));
+      if (colN > maxColInRefSheet - 2 && colN > 20) {
+        issues.push({
+          severity: 'critical',
+          kind: 'exit_analysis_wrong_column',
+          location: `${sheetName}!${addr}`,
+          detail: `Exit Analysis formula "${cell.formula.slice(0,100)}" references ${refSheetName}!${ref.addr} (col ${refP.col}). This column is near or past the edge of data in ${refSheetName} (max col used ~${numToCol(maxColInRefSheet)}). It likely points to an EMPTY cell. Use the LAST OPERATIONAL PERIOD column instead.`,
+        });
+      }
+    }
+  }
+  return issues;
+}
+
 function runFinanceLints(actions, opts = {}) {
   const allSheets = buildSheetIndex(actions);
   const issues = [];
@@ -318,11 +603,52 @@ function runFinanceLints(actions, opts = {}) {
     issues.push(...lintSemanticLabel(sheetName, sheetData, allSheets));
     issues.push(...lintSourcesUses(sheetName, sheetData));
     issues.push(...lintBalanceSheet(sheetName, sheetData));
+    issues.push(...lintTaxNoMaxGuard(sheetName, sheetData));
+    issues.push(...lintDebtScheduleAmort(sheetName, sheetData));
+    issues.push(...lintPnLEBITDA(sheetName, sheetData));
+    issues.push(...lintPnLEBIT(sheetName, sheetData));
+    issues.push(...lintDebtEndingInterest(sheetName, sheetData));
+    issues.push(...lintBalanceSheetCumulative(sheetName, sheetData));
+    issues.push(...lintIRRStructure(sheetName, sheetData));
+    issues.push(...lintExitAnalysisColumn(sheetName, sheetData, allSheets));
   }
   if (opts.expectedSheets) {
     issues.push(...lintMissingSheets(allSheets, opts.expectedSheets));
   }
   return issues;
+}
+
+// AUTO-FIX: wrap tax formula base in MAX(base, 0).
+// Returns count of formulas updated.
+function autoFixTaxMax(actions) {
+  let fixed = 0;
+  const sheets = buildSheetIndex(actions);
+  for (const a of actions) {
+    if (a.type !== 'setCellRange' || !a.cells) continue;
+    const sh = a.sheet || a.sheetName;
+    const sheetData = sheets[sh];
+    if (!sheetData) continue;
+    for (const [addr, spec] of Object.entries(a.cells)) {
+      if (!spec || typeof spec !== 'object' || !spec.formula) continue;
+      const p = splitAddr(addr); if (!p) continue;
+      const localLabel = sheetData.rowLabels.get(p.row);
+      if (!localLabel) continue;
+      if (!/\btax(es)?\b|income tax|imposte|tax expense|tax provision/i.test(localLabel)) continue;
+      if (/tax rate|aliquota/i.test(localLabel)) continue;
+      const f = spec.formula;
+      if (/\bMAX\s*\(|\bIF\s*\(|\bIFERROR\s*\(/i.test(f)) continue;
+      // Recognise simple `= A * B` or `= A * B * C` shape and wrap leftmost ref in MAX(ref,0)
+      const m = f.match(/^=\s*([^*+-/]+?)\s*\*\s*(.+)$/);
+      if (!m) continue;
+      const leftToken = m[1].trim();
+      const rest = m[2].trim();
+      // leftToken should be a single cell ref OR a small expression — only wrap if it's a ref-like atom.
+      if (!/^['A-Za-z0-9_!$]+$/.test(leftToken)) continue;
+      spec.formula = `=MAX(${leftToken},0)*${rest}`;
+      fixed++;
+    }
+  }
+  return fixed;
 }
 
 // AUTO-FIX: IRR/NPV with array literals → unfold the refs into a helper row.
@@ -374,6 +700,63 @@ function autoFixIRRArrayLiterals(actions) {
       }
       spec.formula = newFormula;
       fixed++;
+    }
+  }
+  return fixed;
+}
+
+// AUTO-FIX: Debt Schedule — Ending Balance includes Interest Expense cash.
+// Pattern: =B4+B5+B6 where B5 is Interest Expense → replace with =B4+B6
+function autoFixDebtEndingInterest(actions) {
+  const sheets = buildSheetIndex(actions);
+  let fixed = 0;
+  for (const [sheetName, sheetData] of Object.entries(sheets)) {
+    if (!/debt[_ ]?schedule|debt[_ ]?roll/i.test(sheetName)) continue;
+    // Find interest expense rows
+    let interestRows = [];
+    for (const [row, label] of sheetData.rowLabels) {
+      if (/interest expense|interest.*cash|cash interest/i.test(label.toLowerCase())) interestRows.push(row);
+    }
+    if (interestRows.length === 0) continue;
+    // Find ending balance rows
+    let endingRows = [];
+    for (const [row, label] of sheetData.rowLabels) {
+      if (/ending balance|end balance|principal end/i.test(label.toLowerCase())) endingRows.push(row);
+    }
+    for (const endRow of endingRows) {
+      for (const [addr, cell] of sheetData.cells) {
+        const p = splitAddr(addr); if (!p || p.row !== endRow) continue;
+        if (!cell.formula) continue;
+        // Check if formula references an interest expense row
+        const hasInterestRef = interestRows.some(ir => {
+          const refPat = new RegExp(`[A-Z]+${ir}\\b`, 'i');
+          return refPat.test(cell.formula);
+        });
+        if (!hasInterestRef) continue;
+        // Heuristic: remove the interest expense term from the sum
+        // e.g. =B4+B5+B6 → find which term is the interest ref and remove it
+        for (const ir of interestRows) {
+          const interestPattern = new RegExp(`([+\\-])?([A-Z]+${ir})`, 'i');
+          if (interestPattern.test(cell.formula)) {
+            // Remove the interest term (including its +/-)
+            let newFormula = cell.formula.replace(interestPattern, '');
+            // Clean up leading + or double +-
+            newFormula = newFormula.replace(/^=/, '').replace(/^\+/, '').replace(/\+\+/g, '+').replace(/\+\-/g, '-').replace(/\-\+/g, '-');
+            newFormula = '=' + newFormula;
+            // Apply to the actual action
+            for (const a of actions) {
+              if (a.type !== 'setCellRange' || !a.cells) continue;
+              if ((a.sheet || a.sheetName) !== sheetName) continue;
+              if (a.cells[addr] && typeof a.cells[addr] === 'object') {
+                a.cells[addr].formula = newFormula;
+                fixed++;
+                break;
+              }
+            }
+            break;
+          }
+        }
+      }
     }
   }
   return fixed;
@@ -449,4 +832,4 @@ function autoFixPeriodMismatch(actions) {
   return fixed;
 }
 
-module.exports = { runFinanceLints, autoFixIRRArrayLiterals, autoFixPeriodMismatch, lintSensitivity, lintIRRNPV, lintScenarios, lintPeriodMismatch, lintSemanticLabel };
+module.exports = { runFinanceLints, autoFixIRRArrayLiterals, autoFixPeriodMismatch, autoFixTaxMax, autoFixDebtEndingInterest, lintSensitivity, lintIRRNPV, lintScenarios, lintPeriodMismatch, lintSemanticLabel, lintTaxNoMaxGuard, lintDebtScheduleAmort };
